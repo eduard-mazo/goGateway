@@ -1,0 +1,67 @@
+package api
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jmoiron/sqlx"
+
+	"goGateway/internal/iec104"
+	"goGateway/internal/mqtt"
+	"goGateway/internal/web"
+)
+
+// Deps wire handlers to their notifiers.
+type Deps struct {
+	DB             *sqlx.DB
+	NotifyMQTT     func() // reload MQTT client on cfg/topic change
+	NotifyIEC104   func() // reload IEC 104 server on cfg change
+	NotifyMappings func() // reload mapping cache on mapping change
+
+	MQTT      *mqtt.Manager
+	IEC104    iec104.Server
+	StartedAt time.Time
+}
+
+func NewRouter(d Deps) http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(corsMW)
+
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+
+	r.Route("/api", func(r chi.Router) {
+		r.Route("/devices", (&DeviceHandler{DB: d.DB}).Mount)
+		r.Route("/topics", (&TopicHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
+		r.Route("/mqtt-config", (&MQTTConfigHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
+		r.Route("/iec104-servers", (&IEC104ServersHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
+		r.Route("/mappings", (&MappingHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)
+		r.Route("/history", (&HistoryHandler{DB: d.DB}).Mount)
+		r.Route("/status", (&StatusHandler{DB: d.DB, MQTT: d.MQTT, IEC104: d.IEC104, StartedAt: d.StartedAt}).Mount)
+	})
+
+	// Embedded SPA — serves frontend/dist bundled into the binary.
+	// Must mount last so /api and /health take precedence.
+	r.Mount("/", web.Handler())
+	return r
+}
+
+func corsMW(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", "*")
+		h.Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		h.Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(204)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

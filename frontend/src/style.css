@@ -1,0 +1,255 @@
+/* goGateway — EPM brand operator console.
+   Nunito (rounded geometric, Futura-alt) for UI/display · JetBrains Mono for data.
+   Verde Cítrico (#9FCF67) primary · Verde Bosque (#0D9648) deep · Gris (#A1A1A5) neutral. */
+
+@import url('https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@import "tailwindcss";
+
+@import "tw-animate-css";
+
+@import "shadcn-vue/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* EPM brand palette */
+  --epm-citrico: #9FCF67;
+  --epm-citrico-soft: #D7EBB7;
+  --epm-citrico-deep: #7FB441;
+  --epm-bosque: #0D9648;
+  --epm-bosque-deep: #076B33;
+  --epm-gris: #A1A1A5;
+  --epm-gris-soft: #E8E8EA;
+  --epm-ink: #1C2A20;
+
+  /* Paper canvas — warm ivory tuned toward the citrico family. */
+  --background: #F7F9F2;
+  --foreground: #1C2A20;
+  --card: #FFFFFF;
+  --card-foreground: #1C2A20;
+  --popover: #FFFFFF;
+  --popover-foreground: #1C2A20;
+  --primary: #0D9648;               /* Verde Bosque: deep emphasis, brand anchor */
+  --primary-foreground: #F7F9F2;
+  --secondary: #F1F4EA;
+  --secondary-foreground: #1C2A20;
+  --muted: #F1F4EA;
+  --muted-foreground: #5F6B62;
+  --accent: #9FCF67;                /* Verde Cítrico: vibrant accent */
+  --accent-foreground: #0D9648;
+  --destructive: #D8402A;
+  --destructive-foreground: #FFFFFF;
+  --border: #E4E8DC;
+  --input: #E4E8DC;
+  --ring: #9FCF67;
+  --radius: 0.375rem;               /* flat, squared */
+
+  --signal-ok: #0D9648;
+  --signal-warn: #E8A63D;
+  --signal-fault: #D8402A;
+
+  --grid-line: #E9EEDF;
+
+  --chart-1: #9FCF67;
+  --chart-2: #0D9648;
+  --chart-3: #6EB3D6;
+  --chart-4: #A1A1A5;
+  --chart-5: #E8A63D;
+
+  /* Sidebar — bosque green canvas with citrico sparks. */
+  --sidebar: #0D9648;
+  --sidebar-foreground: #EAF5DE;
+  --sidebar-primary: #9FCF67;
+  --sidebar-primary-foreground: #0D9648;
+  --sidebar-accent: #076B33;
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: #0A7A3A;
+  --sidebar-ring: #9FCF67;
+}
+
+.dark {
+  --background: #0E1712;
+  --foreground: #EEF3E4;
+  --card: #16211A;
+  --card-foreground: #EEF3E4;
+  --popover: #16211A;
+  --popover-foreground: #EEF3E4;
+  --primary: #9FCF67;
+  --primary-foreground: #0E1712;
+  --secondary: #1C2A22;
+  --secondary-foreground: #EEF3E4;
+  --muted: #1C2A22;
+  --muted-foreground: #9FAE9E;
+  --accent: #9FCF67;
+  --accent-foreground: #0E1712;
+  --destructive: #F06452;
+  --destructive-foreground: #0E1712;
+  --border: rgba(159, 207, 103, 0.14);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #9FCF67;
+  --grid-line: rgba(159, 207, 103, 0.07);
+
+  --signal-ok: #9FCF67;
+  --signal-warn: #F0BE5D;
+  --signal-fault: #F06452;
+
+  --sidebar: #0A1510;
+  --sidebar-foreground: #EEF3E4;
+  --sidebar-primary: #9FCF67;
+  --sidebar-primary-foreground: #0A1510;
+  --sidebar-accent: #16241B;
+  --sidebar-accent-foreground: #EEF3E4;
+  --sidebar-border: rgba(159, 207, 103, 0.12);
+  --sidebar-ring: #9FCF67;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-signal-ok: var(--signal-ok);
+  --color-signal-warn: var(--signal-warn);
+  --color-signal-fault: var(--signal-fault);
+  --color-grid-line: var(--grid-line);
+  --color-epm-citrico: var(--epm-citrico);
+  --color-epm-bosque: var(--epm-bosque);
+  --color-epm-gris: var(--epm-gris);
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 3px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 6px);
+  --font-sans: 'Nunito', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Nunito', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html, body, #app {
+    height: 100%;
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01";
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3 {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  h1 { font-size: clamp(1.9rem, 2.4vw + 1rem, 2.9rem); line-height: 1.02; }
+  h2 { font-size: 1.5rem; line-height: 1.1; font-weight: 700; }
+  h3 { font-weight: 700; letter-spacing: -0.01em; }
+
+  code, kbd, samp, pre {
+    font-family: var(--font-mono);
+  }
+}
+
+/* Flat canvas — no gradients, optional fine grid. */
+.bg-grain {
+  background-color: var(--background);
+}
+
+/* Heart-m accent: decorative brand rule. */
+.rule-brand {
+  height: 2px;
+  background: linear-gradient(90deg, var(--epm-bosque) 0%, var(--epm-citrico) 60%, transparent 100%);
+  border-radius: 2px;
+}
+
+/* Status pulse. */
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+  50% { box-shadow: 0 0 0 6px transparent; opacity: .55; }
+}
+.status-dot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+.status-dot-static {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+/* Table row hover — soft citrico wash. */
+.data-row { transition: background-color 120ms ease; }
+.data-row:hover { background: color-mix(in srgb, var(--epm-citrico) 14%, transparent); }
+
+/* Tabular figures for numeric cells. */
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Sidebar collapsed. */
+.sidebar-mini .sidebar-label,
+.sidebar-mini .sidebar-wide-only {
+  display: none;
+}
+
+/* EPM brand utility classes. */
+.text-bosque { color: var(--epm-bosque); }
+.text-citrico { color: var(--epm-citrico); }
+.bg-bosque { background-color: var(--epm-bosque); }
+.bg-citrico { background-color: var(--epm-citrico); }
+.ring-citrico { box-shadow: 0 0 0 2px color-mix(in srgb, var(--epm-citrico) 45%, transparent); }
+
+/* Chip — flat branded container. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: var(--radius);
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+
+/* Card — flat bordered panel, no shadow. */
+.card-soft {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}

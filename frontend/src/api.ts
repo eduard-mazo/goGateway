@@ -1,0 +1,71 @@
+import axios from 'axios'
+
+export const api = axios.create({
+  baseURL: '/api',
+  headers: { 'Content-Type': 'application/json' },
+})
+
+export interface Device {
+  id: number
+  name: string
+  description: string
+  created_at: string
+}
+
+export interface Topic {
+  id: number
+  device_id: number
+  topic: string
+  qos: number
+  enabled: boolean
+}
+
+export interface MQTTConfig {
+  id: number
+  host: string
+  port: number
+  username: string
+  password: string
+  client_id: string
+  use_tls: boolean
+}
+
+// IEC104Server = one passive IEC 60870-5-104 slave endpoint. Multiple rows
+// expose the same point set under different Common ASDU Addresses.
+export interface IEC104Server {
+  id: number
+  name: string
+  listen_addr: string
+  port: number
+  asdu_addr: number
+  k: number
+  w: number
+  t0: number
+  t1: number
+  t2: number
+  t3: number
+  enabled: boolean
+}
+
+export interface SignalMapping {
+  id: number
+  topic_id: number
+  device_name: string
+  variable_type: string
+  characteristic: string
+  json_key: string
+  iec104_type: string
+  ioa: number
+  unit: string
+  scale: number
+  enabled: boolean
+}
+
+export interface History {
+  id: number
+  mapping_id: number
+  signal_key: string
+  value: number
+  quality: number
+  timestamp: string
+}

@@ -1,0 +1,81 @@
+-- SQLite schema for goGateway.
+
+CREATE TABLE IF NOT EXISTS devices (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT DEFAULT '',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS mqtt_config (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    host     TEXT NOT NULL DEFAULT 'localhost',
+    port     INTEGER NOT NULL DEFAULT 1883,
+    username TEXT DEFAULT '',
+    password TEXT DEFAULT '',
+    client_id TEXT DEFAULT 'goGateway',
+    use_tls  INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO mqtt_config (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS topics (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    topic     TEXT NOT NULL,
+    qos       INTEGER NOT NULL DEFAULT 0,
+    enabled   INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (device_id, topic)
+);
+CREATE INDEX IF NOT EXISTS idx_topics_enabled ON topics(enabled);
+
+-- IEC 60870-5-104 slave fleet. One row per passive listener exposed to SCADA.
+-- Each row has its own Common ASDU Address so multiple masters can consume the
+-- same point set under different ASDUs.
+CREATE TABLE IF NOT EXISTS iec104_servers (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL DEFAULT '',
+    listen_addr TEXT NOT NULL DEFAULT '0.0.0.0',
+    port        INTEGER NOT NULL DEFAULT 2404,
+    asdu_addr   INTEGER NOT NULL DEFAULT 1,
+    k           INTEGER NOT NULL DEFAULT 12,
+    w           INTEGER NOT NULL DEFAULT 8,
+    t0          INTEGER NOT NULL DEFAULT 30,
+    t1          INTEGER NOT NULL DEFAULT 15,
+    t2          INTEGER NOT NULL DEFAULT 10,
+    t3          INTEGER NOT NULL DEFAULT 20,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (listen_addr, port)
+);
+INSERT OR IGNORE INTO iec104_servers
+    (id, name, listen_addr, port, asdu_addr, k, w, t0, t1, t2, t3, enabled)
+    VALUES (1, 'default', '0.0.0.0', 2404, 1, 12, 8, 30, 15, 10, 20, 1);
+
+-- Legacy singleton table, retired when multi-server support landed.
+DROP TABLE IF EXISTS iec104_config;
+
+CREATE TABLE IF NOT EXISTS signal_mappings (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id       INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    device_name    TEXT DEFAULT '',
+    variable_type  TEXT DEFAULT '',
+    characteristic TEXT DEFAULT '',
+    json_key       TEXT NOT NULL,
+    iec104_type    TEXT NOT NULL,
+    ioa            INTEGER NOT NULL,
+    unit           TEXT DEFAULT '',
+    scale          REAL NOT NULL DEFAULT 1.0,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (ioa)
+);
+CREATE INDEX IF NOT EXISTS idx_sigmap_topic ON signal_mappings(topic_id);
+
+CREATE TABLE IF NOT EXISTS history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    mapping_id INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
+    signal_key TEXT NOT NULL,
+    value      REAL NOT NULL,
+    quality    INTEGER NOT NULL DEFAULT 0,
+    timestamp  DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_history_mapping_ts ON history(mapping_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_history_ts ON history(timestamp DESC);

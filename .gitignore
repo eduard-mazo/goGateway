@@ -1,0 +1,21 @@
+# Build artefacts
+/gateway
+/gateway.exe
+/gateway.zip
+/backend/bin/
+
+# Generated frontend bundle (built by `make frontend`).
+# backend/internal/web/dist is committed so `go build` works without pnpm.
+/frontend/dist/
+
+# Runtime state
+/gateway.db
+/gateway.db-wal
+/gateway.db-shm
+/backend/gateway.db
+/backend/gateway.db-wal
+/backend/gateway.db-shm
+
+# Misc
+*.log
+.DS_Store
