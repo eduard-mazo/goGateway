@@ -30,22 +30,32 @@ type Topic struct {
 	Enabled  bool   `db:"enabled" json:"enabled"`
 }
 
+// IEC104Gateway = host-wide IEC-104 settings. Singleton (id=1). ListenIP is
+// the local NIC IP that every slave endpoint binds on; SCADA masters reach
+// the gateway at ListenIP:<server.Port>. Use "0.0.0.0" to bind every NIC.
+type IEC104Gateway struct {
+	ID       int64  `db:"id"        json:"id"`
+	ListenIP string `db:"listen_ip" json:"listen_ip"`
+}
+
 // IEC104Server = one passive IEC 60870-5-104 slave endpoint.
 // Multiple rows yield a fleet: each exposes the full point set under its own
-// Common ASDU Address so several SCADA masters can coexist.
+// Common ASDU Address so several SCADA masters can coexist on this gateway.
+// ScadaIPs is a CSV allowlist of remote IPs permitted to complete the TCP
+// handshake — empty = block all.
 type IEC104Server struct {
-	ID         int64  `db:"id"          json:"id"`
-	Name       string `db:"name"        json:"name"`
-	ListenAddr string `db:"listen_addr" json:"listen_addr"`
-	Port       int    `db:"port"        json:"port"`
-	ASDUAddr   int    `db:"asdu_addr"   json:"asdu_addr"`
-	K          int    `db:"k"           json:"k"`
-	W          int    `db:"w"           json:"w"`
-	T0         int    `db:"t0"          json:"t0"`
-	T1         int    `db:"t1"          json:"t1"`
-	T2         int    `db:"t2"          json:"t2"`
-	T3         int    `db:"t3"          json:"t3"`
-	Enabled    bool   `db:"enabled"     json:"enabled"`
+	ID       int64  `db:"id"        json:"id"`
+	Name     string `db:"name"      json:"name"`
+	Port     int    `db:"port"      json:"port"`
+	ASDUAddr int    `db:"asdu_addr" json:"asdu_addr"`
+	ScadaIPs string `db:"scada_ips" json:"scada_ips"`
+	K        int    `db:"k"         json:"k"`
+	W        int    `db:"w"         json:"w"`
+	T0       int    `db:"t0"        json:"t0"`
+	T1       int    `db:"t1"        json:"t1"`
+	T2       int    `db:"t2"        json:"t2"`
+	T3       int    `db:"t3"        json:"t3"`
+	Enabled  bool   `db:"enabled"   json:"enabled"`
 }
 
 // SignalMapping = core row. MQTT key → IEC 104 point.

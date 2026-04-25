@@ -19,7 +19,7 @@ frontend:
 	pnpm --dir frontend install --frozen-lockfile || pnpm --dir frontend install
 	pnpm --dir frontend build
 
-embed:
+embed: frontend
 	rm -rf $(EMBED_DIST)
 	cp -r $(FRONT_DIST) $(EMBED_DIST)
 
@@ -37,5 +37,5 @@ run: build
 	GW_HTTP=$(HTTP) GW_IEC_DEBUG=$(DEBUG) ./$(BIN)
 
 clean:
-	rm -f $(BIN)
+	rm -f $(BIN) $(BIN).exe
 	rm -rf $(EMBED_DIST) $(FRONT_DIST)

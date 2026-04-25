@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, reactive } from 'vue'
 import { toast } from 'vue-sonner'
-import { api, type IEC104Server } from '@/api'
+import { api, type IEC104Server, type IEC104Gateway } from '@/api'
 import { useStatus } from '@/composables/useStatus'
 import StatusPill from '@/components/StatusPill.vue'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -13,16 +13,59 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger,
 } from '@/components/ui/dialog'
-import { Server, Save, RefreshCw, Plus, Pencil, Trash2 } from 'lucide-vue-next'
+import { Server, Save, RefreshCw, Plus, Pencil, Trash2, Globe, ShieldCheck, ShieldAlert } from 'lucide-vue-next'
 
 const { status } = useStatus()
 
 const servers = ref<IEC104Server[]>([])
 const loading = ref(false)
 
+// --- Gateway-wide listen IP -----------------------------------------------
+
+const gateway = reactive<IEC104Gateway>({ id: 1, listen_ip: '0.0.0.0' })
+const gatewayDirty = ref(false)
+const savingGateway = ref(false)
+
+async function loadGateway() {
+  try {
+    const { data } = await api.get<IEC104Gateway>('/iec104-gateway')
+    Object.assign(gateway, data)
+    gatewayDirty.value = false
+  } catch (e: any) {
+    toast.error('Gateway: ' + (e?.message ?? e))
+  }
+}
+
+function isValidIP(s: string): boolean {
+  // IPv4 dotted-quad or IPv6 (loose). Hostnames not allowed — kernel needs
+  // a numeric bind address.
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(s)) {
+    return s.split('.').every(o => { const n = +o; return n >= 0 && n <= 255 })
+  }
+  return /^[0-9a-fA-F:]+$/.test(s) && s.includes(':')
+}
+
+async function saveGateway() {
+  const ip = gateway.listen_ip.trim() || '0.0.0.0'
+  if (!isValidIP(ip)) { toast.error('Listen IP must be a numeric IPv4/IPv6 address'); return }
+  savingGateway.value = true
+  try {
+    const { data } = await api.put<IEC104Gateway>('/iec104-gateway', { ...gateway, listen_ip: ip })
+    Object.assign(gateway, data)
+    gatewayDirty.value = false
+    toast.success('Gateway listen IP saved · fleet restarted')
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error ?? e?.message ?? 'Save failed')
+  } finally {
+    savingGateway.value = false
+  }
+}
+
+// --- Per-server CRUD ------------------------------------------------------
+
 function empty(): IEC104Server {
   return {
-    id: 0, name: '', listen_addr: '0.0.0.0', port: 2404, asdu_addr: 1,
+    id: 0, name: '', port: 2404, asdu_addr: 1, scada_ips: '',
     k: 12, w: 8, t0: 30, t1: 15, t2: 10, t3: 20, enabled: true,
   }
 }
@@ -46,7 +89,6 @@ async function reload() {
 
 function openCreate() {
   Object.assign(editing, empty())
-  // Bump port + ASDU to avoid collision with existing rows.
   const maxPort = servers.value.reduce((m, s) => Math.max(m, s.port), 2403)
   const maxAsdu = servers.value.reduce((m, s) => Math.max(m, s.asdu_addr), 0)
   editing.port = maxPort + 1
@@ -60,14 +102,18 @@ function openEdit(s: IEC104Server) {
   dialogOpen.value = true
 }
 
+function parseIPs(csv: string): string[] {
+  return csv.split(',').map(s => s.trim()).filter(Boolean)
+}
+
 function validate(): string | null {
-  if (!editing.listen_addr.trim()) return 'Listen address required'
   if (!Number.isInteger(editing.port) || editing.port <= 0 || editing.port > 65535) return 'Port must be 1..65535'
   if (!Number.isInteger(editing.asdu_addr) || editing.asdu_addr <= 0) return 'ASDU addr must be positive'
-  const dup = servers.value.find(
-    s => s.listen_addr === editing.listen_addr && s.port === editing.port && s.id !== editing.id,
-  )
-  if (dup) return `${editing.listen_addr}:${editing.port} already used by #${dup.id}`
+  const dup = servers.value.find(s => s.port === editing.port && s.id !== editing.id)
+  if (dup) return `Port ${editing.port} already used by #${dup.id} (${dup.name || 'unnamed'})`
+  for (const ip of parseIPs(editing.scada_ips)) {
+    if (!isValidIP(ip)) return `SCADA IP invalid: "${ip}"`
+  }
   return null
 }
 
@@ -100,7 +146,7 @@ async function toggleEnabled(s: IEC104Server) {
 }
 
 async function del(s: IEC104Server) {
-  if (!confirm(`Delete IEC-104 server "${s.name}" (${s.listen_addr}:${s.port})?`)) return
+  if (!confirm(`Delete IEC-104 server "${s.name}" (port ${s.port})?`)) return
   try {
     await api.delete(`/iec104-servers/${s.id}`)
     await reload()
@@ -108,7 +154,7 @@ async function del(s: IEC104Server) {
   } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
 }
 
-onMounted(reload)
+onMounted(() => { loadGateway(); reload() })
 
 const fleetState = computed<'ok' | 'warn' | 'fault' | 'idle'>(() => {
   const list = status.value?.iec104.servers ?? []
@@ -124,6 +170,8 @@ const fleetState = computed<'ok' | 'warn' | 'fault' | 'idle'>(() => {
 function runtimeOf(id: number) {
   return status.value?.iec104.servers.find(s => s.id === id)
 }
+
+function chips(csv: string): string[] { return parseIPs(csv) }
 </script>
 
 <template>
@@ -145,10 +193,9 @@ function runtimeOf(id: number) {
             {{ servers.length }} configured · {{ servers.filter(s => s.enabled).length }} enabled
           </div>
           <p class="mt-3 text-sm text-muted-foreground max-w-xl">
-            Each row is a passive listener. SCADA masters connect; the gateway
-            never dials out. Every server exposes the same point set under its
-            own Common ASDU Address, so multiple masters can coexist without
-            collision.
+            The gateway is strictly passive. SCADA masters dial in; the gateway never dials out.
+            Each row below is a separate listener (port + ASDU + SCADA-IP allowlist) sharing the
+            same point set, all bound on the gateway-wide listen IP defined in the next card.
           </p>
         </div>
         <div class="col-span-12 md:col-span-4 flex flex-col gap-3 md:items-end">
@@ -166,11 +213,50 @@ function runtimeOf(id: number) {
       </div>
     </section>
 
+    <!-- Gateway-wide listen IP -->
+    <Card class="card-soft">
+      <CardHeader>
+        <div class="flex items-center gap-2">
+          <Globe class="h-5 w-5 text-[color:var(--epm-bosque)]" />
+          <CardTitle class="font-extrabold tracking-tight">Gateway listen IP</CardTitle>
+        </div>
+        <CardDescription>
+          Local NIC IP this gateway binds for every slave endpoint. Use
+          <code class="font-mono">0.0.0.0</code> to bind every interface.
+          The IP must already exist on this host — the kernel will reject otherwise.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div class="flex flex-col md:flex-row md:items-end gap-4">
+          <div class="space-y-1.5 flex-1 max-w-md">
+            <Label>Listen IP</Label>
+            <Input
+              v-model="gateway.listen_ip"
+              class="font-mono"
+              placeholder="0.0.0.0"
+              @input="gatewayDirty = true"
+            />
+            <p class="text-xs text-muted-foreground">
+              Runtime value: <code class="font-mono">{{ status?.iec104.listen_ip || '—' }}</code>
+            </p>
+          </div>
+          <Button :disabled="!gatewayDirty || savingGateway" @click="saveGateway"
+                  class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm">
+            <Save class="h-4 w-4 mr-2" />
+            {{ savingGateway ? 'Saving…' : 'Save listen IP' }}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- Per-server CRUD -->
     <Card class="card-soft">
       <CardHeader class="flex flex-row items-center justify-between">
         <div>
           <CardTitle class="font-extrabold tracking-tight">Servers</CardTitle>
-          <CardDescription>One listener per row. Each row has its own Common ASDU.</CardDescription>
+          <CardDescription>
+            One listener per row. Each row has its own port, Common ASDU and SCADA-IP allowlist.
+          </CardDescription>
         </div>
         <div class="flex items-center gap-2">
           <Button variant="outline" @click="reload" class="rounded-sm">
@@ -187,28 +273,35 @@ function runtimeOf(id: number) {
               <DialogHeader>
                 <DialogTitle>{{ isEdit ? `Edit server #${editing.id}` : 'New IEC-104 server' }}</DialogTitle>
                 <DialogDescription>
-                  Passive slave endpoint. SCADA masters connect to {{ editing.listen_addr || '0.0.0.0' }}:{{ editing.port || 2404 }}
+                  Passive slave endpoint. SCADA masters connect to {{ gateway.listen_ip || '0.0.0.0' }}:{{ editing.port || 2404 }}
                   and read the gateway under ASDU {{ editing.asdu_addr || 1 }}.
                 </DialogDescription>
               </DialogHeader>
 
               <div class="grid grid-cols-6 gap-x-4 gap-y-3 py-2">
-                <div class="col-span-6 space-y-1.5">
+                <div class="col-span-4 space-y-1.5">
                   <Label>Name</Label>
                   <Input v-model="editing.name" placeholder="control-center-a" />
-                </div>
-
-                <div class="col-span-3 space-y-1.5">
-                  <Label>Listen address</Label>
-                  <Input v-model="editing.listen_addr" class="font-mono" placeholder="0.0.0.0" />
                 </div>
                 <div class="col-span-1 space-y-1.5">
                   <Label>Port</Label>
                   <Input v-model.number="editing.port" type="number" />
                 </div>
-                <div class="col-span-2 space-y-1.5">
-                  <Label>Common ASDU addr</Label>
+                <div class="col-span-1 space-y-1.5">
+                  <Label>Common ASDU</Label>
                   <Input v-model.number="editing.asdu_addr" type="number" />
+                </div>
+
+                <div class="col-span-6 space-y-1.5">
+                  <Label class="flex items-center gap-1">
+                    <ShieldCheck class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" />
+                    SCADA IP allowlist
+                  </Label>
+                  <Input v-model="editing.scada_ips" class="font-mono" placeholder="10.13.13.25, 10.117.18.23" />
+                  <p class="text-xs text-muted-foreground">
+                    Comma-separated. Only these remote IPs may complete the TCP handshake.
+                    Empty = block all (fail closed).
+                  </p>
                 </div>
 
                 <div class="col-span-6 text-[10px] uppercase tracking-[0.18em] font-bold text-muted-foreground mt-2">
@@ -262,9 +355,9 @@ function runtimeOf(id: number) {
           <TableHeader>
             <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)]">
               <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Name</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Endpoint</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Port</TableHead>
               <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">ASDU</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Timers (k / w / t1 / t2 / t3)</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">SCADA allowlist</TableHead>
               <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Clients</TableHead>
               <TableHead class="w-24 text-[10px] uppercase tracking-[0.2em] font-bold">Status</TableHead>
               <TableHead class="w-20 text-[10px] uppercase tracking-[0.2em] font-bold">On</TableHead>
@@ -274,10 +367,16 @@ function runtimeOf(id: number) {
           <TableBody>
             <TableRow v-for="s in servers" :key="s.id" class="data-row border-b border-border/60">
               <TableCell class="font-semibold">{{ s.name || '—' }}</TableCell>
-              <TableCell class="font-mono text-xs">{{ s.listen_addr }}:{{ s.port }}</TableCell>
+              <TableCell class="font-mono text-xs">{{ s.port }}</TableCell>
               <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-bosque)]">{{ s.asdu_addr }}</TableCell>
-              <TableCell class="font-mono text-xs text-muted-foreground">
-                {{ s.k }} / {{ s.w }} / {{ s.t1 }} / {{ s.t2 }} / {{ s.t3 }}
+              <TableCell>
+                <div v-if="chips(s.scada_ips).length" class="flex flex-wrap gap-1">
+                  <span v-for="ip in chips(s.scada_ips)" :key="ip"
+                        class="chip font-mono text-[11px]">{{ ip }}</span>
+                </div>
+                <span v-else class="inline-flex items-center gap-1 text-xs text-[color:var(--destructive)] font-semibold">
+                  <ShieldAlert class="h-3.5 w-3.5" /> empty — blocks all
+                </span>
               </TableCell>
               <TableCell class="font-mono text-xs">{{ runtimeOf(s.id)?.clients ?? 0 }}</TableCell>
               <TableCell>

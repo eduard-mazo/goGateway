@@ -31,14 +31,11 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// IEC 60870-5-104 passive fleet. One Manager owns N slave endpoints;
-	// each row in iec104_servers is a listener with its own ASDU address.
+	// IEC 60870-5-104 passive fleet. One Manager owns N slave endpoints; all
+	// share the gateway-wide listen IP from iec104_gateway. Each row in
+	// iec104_servers is a port + ASDU + SCADA-IP allowlist.
 	iecMgr := iec104.NewManager(log.Default())
-	if servers, err := worker.LoadIEC104Servers(database); err == nil {
-		if err := iecMgr.Reload(servers); err != nil {
-			log.Printf("iec104 reload: %v", err)
-		}
-	} else {
+	if err := loadIEC104(database, iecMgr); err != nil {
 		log.Printf("iec104 load: %v", err)
 	}
 	if err := iecMgr.Start(); err != nil {
@@ -69,10 +66,8 @@ func main() {
 		DB:         database,
 		NotifyMQTT: mqttMgr.Notify,
 		NotifyIEC104: func() {
-			if servers, err := worker.LoadIEC104Servers(database); err == nil {
-				if err := iecMgr.Reload(servers); err != nil {
-					log.Printf("iec104 reload: %v", err)
-				}
+			if err := loadIEC104(database, iecMgr); err != nil {
+				log.Printf("iec104 reload: %v", err)
 			}
 		},
 		NotifyMappings: mqttMgr.Notify, // mapping change = resubscribe + refresh cache
@@ -122,6 +117,21 @@ func main() {
 	}
 
 	closeDatabase(database)
+}
+
+// loadIEC104 reloads the manager from DB: gateway-wide listen IP + every
+// slave row. Bind errors per server are logged inside the manager and not
+// fatal — a misconfigured row should not bring the gateway down.
+func loadIEC104(database *sqlx.DB, mgr *iec104.Manager) error {
+	gw, err := worker.LoadIEC104Gateway(database)
+	if err != nil {
+		return err
+	}
+	servers, err := worker.LoadIEC104Servers(database)
+	if err != nil {
+		return err
+	}
+	return mgr.Reload(gw, servers)
 }
 
 // closeDatabase checkpoints the WAL into the main DB file and closes the

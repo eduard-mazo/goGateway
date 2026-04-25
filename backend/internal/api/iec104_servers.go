@@ -1,8 +1,11 @@
 package api
 
 import (
+	"errors"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
@@ -18,7 +21,7 @@ type IEC104ServersHandler struct {
 	Notify func()
 }
 
-const iec104Cols = `id,name,listen_addr,port,asdu_addr,k,w,t0,t1,t2,t3,enabled`
+const iec104Cols = `id,name,port,asdu_addr,scada_ips,k,w,t0,t1,t2,t3,enabled`
 
 func (h *IEC104ServersHandler) Mount(r chi.Router) {
 	r.Get("/", h.list)
@@ -60,9 +63,13 @@ func (h *IEC104ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applyServerDefaults(&s)
+	if err := validateServer(&s); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	res, err := h.DB.Exec(
-		`INSERT INTO iec104_servers(name,listen_addr,port,asdu_addr,k,w,t0,t1,t2,t3,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		s.Name, s.ListenAddr, s.Port, s.ASDUAddr, s.K, s.W, s.T0, s.T1, s.T2, s.T3, s.Enabled)
+		`INSERT INTO iec104_servers(name,port,asdu_addr,scada_ips,k,w,t0,t1,t2,t3,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		s.Name, s.Port, s.ASDUAddr, s.ScadaIPs, s.K, s.W, s.T0, s.T1, s.T2, s.T3, s.Enabled)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -80,9 +87,13 @@ func (h *IEC104ServersHandler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applyServerDefaults(&s)
+	if err := validateServer(&s); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if _, err := h.DB.Exec(
-		`UPDATE iec104_servers SET name=?,listen_addr=?,port=?,asdu_addr=?,k=?,w=?,t0=?,t1=?,t2=?,t3=?,enabled=? WHERE id=?`,
-		s.Name, s.ListenAddr, s.Port, s.ASDUAddr, s.K, s.W, s.T0, s.T1, s.T2, s.T3, s.Enabled, id); err != nil {
+		`UPDATE iec104_servers SET name=?,port=?,asdu_addr=?,scada_ips=?,k=?,w=?,t0=?,t1=?,t2=?,t3=?,enabled=? WHERE id=?`,
+		s.Name, s.Port, s.ASDUAddr, s.ScadaIPs, s.K, s.W, s.T0, s.T1, s.T2, s.T3, s.Enabled, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -103,9 +114,6 @@ func (h *IEC104ServersHandler) delete(w http.ResponseWriter, r *http.Request) {
 
 // applyServerDefaults backfills IEC-104 §5 defaults for any zero-valued knob.
 func applyServerDefaults(s *models.IEC104Server) {
-	if s.ListenAddr == "" {
-		s.ListenAddr = "0.0.0.0"
-	}
 	if s.Port == 0 {
 		s.Port = 2404
 	}
@@ -130,4 +138,46 @@ func applyServerDefaults(s *models.IEC104Server) {
 	if s.T3 == 0 {
 		s.T3 = 20
 	}
+	s.ScadaIPs = canonicalIPCSV(s.ScadaIPs)
+}
+
+// validateServer enforces port range and SCADA IP parseability. Empty
+// allowlist is allowed at the API layer (server logs a warning + rejects all
+// connections) so that operators can disable a row by clearing IPs.
+func validateServer(s *models.IEC104Server) error {
+	if s.Port < 1 || s.Port > 65535 {
+		return errors.New("port must be 1..65535")
+	}
+	if s.ASDUAddr < 1 {
+		return errors.New("asdu_addr must be >= 1")
+	}
+	for _, raw := range strings.Split(s.ScadaIPs, ",") {
+		t := strings.TrimSpace(raw)
+		if t == "" {
+			continue
+		}
+		if net.ParseIP(t) == nil {
+			return errors.New("scada_ips: invalid IP " + strconv.Quote(t))
+		}
+	}
+	return nil
+}
+
+// canonicalIPCSV normalises whitespace and IP form (e.g. ::ffff:0:0) and
+// drops empty entries. Invalid entries pass through; validateServer rejects.
+func canonicalIPCSV(csv string) string {
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, raw := range parts {
+		t := strings.TrimSpace(raw)
+		if t == "" {
+			continue
+		}
+		if ip := net.ParseIP(t); ip != nil {
+			out = append(out, ip.String())
+		} else {
+			out = append(out, t)
+		}
+	}
+	return strings.Join(out, ",")
 }

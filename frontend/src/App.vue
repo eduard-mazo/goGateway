@@ -58,10 +58,10 @@ const iecText = computed(() => {
   if (!status.value) return '—'
   const s = status.value.iec104
   const servers = s.servers ?? []
-  if (!servers.length) return 'no endpoints'
-  const first = servers[0]
-  if (servers.length === 1) return `${first.listen}:${first.port} · ASDU ${first.asdu_addr}`
-  return `${servers.length} endpoints · ASDU ${servers.map(x => x.asdu_addr).join(',')}`
+  const ip = s.listen_ip || '0.0.0.0'
+  if (!servers.length) return `${ip} · no endpoints`
+  if (servers.length === 1) return `${ip}:${servers[0].port} · ASDU ${servers[0].asdu_addr}`
+  return `${ip} · ${servers.length} endpoints · ASDU ${servers.map(x => x.asdu_addr).join(',')}`
 })
 
 function fmtUptime(s: number) {

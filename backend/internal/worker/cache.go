@@ -91,6 +91,13 @@ func LoadMQTTConfig(db *sqlx.DB) (models.MQTTConfig, error) {
 // LoadIEC104Servers = active + disabled rows, ordered by id.
 func LoadIEC104Servers(db *sqlx.DB) ([]models.IEC104Server, error) {
 	var out []models.IEC104Server
-	err := db.Select(&out, `SELECT id,name,listen_addr,port,asdu_addr,k,w,t0,t1,t2,t3,enabled FROM iec104_servers ORDER BY id`)
+	err := db.Select(&out, `SELECT id,name,port,asdu_addr,scada_ips,k,w,t0,t1,t2,t3,enabled FROM iec104_servers ORDER BY id`)
 	return out, err
+}
+
+// LoadIEC104Gateway = singleton row. Returns the seeded default on a fresh DB.
+func LoadIEC104Gateway(db *sqlx.DB) (models.IEC104Gateway, error) {
+	var g models.IEC104Gateway
+	err := db.Get(&g, `SELECT id, listen_ip FROM iec104_gateway WHERE id=1`)
+	return g, err
 }

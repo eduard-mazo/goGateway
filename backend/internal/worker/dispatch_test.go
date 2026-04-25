@@ -22,7 +22,9 @@ type fakeSrv struct{ points []iec104.Point }
 func (f *fakeSrv) Start() error                       { return nil }
 func (f *fakeSrv) Stop() error                        { return nil }
 func (f *fakeSrv) Dispatch(p iec104.Point)            { f.points = append(f.points, p) }
-func (f *fakeSrv) Reload(_ []models.IEC104Server) error { return nil }
+func (f *fakeSrv) Reload(_ models.IEC104Gateway, _ []models.IEC104Server) error {
+	return nil
+}
 func (f *fakeSrv) Status() iec104.Status                { return iec104.Status{} }
 func (f *fakeSrv) Snapshot() []iec104.Point           { return f.points }
 

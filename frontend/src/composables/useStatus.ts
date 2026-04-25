@@ -11,7 +11,7 @@ export interface MQTTStatus {
 export interface IEC104ServerStatus {
   id: number
   name: string
-  listen: string
+  listen: string     // gateway-wide bind IP (mirrored from fleet)
   port: number
   asdu_addr: number
   clients: number
@@ -20,6 +20,7 @@ export interface IEC104ServerStatus {
 }
 export interface IEC104Status {
   running: boolean   // any instance is up
+  listen_ip: string  // gateway-wide bind IP
   points: number     // cached points (shared across fleet)
   clients: number    // total clients across fleet
   servers: IEC104ServerStatus[]

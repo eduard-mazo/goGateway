@@ -28,27 +28,37 @@ CREATE TABLE IF NOT EXISTS topics (
 );
 CREATE INDEX IF NOT EXISTS idx_topics_enabled ON topics(enabled);
 
--- IEC 60870-5-104 slave fleet. One row per passive listener exposed to SCADA.
--- Each row has its own Common ASDU Address so multiple masters can consume the
--- same point set under different ASDUs.
+-- IEC 60870-5-104 gateway-wide settings. Singleton (id=1). The listen_ip is
+-- the IP this host binds on for ALL slave endpoints; SCADA masters connect to
+-- listen_ip:<port-of-server-row>. Use 0.0.0.0 to bind every NIC.
+CREATE TABLE IF NOT EXISTS iec104_gateway (
+    id        INTEGER PRIMARY KEY CHECK (id = 1),
+    listen_ip TEXT    NOT NULL DEFAULT '0.0.0.0'
+);
+INSERT OR IGNORE INTO iec104_gateway (id, listen_ip) VALUES (1, '0.0.0.0');
+
+-- IEC 60870-5-104 slave fleet. One row per passive listener (port). Each row
+-- carries its own Common ASDU Address so multiple SCADA masters can read the
+-- gateway under different ASDUs. scada_ips is a CSV allowlist: only those
+-- remote IPs may complete the TCP handshake. Empty allowlist = block all.
 CREATE TABLE IF NOT EXISTS iec104_servers (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL DEFAULT '',
-    listen_addr TEXT NOT NULL DEFAULT '0.0.0.0',
     port        INTEGER NOT NULL DEFAULT 2404,
     asdu_addr   INTEGER NOT NULL DEFAULT 1,
+    scada_ips   TEXT NOT NULL DEFAULT '',
     k           INTEGER NOT NULL DEFAULT 12,
     w           INTEGER NOT NULL DEFAULT 8,
     t0          INTEGER NOT NULL DEFAULT 30,
     t1          INTEGER NOT NULL DEFAULT 15,
     t2          INTEGER NOT NULL DEFAULT 10,
     t3          INTEGER NOT NULL DEFAULT 20,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    UNIQUE (listen_addr, port)
+    enabled     INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (port)
 );
 INSERT OR IGNORE INTO iec104_servers
-    (id, name, listen_addr, port, asdu_addr, k, w, t0, t1, t2, t3, enabled)
-    VALUES (1, 'default', '0.0.0.0', 2404, 1, 12, 8, 30, 15, 10, 20, 1);
+    (id, name, port, asdu_addr, scada_ips, k, w, t0, t1, t2, t3, enabled)
+    VALUES (1, 'default', 2404, 1, '', 12, 8, 30, 15, 10, 20, 0);
 
 -- Legacy singleton table, retired when multi-server support landed.
 DROP TABLE IF EXISTS iec104_config;

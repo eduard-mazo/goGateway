@@ -69,10 +69,11 @@ const iecState = computed<'ok' | 'warn' | 'fault' | 'idle'>(() => {
 })
 const iecSummary = computed(() => {
   const list = iecServers.value
-  if (!list.length) return '—'
-  if (list.length === 1) return `${list[0].listen}:${list[0].port}`
+  const ip = status.value?.iec104.listen_ip || '0.0.0.0'
+  if (!list.length) return ip
+  if (list.length === 1) return `${ip}:${list[0].port}`
   const running = list.filter(s => s.running).length
-  return `${running}/${list.length} running`
+  return `${ip} · ${running}/${list.length} running`
 })
 function fmt(ts: string) { try { return new Date(ts).toLocaleTimeString() } catch { return ts } }
 function fmtAgo(ts?: string | null) {

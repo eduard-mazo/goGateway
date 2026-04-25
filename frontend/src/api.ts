@@ -30,14 +30,22 @@ export interface MQTTConfig {
   use_tls: boolean
 }
 
+// IEC104Gateway = host-wide IEC-104 settings. Singleton.
+export interface IEC104Gateway {
+  id: number
+  listen_ip: string
+}
+
 // IEC104Server = one passive IEC 60870-5-104 slave endpoint. Multiple rows
-// expose the same point set under different Common ASDU Addresses.
+// expose the same point set under different Common ASDU Addresses. The bind
+// IP is gateway-wide (see IEC104Gateway). scada_ips is a CSV allowlist of
+// remote IPs permitted to connect; empty = block all.
 export interface IEC104Server {
   id: number
   name: string
-  listen_addr: string
   port: number
   asdu_addr: number
+  scada_ips: string
   k: number
   w: number
   t0: number

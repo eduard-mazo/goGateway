@@ -2,13 +2,17 @@
 //
 // The gateway is strictly PASSIVE: each NativeServer binds a TCP listener and
 // waits for SCADA masters to connect. No outbound connections are initiated by
-// this package. A Manager owns N NativeServers so the same point set can be
-// exposed to multiple masters under different Common ASDU Addresses.
+// this package. A Manager owns N NativeServers, all bound on a gateway-wide
+// listen IP, so the same point set can be exposed to multiple masters under
+// different Common ASDU Addresses (one per row).
+//
+// Per-server SCADA IP allowlist: Accept rejects any remote whose IP is not in
+// cfg.ScadaIPs (CSV). An empty allowlist rejects everything — fail closed.
 //
 // Scope: monitoring-direction (T1 path) only. Supports STARTDT/STOPDT/TESTFR,
 // S-frame ACK, t2/t3 timers, k-window backpressure, General Interrogation
 // (C_IC_NA_1 station, QOI=20), and encoders for the measurement type IDs
-// listed in ValidateType.
+// handled in encodeInfoObject.
 package iec104
 
 import (
@@ -22,6 +26,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,10 +128,11 @@ type ServerStatus struct {
 
 // Status = fleet summary returned by Manager.Status.
 type Status struct {
-	Running bool           `json:"running"`  // any instance up
-	Points  int            `json:"points"`   // cached points (shared)
-	Clients int            `json:"clients"`  // sum across instances
-	Servers []ServerStatus `json:"servers"`
+	Running  bool           `json:"running"`   // any instance up
+	ListenIP string         `json:"listen_ip"` // gateway-wide bind IP
+	Points   int            `json:"points"`    // cached points (shared)
+	Clients  int            `json:"clients"`   // sum across instances
+	Servers  []ServerStatus `json:"servers"`
 }
 
 // Server is the fleet-level facade consumed by MQTT/API layers.
@@ -134,7 +140,7 @@ type Server interface {
 	Start() error
 	Stop() error
 	Dispatch(p Point)
-	Reload(cfgs []models.IEC104Server) error
+	Reload(gw models.IEC104Gateway, cfgs []models.IEC104Server) error
 	Status() Status
 	Snapshot() []Point
 }
@@ -145,7 +151,9 @@ type Server interface {
 type NativeServer struct {
 	mu       sync.RWMutex
 	cfg      models.IEC104Server
-	points   *pointStore           // shared snapshot of latest values
+	listenIP string // gateway-wide bind IP, set by Manager before Start
+	allow    map[string]struct{} // remote-IP allowlist parsed from cfg.ScadaIPs
+	points   *pointStore         // shared snapshot of latest values
 	clients  map[*clientConn]struct{}
 	listener net.Listener
 	log      *log.Logger
@@ -205,10 +213,20 @@ func NewNativeServer(l *log.Logger, points *pointStore) *NativeServer {
 	}
 }
 
-// applyConfig sets the endpoint parameters. Not safe to call while running.
+// applyConfig sets the endpoint parameters and refreshes the allowlist. Safe
+// to call while running — running connections keep their snapshot, new ones
+// see the new allowlist on Accept.
 func (s *NativeServer) applyConfig(cfg models.IEC104Server) {
 	s.mu.Lock()
 	s.cfg = cfg
+	s.allow = parseAllowlist(cfg.ScadaIPs)
+	s.mu.Unlock()
+}
+
+// setListenIP updates the gateway-wide bind IP used on the next Start.
+func (s *NativeServer) setListenIP(ip string) {
+	s.mu.Lock()
+	s.listenIP = ip
 	s.mu.Unlock()
 }
 
@@ -218,7 +236,7 @@ func (s *NativeServer) Status() ServerStatus {
 	return ServerStatus{
 		ID:       s.cfg.ID,
 		Name:     s.cfg.Name,
-		Listen:   s.cfg.ListenAddr,
+		Listen:   s.listenIP,
 		Port:     s.cfg.Port,
 		ASDUAddr: s.cfg.ASDUAddr,
 		Clients:  len(s.clients),
@@ -233,7 +251,11 @@ func (s *NativeServer) Start() error {
 		s.mu.Unlock()
 		return errors.New("iec104: already running")
 	}
-	addr := fmt.Sprintf("%s:%d", s.cfg.ListenAddr, s.cfg.Port)
+	ip := s.listenIP
+	if ip == "" {
+		ip = "0.0.0.0"
+	}
+	addr := fmt.Sprintf("%s:%d", ip, s.cfg.Port)
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		s.mu.Unlock()
@@ -244,13 +266,17 @@ func (s *NativeServer) Start() error {
 	s.quit = make(chan struct{})
 	name := s.cfg.Name
 	asdu := s.cfg.ASDUAddr
+	allowCount := len(s.allow)
 	s.mu.Unlock()
 
 	dbgState := "off"
 	if debug {
 		dbgState = "on"
 	}
-	s.log.Printf("iec104[%s]: listening on %s (ASDU=%d, frame-trace=%s)", name, addr, asdu, dbgState)
+	if allowCount == 0 {
+		s.log.Printf("iec104[%s]: WARNING empty SCADA allowlist — all incoming connections will be rejected", name)
+	}
+	s.log.Printf("iec104[%s]: listening on %s (ASDU=%d, allowlist=%d, frame-trace=%s)", name, addr, asdu, allowCount, dbgState)
 	s.wg.Add(1)
 	go s.acceptLoop(l)
 	return nil
@@ -323,11 +349,19 @@ func (s *NativeServer) acceptLoop(l net.Listener) {
 				continue
 			}
 		}
-		s.log.Printf("iec104[%s]: TCP accept from %s (awaiting STARTDT)", s.cfg.Name, conn.RemoteAddr())
 		// Snapshot cfg so per-connection timers are race-free against Reload.
 		s.mu.RLock()
 		cfgSnap := s.cfg
+		allowSnap := s.allow
 		s.mu.RUnlock()
+
+		remoteIP := remoteHost(conn.RemoteAddr())
+		if !allowed(allowSnap, remoteIP) {
+			s.log.Printf("iec104[%s]: REJECT %s (not in SCADA allowlist)", cfgSnap.Name, conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
+		s.log.Printf("iec104[%s]: TCP accept from %s (awaiting STARTDT)", cfgSnap.Name, conn.RemoteAddr())
 		cc := newClientConn(s, conn, cfgSnap)
 		s.mu.Lock()
 		s.clients[cc] = struct{}{}
@@ -338,6 +372,44 @@ func (s *NativeServer) acceptLoop(l net.Listener) {
 			cc.run()
 		}()
 	}
+}
+
+// parseAllowlist turns a CSV string into a set of canonical IP strings.
+// Invalid entries are dropped (caller logs at start time via allowCount).
+func parseAllowlist(csv string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, raw := range strings.Split(csv, ",") {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			continue
+		}
+		out[ip.String()] = struct{}{}
+	}
+	return out
+}
+
+func remoteHost(addr net.Addr) string {
+	ta, ok := addr.(*net.TCPAddr)
+	if !ok {
+		host, _, err := net.SplitHostPort(addr.String())
+		if err != nil {
+			return ""
+		}
+		return host
+	}
+	return ta.IP.String()
+}
+
+func allowed(set map[string]struct{}, ip string) bool {
+	if len(set) == 0 || ip == "" {
+		return false
+	}
+	_, ok := set[ip]
+	return ok
 }
 
 // --- Per-connection state -------------------------------------------------

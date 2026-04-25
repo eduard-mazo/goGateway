@@ -40,6 +40,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Route("/devices", (&DeviceHandler{DB: d.DB}).Mount)
 		r.Route("/topics", (&TopicHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
 		r.Route("/mqtt-config", (&MQTTConfigHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
+		r.Route("/iec104-gateway", (&IEC104GatewayHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
 		r.Route("/iec104-servers", (&IEC104ServersHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
 		r.Route("/mappings", (&MappingHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)
 		r.Route("/history", (&HistoryHandler{DB: d.DB}).Mount)

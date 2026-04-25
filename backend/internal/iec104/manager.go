@@ -9,16 +9,18 @@ import (
 )
 
 // Manager owns a fleet of passive NativeServer instances. Each row in the
-// iec104_servers table becomes one listener; Dispatch broadcasts every point
-// to every enabled server so each SCADA master sees the gateway under its
-// own Common ASDU Address. Points are cached in a shared store.
+// iec104_servers table becomes one listener bound on the gateway-wide listen
+// IP from iec104_gateway. Dispatch broadcasts every point to every enabled
+// server so each SCADA master sees the gateway under its own Common ASDU
+// Address. Points are cached in a shared store.
 type Manager struct {
 	log    *log.Logger
 	points *pointStore
 
-	mu      sync.RWMutex
-	running bool
-	servers map[int64]*NativeServer // keyed by config row id
+	mu       sync.RWMutex
+	running  bool
+	listenIP string
+	servers  map[int64]*NativeServer // keyed by config row id
 }
 
 func NewManager(l *log.Logger) *Manager {
@@ -26,9 +28,10 @@ func NewManager(l *log.Logger) *Manager {
 		l = log.Default()
 	}
 	return &Manager{
-		log:     l,
-		points:  newPointStore(),
-		servers: make(map[int64]*NativeServer),
+		log:      l,
+		points:   newPointStore(),
+		listenIP: "0.0.0.0",
+		servers:  make(map[int64]*NativeServer),
 	}
 }
 
@@ -45,8 +48,17 @@ func (m *Manager) Start() error {
 
 	var firstErr error
 	for _, s := range items {
-		if err := s.Start(); err != nil && firstErr == nil {
-			firstErr = err
+		s.mu.RLock()
+		enabled := s.cfg.Enabled
+		s.mu.RUnlock()
+		if !enabled {
+			continue
+		}
+		if err := s.Start(); err != nil {
+			m.log.Printf("iec104: start %q: %v", s.cfg.Name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
@@ -92,20 +104,47 @@ func (m *Manager) Dispatch(p Point) {
 	}
 }
 
-// Reload synchronizes the live fleet with the desired set of configs.
-//  - new rows         → create + start
-//  - removed rows     → stop + delete
-//  - endpoint changed → restart
-//  - enabled toggle   → start/stop
-//  - other fields     → applied; take effect on next client connection.
-func (m *Manager) Reload(cfgs []models.IEC104Server) error {
+// Reload synchronizes the live fleet with the desired gateway-wide listen IP
+// and the desired set of slave configs.
+//
+//   - listen IP changed → stop all, set new IP, start enabled
+//   - new row           → create + start (if enabled)
+//   - removed row       → stop + delete
+//   - port changed      → restart
+//   - enabled toggle    → start/stop
+//   - other fields      → applied; allowlist takes effect on next Accept;
+//     timers take effect on next client connection.
+func (m *Manager) Reload(gw models.IEC104Gateway, cfgs []models.IEC104Server) error {
 	wanted := make(map[int64]models.IEC104Server, len(cfgs))
 	for _, c := range cfgs {
 		wanted[c.ID] = c
 	}
 
+	newIP := gw.ListenIP
+	if newIP == "" {
+		newIP = "0.0.0.0"
+	}
+
 	m.mu.Lock()
+	ipChanged := m.listenIP != newIP
+	m.listenIP = newIP
+	running := m.running
+	// Snapshot for IP-change restart.
+	all := make([]*NativeServer, 0, len(m.servers))
+	for _, s := range m.servers {
+		all = append(all, s)
+	}
+	m.mu.Unlock()
+
+	if ipChanged {
+		for _, s := range all {
+			_ = s.Stop()
+			s.setListenIP(newIP)
+		}
+	}
+
 	// Remove servers no longer present.
+	m.mu.Lock()
 	toStop := make([]*NativeServer, 0)
 	for id, s := range m.servers {
 		if _, ok := wanted[id]; !ok {
@@ -114,23 +153,19 @@ func (m *Manager) Reload(cfgs []models.IEC104Server) error {
 		}
 	}
 	m.mu.Unlock()
-
 	for _, s := range toStop {
-		if err := s.Stop(); err != nil {
-			m.log.Printf("iec104: stop removed server %q: %v", s.cfg.Name, err)
-		}
+		_ = s.Stop()
 	}
 
-	// Create / update.
 	var firstErr error
 	for id, cfg := range wanted {
 		m.mu.Lock()
 		cur, exists := m.servers[id]
-		running := m.running
 		m.mu.Unlock()
 
 		if !exists {
 			s := NewNativeServer(m.log, m.points)
+			s.setListenIP(newIP)
 			s.applyConfig(cfg)
 			m.mu.Lock()
 			m.servers[id] = s
@@ -151,16 +186,20 @@ func (m *Manager) Reload(cfgs []models.IEC104Server) error {
 		wasRunning := cur.running
 		cur.mu.RUnlock()
 
-		endpointChanged := old.ListenAddr != cfg.ListenAddr || old.Port != cfg.Port
-		enableChanged := old.Enabled != cfg.Enabled
-
+		portChanged := old.Port != cfg.Port
 		cur.applyConfig(cfg)
 
 		switch {
-		case !cfg.Enabled && wasRunning:
-			if err := cur.Stop(); err != nil {
-				m.log.Printf("iec104: stop %q: %v", cfg.Name, err)
+		case ipChanged && cfg.Enabled && running:
+			// Already stopped above for IP change; bring back up.
+			if err := cur.Start(); err != nil {
+				m.log.Printf("iec104: restart %q: %v", cfg.Name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
+		case !cfg.Enabled && wasRunning:
+			_ = cur.Stop()
 		case cfg.Enabled && !wasRunning && running:
 			if err := cur.Start(); err != nil {
 				m.log.Printf("iec104: start %q: %v", cfg.Name, err)
@@ -168,7 +207,7 @@ func (m *Manager) Reload(cfgs []models.IEC104Server) error {
 					firstErr = err
 				}
 			}
-		case cfg.Enabled && wasRunning && endpointChanged:
+		case cfg.Enabled && wasRunning && portChanged:
 			_ = cur.Stop()
 			if err := cur.Start(); err != nil {
 				m.log.Printf("iec104: restart %q: %v", cfg.Name, err)
@@ -176,8 +215,6 @@ func (m *Manager) Reload(cfgs []models.IEC104Server) error {
 					firstErr = err
 				}
 			}
-		case enableChanged:
-			// handled above
 		}
 	}
 
@@ -192,8 +229,9 @@ func (m *Manager) Status() Status {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := Status{
-		Points:  m.points.size(),
-		Servers: make([]ServerStatus, 0, len(m.servers)),
+		ListenIP: m.listenIP,
+		Points:   m.points.size(),
+		Servers:  make([]ServerStatus, 0, len(m.servers)),
 	}
 	for _, s := range m.servers {
 		st := s.Status()
