@@ -17,6 +17,7 @@ import {
 import {
   Pencil, Trash2, Plus, Layers, Folder, FolderOpen, ChevronRight,
   Activity, ToggleLeft, Search, ListTree, Table as TableIcon, Server as ServerIcon,
+  ChevronsDownUp, ChevronsUpDown,
 } from 'lucide-vue-next'
 import { useConfirm } from '@/composables/useConfirm'
 
@@ -68,16 +69,41 @@ function classify(iec: string): Kind {
 const search = ref('')
 const view = ref<'tree' | 'flat'>('tree')
 
-// expanded[deviceId] / expanded[`${deviceId}:${kind}`] tracks open folders.
+// expanded tracks which nodes are open. Default is CLOSED for all levels;
+// toggling a device auto-opens its kind buckets to avoid an extra click.
 const expanded = ref<Record<string, boolean>>({})
 
-function isOpen(key: string, def = true) {
-  const v = expanded.value[key]
-  return v === undefined ? def : v
+function isOpen(key: string) {
+  return expanded.value[key] === true
 }
-function toggle(key: string, def = true) {
-  expanded.value[key] = !isOpen(key, def)
+
+function toggle(key: string) {
+  expanded.value[key] = !isOpen(key)
 }
+
+function toggleDevice(sid: number, did: number, dn: DeviceNode) {
+  const key = nodeKey(sid, did)
+  const opening = !isOpen(key)
+  expanded.value[key] = opening
+  if (opening) {
+    for (const b of dn.buckets) expanded.value[nodeKey(sid, did, b.kind)] = true
+  }
+}
+
+function expandAll() {
+  const next: Record<string, boolean> = {}
+  for (const sn of tree.value) {
+    const sid = sn.server?.id ?? -999
+    next[`s:${sid}`] = true
+    for (const dn of sn.devices) {
+      const did = dn.device?.id ?? -1
+      next[`s:${sid}:d:${did}`] = true
+      for (const b of dn.buckets) next[`s:${sid}:d:${did}:${b.kind}`] = true
+    }
+  }
+  expanded.value = next
+}
+function collapseAll() { expanded.value = {} }
 
 const filteredMappings = computed(() => {
   const q = search.value.trim().toLowerCase()
@@ -159,7 +185,6 @@ function nodeKey(sid: number, did: number, kind?: Kind) {
   return kind ? `s:${sid}:d:${did}:${kind}` : did === undefined ? `s:${sid}` : `s:${sid}:d:${did}`
 }
 
-// Auto-expand on search so matches stay visible.
 watch(search, q => {
   if (!q.trim()) return
   for (const sn of tree.value) {
@@ -432,9 +457,9 @@ onMounted(reload)
       </Dialog>
     </div>
 
-    <!-- Toolbar: search + view toggle -->
+    <!-- Toolbar: search + view toggle + expand/collapse -->
     <div class="flex flex-wrap items-center gap-3">
-      <div class="relative flex-1 min-w-[220px] max-w-md">
+      <div class="relative flex-1 min-w-[200px] max-w-md">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
         <Input
           v-model="search"
@@ -453,6 +478,18 @@ onMounted(reload)
           :class="view === 'flat' ? 'bg-[color:var(--epm-bosque)] text-white' : 'hover:bg-muted'"
           @click="view = 'flat'"
         ><TableIcon class="h-3.5 w-3.5" /> Flat</button>
+      </div>
+      <div v-if="view === 'tree'" class="inline-flex rounded-sm border border-border overflow-hidden text-[11px]">
+        <button
+          class="px-3 py-1.5 inline-flex items-center gap-1.5 hover:bg-muted transition-colors"
+          title="Expand all"
+          @click="expandAll"
+        ><ChevronsUpDown class="h-3.5 w-3.5" /> Expand</button>
+        <button
+          class="px-3 py-1.5 inline-flex items-center gap-1.5 hover:bg-muted transition-colors border-l border-border"
+          title="Collapse all"
+          @click="collapseAll"
+        ><ChevronsDownUp class="h-3.5 w-3.5" /> Collapse</button>
       </div>
       <div class="text-[11px] text-muted-foreground ml-auto font-mono">
         {{ filteredMappings.length }} / {{ mappings.length }}
@@ -523,7 +560,7 @@ onMounted(reload)
             <button
               type="button"
               class="w-full flex items-center gap-3 pl-10 pr-4 py-2 hover:bg-muted/40 transition-colors text-left"
-              @click="toggle(nodeKey(sn.server?.id ?? -999, dn.device?.id ?? -1))"
+              @click="toggleDevice(sn.server?.id ?? -999, dn.device?.id ?? -1, dn)"
             >
               <ChevronRight
                 class="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform"

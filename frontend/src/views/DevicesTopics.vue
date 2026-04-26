@@ -15,7 +15,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import {
   Trash2, Cpu, Plus, Folder, FolderOpen, ChevronRight, Search, Pencil, Radio,
-  Server as ServerIcon,
+  Server as ServerIcon, ChevronsDownUp, ChevronsUpDown,
 } from 'lucide-vue-next'
 import { useConfirm } from '@/composables/useConfirm'
 
@@ -102,11 +102,22 @@ const tree = computed<ServerNode[]>(() => {
 
 const expanded = ref<Record<string, boolean>>({})
 function isOpen(key: string) {
-  return expanded.value[key] !== false
+  return expanded.value[key] === true
 }
 function toggle(key: string) {
   expanded.value[key] = !isOpen(key)
 }
+
+function expandAll() {
+  const next: Record<string, boolean> = {}
+  for (const sn of tree.value) {
+    const sid = sn.server?.id ?? -999
+    next[`s:${sid}`] = true
+    for (const dn of sn.devices) next[`s:${sid}:d:${dn.device.id}`] = true
+  }
+  expanded.value = next
+}
+function collapseAll() { expanded.value = {} }
 
 watch(search, q => {
   if (!q.trim()) return
@@ -272,13 +283,25 @@ onMounted(reload)
 
     <!-- Toolbar -->
     <div class="flex flex-wrap items-center gap-3">
-      <div class="relative flex-1 min-w-[220px] max-w-md">
+      <div class="relative flex-1 min-w-[200px] max-w-md">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
         <Input
           v-model="search"
           placeholder="Search server, device or topic…"
           class="pl-8 rounded-sm font-mono text-xs"
         />
+      </div>
+      <div class="inline-flex rounded-sm border border-border overflow-hidden text-[11px]">
+        <button
+          class="px-3 py-1.5 inline-flex items-center gap-1.5 hover:bg-muted transition-colors"
+          title="Expand all"
+          @click="expandAll"
+        ><ChevronsUpDown class="h-3.5 w-3.5" /> Expand</button>
+        <button
+          class="px-3 py-1.5 inline-flex items-center gap-1.5 hover:bg-muted transition-colors border-l border-border"
+          title="Collapse all"
+          @click="collapseAll"
+        ><ChevronsDownUp class="h-3.5 w-3.5" /> Collapse</button>
       </div>
     </div>
 

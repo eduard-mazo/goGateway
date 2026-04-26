@@ -195,32 +195,10 @@ function fmtUptime(s: number) {
             </span>
           </div>
         </div>
-        <div class="flex items-center gap-2 sm:gap-3 shrink-0">
-          <!-- Mobile: compact (dot + label only). Desktop: full pill with value. -->
-          <StatusPill
-            label="MQTT"
-            :state="brokerState"
-            :value="brokerText"
-            class="hidden md:inline-flex"
-            stable
-          />
-          <StatusPill
-            label="MQTT"
-            :state="brokerState"
-            class="md:hidden"
-          />
-          <StatusPill
-            :label="iecFleet.label"
-            :state="iecFleet.state"
-            :value="iecFleet.value"
-            class="hidden md:inline-flex"
-            stable
-          />
-          <StatusPill
-            :label="iecFleet.label"
-            :state="iecFleet.state"
-            class="md:hidden"
-          />
+        <!-- Status pills: desktop only. Mobile sees status on dashboard. -->
+        <div class="hidden md:flex items-center gap-3 shrink-0">
+          <StatusPill label="MQTT" :state="brokerState" :value="brokerText" stable />
+          <StatusPill :label="iecFleet.label" :state="iecFleet.state" :value="iecFleet.value" stable />
         </div>
       </header>
 
