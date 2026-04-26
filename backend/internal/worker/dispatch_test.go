@@ -17,16 +17,22 @@ const inverterPayload = `{
  "AP": 6.7, "OS": 3
 }`
 
-type fakeSrv struct{ points []iec104.Point }
+type fakeSrv struct {
+	points    []iec104.Point
+	serverIDs []int64
+}
 
-func (f *fakeSrv) Start() error                       { return nil }
-func (f *fakeSrv) Stop() error                        { return nil }
-func (f *fakeSrv) Dispatch(p iec104.Point)            { f.points = append(f.points, p) }
+func (f *fakeSrv) Start() error { return nil }
+func (f *fakeSrv) Stop() error  { return nil }
+func (f *fakeSrv) Dispatch(serverID int64, p iec104.Point) {
+	f.serverIDs = append(f.serverIDs, serverID)
+	f.points = append(f.points, p)
+}
 func (f *fakeSrv) Reload(_ models.IEC104Gateway, _ []models.IEC104Server) error {
 	return nil
 }
-func (f *fakeSrv) Status() iec104.Status                { return iec104.Status{} }
-func (f *fakeSrv) Snapshot() []iec104.Point           { return f.points }
+func (f *fakeSrv) Status() iec104.Status    { return iec104.Status{} }
+func (f *fakeSrv) Snapshot() []iec104.Point { return f.points }
 
 func TestParseAndDispatch_Inverter(t *testing.T) {
 	dbh, err := db.Open(":memory:")
@@ -41,17 +47,18 @@ func TestParseAndDispatch_Inverter(t *testing.T) {
 
 	srv := &fakeSrv{}
 	maps := []TopicMapping{
-		{MappingID: 1, TopicID: 1, Topic: "t1", JSONKey: "IA", IEC104Type: "M_ME_TF_1", IOA: 16385, Scale: 1, SignalKey: "Inversor 1.IA"},
-		{MappingID: 2, TopicID: 1, Topic: "t1", JSONKey: "UAB", IEC104Type: "M_ME_TF_1", IOA: 16386, Scale: 1, SignalKey: "Inversor 1.UAB"},
-		{MappingID: 3, TopicID: 1, Topic: "t1", JSONKey: "OS", IEC104Type: "M_ME_NB_1", IOA: 16387, Scale: 1, SignalKey: "Inversor 1.OS"},
-		{MappingID: 4, TopicID: 1, Topic: "t1", JSONKey: "MISSING", IEC104Type: "M_ME_TF_1", IOA: 16388, Scale: 1, SignalKey: "Inversor 1.MISSING"},
+		{MappingID: 1, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "IA", IEC104Type: "M_ME_TF_1", IOA: 16385, Scale: 1, SignalKey: "Inversor 1.IA"},
+		{MappingID: 2, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "UAB", IEC104Type: "M_ME_TF_1", IOA: 16386, Scale: 1, SignalKey: "Inversor 1.UAB"},
+		{MappingID: 3, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "OS", IEC104Type: "M_ME_NB_1", IOA: 16387, Scale: 1, SignalKey: "Inversor 1.OS"},
+		{MappingID: 4, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "MISSING", IEC104Type: "M_ME_TF_1", IOA: 16388, Scale: 1, SignalKey: "Inversor 1.MISSING"},
 	}
 
-	// seed mapping rows so history FK passes.
-	dbh.MustExec(`INSERT INTO devices(id,name) VALUES(1,'INV_1')`)
+	// seed mapping rows so history FK passes. iec104_servers id=1 is seeded
+	// by schema.sql, so the new server_id FK is already satisfied.
+	dbh.MustExec(`INSERT INTO devices(id,server_id,name) VALUES(1,1,'INV_1')`)
 	dbh.MustExec(`INSERT INTO topics(id,device_id,topic,enabled) VALUES(1,1,'t1',1)`)
 	for _, m := range maps {
-		dbh.MustExec(`INSERT INTO signal_mappings(id,topic_id,json_key,iec104_type,ioa,scale,enabled) VALUES(?,1,?,?,?,?,1)`,
+		dbh.MustExec(`INSERT INTO signal_mappings(id,server_id,topic_id,json_key,iec104_type,ioa,scale,enabled) VALUES(?,1,1,?,?,?,?,1)`,
 			m.MappingID, m.JSONKey, m.IEC104Type, m.IOA, m.Scale)
 	}
 

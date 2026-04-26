@@ -115,31 +115,43 @@ type Point struct {
 }
 
 // ServerStatus = per-instance runtime snapshot.
+//
+// Clients counts every TCP-accepted connection. Activated counts only the
+// subset where the master has completed STARTDT — i.e., the IEC-104 protocol
+// link is actually up and exchanging frames. UI uses Activated for the
+// "linked" indication; Clients alone means "TCP only, protocol not started".
 type ServerStatus struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Listen   string `json:"listen"`
-	Port     int    `json:"port"`
-	ASDUAddr int    `json:"asdu_addr"`
-	Clients  int    `json:"clients"`
-	Running  bool   `json:"running"`
-	Enabled  bool   `json:"enabled"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Listen    string `json:"listen"`
+	Port      int    `json:"port"`
+	ASDUAddr  int    `json:"asdu_addr"`
+	Clients   int    `json:"clients"`
+	Activated int    `json:"activated"`
+	Running   bool   `json:"running"`
+	Enabled   bool   `json:"enabled"`
 }
 
 // Status = fleet summary returned by Manager.Status.
 type Status struct {
-	Running  bool           `json:"running"`   // any instance up
-	ListenIP string         `json:"listen_ip"` // gateway-wide bind IP
-	Points   int            `json:"points"`    // cached points (shared)
-	Clients  int            `json:"clients"`   // sum across instances
-	Servers  []ServerStatus `json:"servers"`
+	Running   bool           `json:"running"`   // any instance up
+	ListenIP  string         `json:"listen_ip"` // gateway-wide bind IP
+	Points    int            `json:"points"`    // cached points (shared)
+	Clients   int            `json:"clients"`   // sum across instances (TCP)
+	Activated int            `json:"activated"` // sum of protocol-active links
+	Servers   []ServerStatus `json:"servers"`
 }
 
 // Server is the fleet-level facade consumed by MQTT/API layers.
+//
+// Dispatch routes a point to exactly one IEC-104 slave (identified by its
+// row id in iec104_servers). This matches the shape of signal_mappings,
+// where every mapping is pinned to a single server: the worker resolves the
+// target server_id from the cache and the manager forwards there only.
 type Server interface {
 	Start() error
 	Stop() error
-	Dispatch(p Point)
+	Dispatch(serverID int64, p Point)
 	Reload(gw models.IEC104Gateway, cfgs []models.IEC104Server) error
 	Status() Status
 	Snapshot() []Point
@@ -233,15 +245,24 @@ func (s *NativeServer) setListenIP(ip string) {
 func (s *NativeServer) Status() ServerStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	activated := 0
+	for cc := range s.clients {
+		cc.mu.Lock()
+		if cc.started {
+			activated++
+		}
+		cc.mu.Unlock()
+	}
 	return ServerStatus{
-		ID:       s.cfg.ID,
-		Name:     s.cfg.Name,
-		Listen:   s.listenIP,
-		Port:     s.cfg.Port,
-		ASDUAddr: s.cfg.ASDUAddr,
-		Clients:  len(s.clients),
-		Running:  s.running,
-		Enabled:  s.cfg.Enabled,
+		ID:        s.cfg.ID,
+		Name:      s.cfg.Name,
+		Listen:    s.listenIP,
+		Port:      s.cfg.Port,
+		ASDUAddr:  s.cfg.ASDUAddr,
+		Clients:   len(s.clients),
+		Activated: activated,
+		Running:   s.running,
+		Enabled:   s.cfg.Enabled,
 	}
 }
 
@@ -590,27 +611,97 @@ func (cc *clientConn) onIFrame(peerNS uint16, asdu []byte) {
 	}
 }
 
-// handleInterrogation replies ACT_CON, dumps cached points with COT=INTROGEN,
-// then sends ACT_TERM. Only station GI (QOI=20) semantics are implemented;
-// group GIs (21..36) fall back to the same dump.
+// handleInterrogation replies ACT_CON, dumps cached points with the matching
+// INRO* COT, then sends ACT_TERM. Per IEC 60870-5-101 §7.2.6.22, station GI
+// (QOI=20) returns every point; group GIs (QOI 21..36 = groups 1..16) would
+// normally filter by group assignment — we don't model groups, so they fall
+// back to the full dump but still echo the requested QOI in the response COT.
+//
+// Points are grouped by Type ID and packed into multi-object ASDUs (SQ=0,
+// up to ~120 objects per APDU) so the snapshot streams in a handful of
+// frames instead of one frame per point.
 func (cc *clientConn) handleInterrogation(cot byte, body []byte) {
 	if cot != COT_ACTIVATION {
 		return
 	}
+	if len(body) < 4 {
+		return
+	}
+	qoi := body[3]
+	// Reject QOI outside the station/group range with a negative ACT_CON.
+	if qoi < 20 || qoi > 36 {
+		// P/N=1 → negative confirmation per IEC 60870-5-101 §7.2.3.
+		cc.replyAck(C_IC_NA_1, COT_ACT_CON|0x40, body)
+		return
+	}
+	respCOT := COT_INTROGEN + (qoi - 20)
+
 	cc.replyAck(C_IC_NA_1, COT_ACT_CON, body)
 
 	cc.srv.mu.RLock()
 	asduAddr := uint16(cc.srv.cfg.ASDUAddr)
 	cc.srv.mu.RUnlock()
 
+	// Bucket the snapshot by TypeID so each ASDU carries one type only.
+	buckets := make(map[byte][][]byte)
+	order := make([]byte, 0, 8)
 	for _, p := range cc.srv.points.snapshot() {
-		asdu, err := encodePoint(p, COT_INTROGEN, asduAddr)
+		typeID, obj, err := encodeInfoObject(p)
 		if err != nil {
 			continue
 		}
-		cc.send(asdu)
+		if _, seen := buckets[typeID]; !seen {
+			order = append(order, typeID)
+		}
+		buckets[typeID] = append(buckets[typeID], obj)
+	}
+
+	for _, typeID := range order {
+		for _, asdu := range packInfoObjects(typeID, buckets[typeID], respCOT, asduAddr) {
+			cc.send(asdu)
+		}
 	}
 	cc.replyAck(C_IC_NA_1, COT_ACT_TERM, body)
+}
+
+// packInfoObjects builds one or more ASDUs (SQ=0) carrying objects of a
+// single TypeID. Each ASDU stays under the 253-byte APDU payload cap and the
+// 7-bit NumObjects limit.
+func packInfoObjects(typeID byte, objs [][]byte, cot byte, asduAddr uint16) [][]byte {
+	if len(objs) == 0 {
+		return nil
+	}
+	const maxAPDUPayload = 253 // APDU body excl. 0x68+len header
+	const maxASDUBody = maxAPDUPayload - 4 - 6 // - APCI ctrl - ASDU hdr
+	const maxObjects = 127
+
+	var out [][]byte
+	i := 0
+	for i < len(objs) {
+		j := i
+		size := 0
+		for j < len(objs) && (j-i) < maxObjects && size+len(objs[j]) <= maxASDUBody {
+			size += len(objs[j])
+			j++
+		}
+		if j == i {
+			// Single object exceeds the cap — emit it solo and skip.
+			j = i + 1
+			size = len(objs[i])
+		}
+		asdu := make([]byte, 6, 6+size)
+		asdu[0] = typeID
+		asdu[1] = byte(j - i) // SQ=0, NumObjects = j-i
+		asdu[2] = cot
+		asdu[3] = 0
+		binary.LittleEndian.PutUint16(asdu[4:6], asduAddr)
+		for k := i; k < j; k++ {
+			asdu = append(asdu, objs[k]...)
+		}
+		out = append(out, asdu)
+		i = j
+	}
+	return out
 }
 
 // replyAck sends a single-object reply (ACT_CON or ACT_TERM). body is the

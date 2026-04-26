@@ -56,7 +56,7 @@ function fmtAgo(ts?: number | null) {
 </script>
 
 <template>
-  <div class="p-8 space-y-8 max-w-5xl">
+  <div class="p-4 sm:p-6 lg:p-8 space-y-6 sm:space-y-8 max-w-5xl">
     <!-- Hero / live broker status -->
     <section class="card-soft overflow-hidden">
       <div class="grid grid-cols-12 gap-6 p-8">

@@ -28,17 +28,29 @@ func (h *MappingHandler) notify() {
 	}
 }
 
-const mapCols = `id,topic_id,device_name,variable_type,characteristic,json_key,iec104_type,ioa,unit,scale,enabled`
+const mapCols = `id,server_id,topic_id,device_name,variable_type,characteristic,json_key,iec104_type,ioa,unit,scale,enabled`
 
 func (h *MappingHandler) list(w http.ResponseWriter, r *http.Request) {
 	var out []models.SignalMapping
 	q := `SELECT ` + mapCols + ` FROM signal_mappings`
 	args := []any{}
+	conds := []string{}
 	if tid := r.URL.Query().Get("topic_id"); tid != "" {
-		q += ` WHERE topic_id=?`
+		conds = append(conds, `topic_id=?`)
 		args = append(args, tid)
 	}
-	q += ` ORDER BY ioa`
+	if sid := r.URL.Query().Get("server_id"); sid != "" {
+		conds = append(conds, `server_id=?`)
+		args = append(args, sid)
+	}
+	for i, c := range conds {
+		if i == 0 {
+			q += ` WHERE ` + c
+		} else {
+			q += ` AND ` + c
+		}
+	}
+	q += ` ORDER BY server_id, ioa`
 	if err := h.DB.Select(&out, q, args...); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -52,11 +64,21 @@ func (h *MappingHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if m.TopicID == 0 {
+		writeErr(w, 400, "topic_id required")
+		return
+	}
+	// Derive server_id from the topic's device. Devices are scoped to a
+	// server, so the mapping inherits that scope automatically.
+	if err := h.DB.Get(&m.ServerID, `SELECT d.server_id FROM topics t JOIN devices d ON d.id = t.device_id WHERE t.id=?`, m.TopicID); err != nil {
+		writeErr(w, 400, "unknown topic")
+		return
+	}
 	if m.Scale == 0 {
 		m.Scale = 1.0
 	}
-	res, err := h.DB.Exec(`INSERT INTO signal_mappings(topic_id,device_name,variable_type,characteristic,json_key,iec104_type,ioa,unit,scale,enabled) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		m.TopicID, m.DeviceName, m.VariableType, m.Characteristic, m.JSONKey, m.IEC104Type, m.IOA, m.Unit, m.Scale, m.Enabled)
+	res, err := h.DB.Exec(`INSERT INTO signal_mappings(server_id,topic_id,device_name,variable_type,characteristic,json_key,iec104_type,ioa,unit,scale,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		m.ServerID, m.TopicID, m.DeviceName, m.VariableType, m.Characteristic, m.JSONKey, m.IEC104Type, m.IOA, m.Unit, m.Scale, m.Enabled)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -67,17 +89,29 @@ func (h *MappingHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MappingHandler) update(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	var m models.SignalMapping
 	if err := decode(r, &m); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if m.TopicID == 0 {
+		writeErr(w, 400, "topic_id required")
+		return
+	}
+	if err := h.DB.Get(&m.ServerID, `SELECT d.server_id FROM topics t JOIN devices d ON d.id = t.device_id WHERE t.id=?`, m.TopicID); err != nil {
+		writeErr(w, 400, "unknown topic")
+		return
+	}
 	if m.Scale == 0 {
 		m.Scale = 1.0
 	}
-	if _, err := h.DB.Exec(`UPDATE signal_mappings SET topic_id=?,device_name=?,variable_type=?,characteristic=?,json_key=?,iec104_type=?,ioa=?,unit=?,scale=?,enabled=? WHERE id=?`,
-		m.TopicID, m.DeviceName, m.VariableType, m.Characteristic, m.JSONKey, m.IEC104Type, m.IOA, m.Unit, m.Scale, m.Enabled, id); err != nil {
+	if _, err := h.DB.Exec(`UPDATE signal_mappings SET server_id=?,topic_id=?,device_name=?,variable_type=?,characteristic=?,json_key=?,iec104_type=?,ioa=?,unit=?,scale=?,enabled=? WHERE id=?`,
+		m.ServerID, m.TopicID, m.DeviceName, m.VariableType, m.Characteristic, m.JSONKey, m.IEC104Type, m.IOA, m.Unit, m.Scale, m.Enabled, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -87,7 +121,11 @@ func (h *MappingHandler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MappingHandler) delete(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	if _, err := h.DB.Exec(`DELETE FROM signal_mappings WHERE id=?`, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return

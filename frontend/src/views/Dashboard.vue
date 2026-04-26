@@ -58,22 +58,37 @@ const brokerState = computed<'ok' | 'warn' | 'fault' | 'idle'>(() => {
   return status.value.mqtt.connected ? 'ok' : 'fault'
 })
 const iecServers = computed(() => status.value?.iec104.servers ?? [])
-const iecState = computed<'ok' | 'warn' | 'fault' | 'idle'>(() => {
+const iecState = computed<'ok' | 'warn' | 'fault' | 'idle' | 'wait'>(() => {
   if (!status.value) return 'idle'
   const list = iecServers.value
   if (!list.length) return 'idle'
-  const running = list.filter(s => s.running).length
-  if (running === 0) return 'fault'
-  if (running < list.filter(s => s.enabled).length) return 'warn'
-  return 'ok'
+  const enabled = list.filter(s => s.enabled)
+  if (!enabled.length) return 'idle'
+  const running = enabled.filter(s => s.running)
+  if (!running.length) return 'fault'
+  if (running.length < enabled.length) return 'warn'
+  const activated = list.reduce((n, s) => n + s.activated, 0)
+  const tcp = list.reduce((n, s) => n + s.clients, 0)
+  if (activated > 0) return 'ok'
+  if (tcp > 0) return 'warn'
+  return 'wait'
+})
+const iecStateLabel = computed(() => {
+  switch (iecState.value) {
+    case 'ok': return 'Protocol up'
+    case 'warn': return 'TCP only'
+    case 'fault': return 'Bind failed'
+    case 'wait': return 'Listening'
+    default: return 'Idle'
+  }
 })
 const iecSummary = computed(() => {
   const list = iecServers.value
   const ip = status.value?.iec104.listen_ip || '0.0.0.0'
   if (!list.length) return ip
   if (list.length === 1) return `${ip}:${list[0].port}`
-  const running = list.filter(s => s.running).length
-  return `${ip} · ${running}/${list.length} running`
+  const active = list.reduce((n, s) => n + (s.activated > 0 ? 1 : 0), 0)
+  return `${ip} · ${active}/${list.filter(s => s.enabled).length} protocol up`
 })
 function fmt(ts: string) { try { return new Date(ts).toLocaleTimeString() } catch { return ts } }
 function fmtAgo(ts?: string | null) {
@@ -90,10 +105,10 @@ function fmtNumber(n?: number | null) {
 </script>
 
 <template>
-  <div class="p-8 space-y-8">
+  <div class="p-4 sm:p-6 lg:p-8 space-y-6 sm:space-y-8">
     <!-- HERO -->
     <section class="card-soft">
-      <div class="grid grid-cols-12 gap-6 p-8">
+      <div class="grid grid-cols-12 gap-6 p-5 sm:p-6 lg:p-8">
         <div class="col-span-12 md:col-span-8">
           <div class="flex items-center gap-3 mb-3">
             <div class="h-1 w-10 bg-[color:var(--epm-bosque)]" />
@@ -217,7 +232,7 @@ function fmtNumber(n?: number | null) {
               </div>
             </div>
           </div>
-          <StatusPill :state="iecState" :label="iecState === 'ok' ? 'Running' : iecState === 'warn' ? 'Partial' : iecState === 'fault' ? 'Stopped' : 'Idle'" />
+          <StatusPill :state="iecState" :label="iecStateLabel" />
         </div>
         <dl class="grid grid-cols-3 text-sm">
           <div class="px-6 py-5">

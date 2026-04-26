@@ -10,12 +10,11 @@ import (
 
 // Manager owns a fleet of passive NativeServer instances. Each row in the
 // iec104_servers table becomes one listener bound on the gateway-wide listen
-// IP from iec104_gateway. Dispatch broadcasts every point to every enabled
-// server so each SCADA master sees the gateway under its own Common ASDU
-// Address. Points are cached in a shared store.
+// IP from iec104_gateway. Each server keeps its own point cache; Dispatch
+// routes one point to one server (selected by signal_mappings.server_id) so
+// each SCADA master only sees the slice of the point set assigned to it.
 type Manager struct {
-	log    *log.Logger
-	points *pointStore
+	log *log.Logger
 
 	mu       sync.RWMutex
 	running  bool
@@ -29,7 +28,6 @@ func NewManager(l *log.Logger) *Manager {
 	}
 	return &Manager{
 		log:      l,
-		points:   newPointStore(),
 		listenIP: "0.0.0.0",
 		servers:  make(map[int64]*NativeServer),
 	}
@@ -80,28 +78,24 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-// Dispatch fans out a point to every enabled server. Each server re-encodes
-// with its own ASDU address.
-func (m *Manager) Dispatch(p Point) {
-	m.points.put(p)
-
+// Dispatch routes a point to the slave identified by serverID. Drops the
+// point silently if the target is unknown, disabled or down — the worker
+// reads a snapshot from the cache, so a brief race during reload is normal.
+func (m *Manager) Dispatch(serverID int64, p Point) {
 	m.mu.RLock()
-	targets := make([]*NativeServer, 0, len(m.servers))
-	for _, s := range m.servers {
-		targets = append(targets, s)
-	}
+	s, ok := m.servers[serverID]
 	m.mu.RUnlock()
-
-	for _, s := range targets {
-		s.mu.RLock()
-		enabled := s.cfg.Enabled
-		running := s.running
-		s.mu.RUnlock()
-		if !enabled || !running {
-			continue
-		}
-		s.Dispatch(p)
+	if !ok {
+		return
 	}
+	s.mu.RLock()
+	enabled := s.cfg.Enabled
+	running := s.running
+	s.mu.RUnlock()
+	if !enabled || !running {
+		return
+	}
+	s.Dispatch(p)
 }
 
 // Reload synchronizes the live fleet with the desired gateway-wide listen IP
@@ -164,7 +158,8 @@ func (m *Manager) Reload(gw models.IEC104Gateway, cfgs []models.IEC104Server) er
 		m.mu.Unlock()
 
 		if !exists {
-			s := NewNativeServer(m.log, m.points)
+			// Each server gets its own point store; mappings carry a server_id.
+			s := NewNativeServer(m.log, nil)
 			s.setListenIP(newIP)
 			s.applyConfig(cfg)
 			m.mu.Lock()
@@ -230,7 +225,6 @@ func (m *Manager) Status() Status {
 	defer m.mu.RUnlock()
 	out := Status{
 		ListenIP: m.listenIP,
-		Points:   m.points.size(),
 		Servers:  make([]ServerStatus, 0, len(m.servers)),
 	}
 	for _, s := range m.servers {
@@ -240,11 +234,24 @@ func (m *Manager) Status() Status {
 			out.Running = true
 		}
 		out.Clients += st.Clients
+		out.Activated += st.Activated
+		out.Points += s.points.size()
 	}
 	return out
 }
 
-// Snapshot returns every cached point (deduplicated — shared store).
+// Snapshot returns the union of every server's cached point set (one entry
+// per (server, IOA) — same IOA on different servers is preserved).
 func (m *Manager) Snapshot() []Point {
-	return m.points.snapshot()
+	m.mu.RLock()
+	servers := make([]*NativeServer, 0, len(m.servers))
+	for _, s := range m.servers {
+		servers = append(servers, s)
+	}
+	m.mu.RUnlock()
+	var out []Point
+	for _, s := range servers {
+		out = append(out, s.points.snapshot()...)
+	}
+	return out
 }

@@ -1,3 +1,5 @@
+// Package worker subscribes to MQTT topics, parses incoming JSON payloads, and
+// dispatches decoded IEC-104 points to the slave manager.
 package worker
 
 import (
@@ -58,7 +60,7 @@ func ParseAndDispatch(
 		}
 		scaled := val * m.Scale
 
-		srv.Dispatch(iec104.Point{
+		srv.Dispatch(m.ServerID, iec104.Point{
 			IOA:       m.IOA,
 			TypeID:    m.IEC104Type,
 			Value:     scaled,

@@ -66,7 +66,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>
 
 <template>
-  <div class="p-8 space-y-6 max-w-6xl">
+  <div class="p-4 sm:p-6 lg:p-8 space-y-6 max-w-6xl">
     <!-- Hero -->
     <div class="card-soft overflow-hidden relative">
       <div class="relative flex items-start gap-4 p-6">

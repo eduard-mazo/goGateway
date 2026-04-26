@@ -14,15 +14,17 @@ export interface IEC104ServerStatus {
   listen: string     // gateway-wide bind IP (mirrored from fleet)
   port: number
   asdu_addr: number
-  clients: number
+  clients: number    // TCP-accepted connections
+  activated: number  // subset where the IEC-104 link is up (post-STARTDT)
   running: boolean
   enabled: boolean
 }
 export interface IEC104Status {
-  running: boolean   // any instance is up
-  listen_ip: string  // gateway-wide bind IP
-  points: number     // cached points (shared across fleet)
-  clients: number    // total clients across fleet
+  running: boolean    // any instance is up
+  listen_ip: string   // gateway-wide bind IP
+  points: number      // cached points (shared across fleet)
+  clients: number     // total TCP clients across fleet
+  activated: number   // total protocol-active links
   servers: IEC104ServerStatus[]
 }
 export interface StatusResponse {

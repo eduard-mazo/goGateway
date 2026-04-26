@@ -7,6 +7,7 @@ export const api = axios.create({
 
 export interface Device {
   id: number
+  server_id: number
   name: string
   description: string
   created_at: string
@@ -57,6 +58,7 @@ export interface IEC104Server {
 
 export interface SignalMapping {
   id: number
+  server_id: number
   topic_id: number
   device_name: string
   variable_type: string

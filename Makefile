@@ -1,41 +1,66 @@
-.PHONY: build frontend embed backend backend-win build-win clean run
+.PHONY: build frontend embed backend backend-win build-win run run-win test vet clean help
 
-BIN := goGateway
+BIN        := goGateway
 FRONT_DIST := frontend/dist
 EMBED_DIST := backend/internal/web/dist
 
-# HTTP listen address for `make run`. Override: `make run PORT=9090` or `make run HTTP=0.0.0.0:9090`.
+# HTTP listen address. Override: make run PORT=9090  or  make run HTTP=0.0.0.0:9090
 PORT ?= 8080
 HTTP ?= :$(PORT)
 
-# IEC 104 frame-trace logging. `make build DEBUG=1` bakes "on" as the binary
-# default; `GW_IEC_DEBUG=1` at runtime still overrides either way.
+# IEC 104 frame-trace logging.
+# make build DEBUG=1  bakes "on" as binary default.
+# GW_IEC_DEBUG=1 at runtime overrides either way.
 DEBUG ?= 0
-LDFLAGS := -X goGateway/internal/config.DefaultHTTPListen=$(HTTP) -X goGateway/internal/iec104.DefaultDebug=$(DEBUG)
+LDFLAGS := -X goGateway/internal/config.DefaultHTTPListen=$(HTTP) \
+           -X goGateway/internal/iec104.DefaultDebug=$(DEBUG)
 
-build: frontend embed backend
+##@ Build
 
-frontend:
+build: frontend embed backend  ## Full Linux build (frontend + embed + Go binary)
+
+build-win: frontend embed backend-win  ## Full Windows/amd64 cross-build
+
+frontend:  ## Build the Vue 3 frontend (pnpm install + vite build)
 	pnpm --dir frontend install --frozen-lockfile || pnpm --dir frontend install
 	pnpm --dir frontend build
 
-embed: frontend
+embed: frontend  ## Copy frontend dist into the Go embed tree
 	rm -rf $(EMBED_DIST)
 	cp -r $(FRONT_DIST) $(EMBED_DIST)
 
-backend:
+backend:  ## Compile Go binary for the current OS/arch
 	@echo "  HTTP=$(HTTP)  DEBUG=$(DEBUG)"
 	cd backend && go build -ldflags "$(LDFLAGS)" -o ../$(BIN) ./cmd/gateway
 
-build-win: frontend embed backend-win
-
-backend-win:
+backend-win:  ## Cross-compile Go binary for Windows/amd64 (CGO_ENABLED=0)
 	@echo "  HTTP=$(HTTP)  DEBUG=$(DEBUG)  (windows/amd64)"
-	cd backend && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o ../$(BIN).exe ./cmd/gateway
+	cd backend && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+	  go build -ldflags "$(LDFLAGS)" -o ../$(BIN).exe ./cmd/gateway
 
-run: build
+##@ Run
+
+run: build  ## Build then run (Linux). PORT= or HTTP= to override listen address.
 	GW_HTTP=$(HTTP) GW_IEC_DEBUG=$(DEBUG) ./$(BIN)
 
-clean:
+run-win: build-win  ## Build Windows binary then run it via Wine (requires wine)
+	GW_HTTP=$(HTTP) GW_IEC_DEBUG=$(DEBUG) wine $(BIN).exe
+
+##@ Quality
+
+test:  ## Run Go unit tests
+	cd backend && go test ./...
+
+vet:  ## Run go vet on all backend packages
+	cd backend && go vet ./...
+
+##@ Misc
+
+clean:  ## Remove build artefacts (binaries + dist directories)
 	rm -f $(BIN) $(BIN).exe
 	rm -rf $(EMBED_DIST) $(FRONT_DIST)
+
+help:  ## Show this help
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} \
+	  /^[a-zA-Z_-]+:.*##/ { printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2 } \
+	  /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)

@@ -1,10 +1,16 @@
+// Package models defines the shared domain structs used across db, api, and
+// worker. All fields map 1:1 to DB columns via sqlx tags.
 package models
 
 import "time"
 
-// Device = logical device (inverter, weather station, ...).
+// Device = logical device (inverter, weather station, ...) on one IEC-104
+// slave. ServerID pins the device to a server row; topics + mappings under
+// it inherit that scope. Same physical asset on two SCADA endpoints = two
+// device rows.
 type Device struct {
 	ID          int64     `db:"id" json:"id"`
+	ServerID    int64     `db:"server_id" json:"server_id"`
 	Name        string    `db:"name" json:"name"`
 	Description string    `db:"description" json:"description"`
 	CreatedAt   time.Time `db:"created_at" json:"created_at"`
@@ -58,9 +64,12 @@ type IEC104Server struct {
 	Enabled  bool   `db:"enabled"   json:"enabled"`
 }
 
-// SignalMapping = core row. MQTT key → IEC 104 point.
+// SignalMapping = core row. MQTT key → IEC 104 point on a specific slave.
+// ServerID pins the mapping to one iec104_servers row; values are dispatched
+// only to that endpoint and (server_id, ioa) is the uniqueness key.
 type SignalMapping struct {
 	ID             int64   `db:"id" json:"id"`
+	ServerID       int64   `db:"server_id" json:"server_id"`
 	TopicID        int64   `db:"topic_id" json:"topic_id"`
 	DeviceName     string  `db:"device_name" json:"device_name"`
 	VariableType   string  `db:"variable_type" json:"variable_type"`

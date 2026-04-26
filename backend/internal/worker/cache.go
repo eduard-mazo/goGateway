@@ -11,6 +11,7 @@ import (
 // TopicMapping = resolved row for dispatch (joins topic + mapping).
 type TopicMapping struct {
 	MappingID  int64
+	ServerID   int64 // IEC-104 slave that receives this point.
 	TopicID    int64
 	Topic      string
 	JSONKey    string
@@ -33,11 +34,12 @@ func NewMappingCache(db *sqlx.DB) *MappingCache {
 
 func (c *MappingCache) Reload() error {
 	rows, err := c.db.Queryx(`
-        SELECT sm.id, sm.topic_id, t.topic, sm.json_key, sm.iec104_type,
-               sm.ioa, sm.scale, sm.device_name
+        SELECT sm.id, sm.server_id, sm.topic_id, t.topic, sm.json_key,
+               sm.iec104_type, sm.ioa, sm.scale, sm.device_name
           FROM signal_mappings sm
           JOIN topics t ON t.id = sm.topic_id
-         WHERE sm.enabled = 1 AND t.enabled = 1`)
+          JOIN iec104_servers s ON s.id = sm.server_id
+         WHERE sm.enabled = 1 AND t.enabled = 1 AND s.enabled = 1`)
 	if err != nil {
 		return err
 	}
@@ -47,8 +49,8 @@ func (c *MappingCache) Reload() error {
 	for rows.Next() {
 		var tm TopicMapping
 		var deviceName string
-		if err := rows.Scan(&tm.MappingID, &tm.TopicID, &tm.Topic, &tm.JSONKey,
-			&tm.IEC104Type, &tm.IOA, &tm.Scale, &deviceName); err != nil {
+		if err := rows.Scan(&tm.MappingID, &tm.ServerID, &tm.TopicID, &tm.Topic,
+			&tm.JSONKey, &tm.IEC104Type, &tm.IOA, &tm.Scale, &deviceName); err != nil {
 			return err
 		}
 		if tm.Scale == 0 {

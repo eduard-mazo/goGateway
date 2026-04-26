@@ -48,6 +48,7 @@
   --signal-ok: #0D9648;
   --signal-warn: #E8A63D;
   --signal-fault: #D8402A;
+  --signal-wait: #6EB3D6;            /* slate-blue: listener up, protocol idle */
 
   --grid-line: #E9EEDF;
 
@@ -93,6 +94,7 @@
   --signal-ok: #9FCF67;
   --signal-warn: #F0BE5D;
   --signal-fault: #F06452;
+  --signal-wait: #8EC9E6;
 
   --sidebar: #0A1510;
   --sidebar-foreground: #EEF3E4;
@@ -186,6 +188,12 @@
 /* Flat canvas — no gradients, optional fine grid. */
 .bg-grain {
   background-color: var(--background);
+}
+
+/* Sonner toast layer — float above sticky header (z-30) and dialog overlay
+   (reka-ui uses z-50). Lifted to z-[100] so user feedback always visible. */
+[data-sonner-toaster] {
+  z-index: 100 !important;
 }
 
 /* Heart-m accent: decorative brand rule. */

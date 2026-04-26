@@ -1,11 +1,17 @@
 -- SQLite schema for goGateway.
 
+-- Devices are scoped to one IEC-104 slave: a "device" is the asset as it
+-- appears in the SCADA point list of a specific endpoint. The same physical
+-- inverter exposed to two SCADA masters is two device rows (one per server).
 CREATE TABLE IF NOT EXISTS devices (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL UNIQUE,
+    server_id   INTEGER NOT NULL REFERENCES iec104_servers(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
     description TEXT DEFAULT '',
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (server_id, name)
 );
+CREATE INDEX IF NOT EXISTS idx_devices_server ON devices(server_id);
 
 CREATE TABLE IF NOT EXISTS mqtt_config (
     id       INTEGER PRIMARY KEY CHECK (id = 1),
@@ -63,8 +69,14 @@ INSERT OR IGNORE INTO iec104_servers
 -- Legacy singleton table, retired when multi-server support landed.
 DROP TABLE IF EXISTS iec104_config;
 
+-- signal_mappings: each row is a point on ONE specific IEC-104 slave endpoint.
+-- IOA is unique within a server (not globally), since each server has its own
+-- ASDU address space. Worker dispatch routes every MQTT sample to the single
+-- server pinned by server_id; GI from a SCADA master returns only that
+-- server's slice of the point set.
 CREATE TABLE IF NOT EXISTS signal_mappings (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id      INTEGER NOT NULL REFERENCES iec104_servers(id) ON DELETE CASCADE,
     topic_id       INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
     device_name    TEXT DEFAULT '',
     variable_type  TEXT DEFAULT '',
@@ -75,9 +87,10 @@ CREATE TABLE IF NOT EXISTS signal_mappings (
     unit           TEXT DEFAULT '',
     scale          REAL NOT NULL DEFAULT 1.0,
     enabled        INTEGER NOT NULL DEFAULT 1,
-    UNIQUE (ioa)
+    UNIQUE (server_id, ioa)
 );
 CREATE INDEX IF NOT EXISTS idx_sigmap_topic ON signal_mappings(topic_id);
+CREATE INDEX IF NOT EXISTS idx_sigmap_server ON signal_mappings(server_id);
 
 CREATE TABLE IF NOT EXISTS history (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

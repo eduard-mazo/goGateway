@@ -1,3 +1,5 @@
+// Package api exposes the gateway's REST endpoints via chi.Router.
+// Each resource type has a dedicated handler struct that mounts its routes.
 package api
 
 import (
@@ -20,9 +22,18 @@ func (h *DeviceHandler) Mount(r chi.Router) {
 	r.Delete("/{id}", h.delete)
 }
 
+const devCols = `id,server_id,name,description,created_at`
+
 func (h *DeviceHandler) list(w http.ResponseWriter, r *http.Request) {
 	var out []models.Device
-	if err := h.DB.Select(&out, `SELECT id,name,description,created_at FROM devices ORDER BY id`); err != nil {
+	q := `SELECT ` + devCols + ` FROM devices`
+	args := []any{}
+	if sid := r.URL.Query().Get("server_id"); sid != "" {
+		q += ` WHERE server_id=?`
+		args = append(args, sid)
+	}
+	q += ` ORDER BY server_id, id`
+	if err := h.DB.Select(&out, q, args...); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -35,7 +46,11 @@ func (h *DeviceHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	res, err := h.DB.Exec(`INSERT INTO devices(name,description) VALUES(?,?)`, d.Name, d.Description)
+	if d.ServerID == 0 {
+		writeErr(w, 400, "server_id required")
+		return
+	}
+	res, err := h.DB.Exec(`INSERT INTO devices(server_id,name,description) VALUES(?,?,?)`, d.ServerID, d.Name, d.Description)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -45,9 +60,13 @@ func (h *DeviceHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *DeviceHandler) get(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	var d models.Device
-	if err := h.DB.Get(&d, `SELECT id,name,description,created_at FROM devices WHERE id=?`, id); err != nil {
+	if err := h.DB.Get(&d, `SELECT `+devCols+` FROM devices WHERE id=?`, id); err != nil {
 		writeErr(w, 404, "not found")
 		return
 	}
@@ -55,13 +74,21 @@ func (h *DeviceHandler) get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *DeviceHandler) update(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	var d models.Device
 	if err := decode(r, &d); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if _, err := h.DB.Exec(`UPDATE devices SET name=?,description=? WHERE id=?`, d.Name, d.Description, id); err != nil {
+	if d.ServerID == 0 {
+		writeErr(w, 400, "server_id required")
+		return
+	}
+	if _, err := h.DB.Exec(`UPDATE devices SET server_id=?,name=?,description=? WHERE id=?`, d.ServerID, d.Name, d.Description, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -70,7 +97,11 @@ func (h *DeviceHandler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *DeviceHandler) delete(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	if _, err := h.DB.Exec(`DELETE FROM devices WHERE id=?`, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return
