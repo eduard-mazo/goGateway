@@ -24,10 +24,11 @@ type Manager struct {
 	iec   iec104.Server
 	hist  *worker.HistoryLogger
 
-	mu     sync.Mutex
-	client paho.Client
-	subs   map[string]struct{} // currently subscribed topics
-	broker string              // last built broker URL
+	mu        sync.Mutex
+	client    paho.Client
+	subs      map[string]struct{} // currently subscribed topics
+	broker    string              // last built broker URL
+	connected atomic.Bool         // set by onConnect / connectionLost; faster than IsConnected()
 
 	messages atomic.Int64
 	lastMsg  atomic.Int64 // unix nano
@@ -45,9 +46,8 @@ type Status struct {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	connected := m.client != nil && m.client.IsConnected()
 	return Status{
-		Connected: connected,
+		Connected: m.connected.Load(),
 		Broker:    m.broker,
 		Topics:    len(m.subs),
 		Messages:  m.messages.Load(),
@@ -110,9 +110,10 @@ func (m *Manager) reload() error {
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
-		SetKeepAlive(30 * time.Second).
+		SetKeepAlive(5 * time.Second).
 		SetOnConnectHandler(m.onConnect).
 		SetConnectionLostHandler(func(_ paho.Client, err error) {
+			m.connected.Store(false)
 			log.Printf("mqtt connection lost: %v", err)
 		})
 	if cfg.Username != "" {
@@ -122,6 +123,7 @@ func (m *Manager) reload() error {
 	c := paho.NewClient(opts)
 	m.client = c
 	m.subs = map[string]struct{}{}
+	m.connected.Store(false)
 
 	tok := c.Connect()
 	// don't block: paho retries. Log outcome async.
@@ -136,6 +138,7 @@ func (m *Manager) reload() error {
 
 // onConnect = (re)subscribe to all topics in cache.
 func (m *Manager) onConnect(c paho.Client) {
+	m.connected.Store(true)
 	topics := m.cache.Topics()
 	log.Printf("mqtt connected, subscribing %d topic(s)", len(topics))
 	for _, t := range topics {

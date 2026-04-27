@@ -1,4 +1,4 @@
-.PHONY: build frontend embed backend backend-win build-win run run-win test vet clean help
+.PHONY: build frontend embed backend backend-win backend-rh-amd64 backend-rh-ppc64le build-win build-rh-amd64 build-rh-ppc64le run run-win test vet clean help
 
 BIN        := goGateway
 FRONT_DIST := frontend/dist
@@ -21,6 +21,10 @@ build: frontend embed backend  ## Full Linux build (frontend + embed + Go binary
 
 build-win: frontend embed backend-win  ## Full Windows/amd64 cross-build
 
+build-rh-amd64: frontend embed backend-rh-amd64  ## Full Red Hat/x86_64 cross-build
+
+build-rh-ppc64le: frontend embed backend-rh-ppc64le  ## Full Red Hat/ppc64le cross-build
+
 frontend:  ## Build the Vue 3 frontend (pnpm install + vite build)
 	pnpm --dir frontend install --frozen-lockfile || pnpm --dir frontend install
 	pnpm --dir frontend build
@@ -37,6 +41,16 @@ backend-win:  ## Cross-compile Go binary for Windows/amd64 (CGO_ENABLED=0)
 	@echo "  HTTP=$(HTTP)  DEBUG=$(DEBUG)  (windows/amd64)"
 	cd backend && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
 	  go build -ldflags "$(LDFLAGS)" -o ../$(BIN).exe ./cmd/gateway
+
+backend-rh-amd64:  ## Cross-compile Go binary for Red Hat Linux/x86_64 (CGO_ENABLED=0)
+	@echo "  HTTP=$(HTTP)  DEBUG=$(DEBUG)  (linux/amd64 rhel)"
+	cd backend && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+	  go build -ldflags "$(LDFLAGS)" -o ../$(BIN)-linux-amd64 ./cmd/gateway
+
+backend-rh-ppc64le:  ## Cross-compile Go binary for Red Hat Linux/ppc64le (CGO_ENABLED=0)
+	@echo "  HTTP=$(HTTP)  DEBUG=$(DEBUG)  (linux/ppc64le rhel)"
+	cd backend && GOOS=linux GOARCH=ppc64le CGO_ENABLED=0 \
+	  go build -ldflags "$(LDFLAGS)" -o ../$(BIN)-linux-ppc64le ./cmd/gateway
 
 ##@ Run
 
@@ -57,7 +71,7 @@ vet:  ## Run go vet on all backend packages
 ##@ Misc
 
 clean:  ## Remove build artefacts (binaries + dist directories)
-	rm -f $(BIN) $(BIN).exe
+	rm -f $(BIN) $(BIN).exe $(BIN)-linux-amd64 $(BIN)-linux-ppc64le
 	rm -rf $(EMBED_DIST) $(FRONT_DIST)
 
 help:  ## Show this help
