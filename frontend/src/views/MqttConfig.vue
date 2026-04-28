@@ -8,13 +8,14 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { Radio, RefreshCw, Save, Shield, Wifi, KeyRound, User } from 'lucide-vue-next'
+import { Radio, RefreshCw, Save, Shield, Wifi, KeyRound, User, Zap } from 'lucide-vue-next'
 
 const { status } = useStatus()
 
 const cfg = ref<MQTTConfig>({
   id: 1, host: 'localhost', port: 1883, username: '', password: '',
   client_id: 'goGateway', use_tls: false,
+  sparkplug_enabled: false, sp_group_id: 'goGateway', sp_host_id: 'goGateway-host',
 })
 const saving = ref(false)
 
@@ -147,6 +148,38 @@ function fmtAgo(ts?: number | null) {
             </Label>
             <div class="text-xs text-muted-foreground mt-0.5">
               Use encrypted broker transport. Disables for localhost dev.
+            </div>
+          </div>
+        </div>
+
+        <!-- Sparkplug B -->
+        <div class="rounded-lg border border-[color:color-mix(in_srgb,var(--epm-bosque)_20%,transparent)] overflow-hidden">
+          <div class="flex items-center gap-3 px-4 py-3 bg-[color:color-mix(in_srgb,var(--epm-bosque)_6%,transparent)]">
+            <Switch id="sp" v-model="cfg.sparkplug_enabled" />
+            <div class="flex-1">
+              <Label for="sp" class="font-bold inline-flex items-center gap-1.5">
+                <Zap class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" /> Sparkplug B
+              </Label>
+              <div class="text-xs text-muted-foreground mt-0.5">
+                Subscribe to <span class="font-mono">spBv1.0/{group}/#</span> protobuf messages and map metrics to IEC-104 points.
+                Disable for plain JSON topics.
+              </div>
+            </div>
+          </div>
+          <div v-if="cfg.sparkplug_enabled" class="grid grid-cols-2 gap-4 px-4 pb-4 pt-3 border-t border-[color:color-mix(in_srgb,var(--epm-bosque)_12%,transparent)]">
+            <div class="space-y-1.5">
+              <Label for="sp_group" class="text-[11px] uppercase tracking-[0.18em] font-bold">Group ID</Label>
+              <Input id="sp_group" v-model="cfg.sp_group_id" placeholder="goGateway" class="rounded-sm font-mono" />
+              <p class="text-[11px] text-muted-foreground">
+                Subscribes to <span class="font-mono">spBv1.0/{{ cfg.sp_group_id || '…' }}/#</span>
+              </p>
+            </div>
+            <div class="space-y-1.5">
+              <Label for="sp_host" class="text-[11px] uppercase tracking-[0.18em] font-bold">Host ID</Label>
+              <Input id="sp_host" v-model="cfg.sp_host_id" placeholder="goGateway-host" class="rounded-sm font-mono" />
+              <p class="text-[11px] text-muted-foreground">
+                STATE topic: <span class="font-mono">STATE/{{ cfg.sp_host_id || '…' }}</span>
+              </p>
             </div>
           </div>
         </div>

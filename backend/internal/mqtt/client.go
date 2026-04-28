@@ -13,6 +13,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"goGateway/internal/iec104"
+	"goGateway/internal/sparkplug"
 	"goGateway/internal/worker"
 )
 
@@ -32,7 +33,17 @@ type Manager struct {
 
 	messages atomic.Int64
 	lastMsg  atomic.Int64 // unix nano
+
+	// Sparkplug B state — non-nil only when SparkplugEnabled.
+	registry  *sparkplug.Registry
+	spHandler *worker.SparkplugHandler
+	bdSeq     atomic.Uint64 // birth/death sequence; increments on every MQTT CONNECT
+	cfg       worker.MQTTConfigSnapshot
 }
+
+// MQTTConfigSnapshot is a copy of the config values the manager needs outside
+// the DB lock (e.g., in callback goroutines).
+// It mirrors worker.LoadMQTTConfig but avoids a DB round-trip in hot paths.
 
 // Status = live broker status snapshot.
 type Status struct {
@@ -98,12 +109,29 @@ func (m *Manager) reload() error {
 		m.client.Disconnect(200)
 	}
 
+	// Build Sparkplug B handler when enabled.
+	if cfg.SparkplugEnabled {
+		if m.registry == nil {
+			m.registry = sparkplug.NewRegistry()
+		}
+		m.spHandler = worker.NewSparkplugHandler(m.registry, m.cache, m.iec, m.hist)
+		m.spHandler.SetRebirthFn(m.publishRebirth)
+		m.cfg = worker.MQTTConfigSnapshot{
+			SpGroupID: cfg.SpGroupID,
+			SpHostID:  cfg.SpHostID,
+		}
+	} else {
+		m.registry = nil
+		m.spHandler = nil
+	}
+
 	scheme := "tcp"
 	if cfg.UseTLS {
 		scheme = "ssl"
 	}
 	brokerURL := fmt.Sprintf("%s://%s:%d", scheme, cfg.Host, cfg.Port)
 	m.broker = brokerURL
+
 	opts := paho.NewClientOptions().
 		AddBroker(brokerURL).
 		SetClientID(cfg.ClientID).
@@ -112,12 +140,17 @@ func (m *Manager) reload() error {
 		SetConnectRetryInterval(5 * time.Second).
 		SetKeepAlive(5 * time.Second).
 		SetOnConnectHandler(m.onConnect).
-		SetConnectionLostHandler(func(_ paho.Client, err error) {
-			m.connected.Store(false)
-			log.Printf("mqtt connection lost: %v", err)
-		})
+		SetConnectionLostHandler(m.onConnectionLost)
+
 	if cfg.Username != "" {
 		opts.SetUsername(cfg.Username).SetPassword(cfg.Password)
+	}
+
+	// Sparkplug B: register LWT as "STATE/{hostID}" = "OFFLINE", retained, QoS 1.
+	// Per spec §7.5.1 the STATE payload is plain UTF-8 (not protobuf).
+	if cfg.SparkplugEnabled {
+		willTopic := sparkplug.StateTopicFor(cfg.SpHostID)
+		opts.SetWill(willTopic, "OFFLINE", 1, true)
 	}
 
 	c := paho.NewClient(opts)
@@ -136,9 +169,58 @@ func (m *Manager) reload() error {
 	return nil
 }
 
-// onConnect = (re)subscribe to all topics in cache.
+// onConnect is called by paho on every (re)connection.
 func (m *Manager) onConnect(c paho.Client) {
 	m.connected.Store(true)
+	m.bdSeq.Add(1) // advance birth/death sequence on each new session
+
+	m.mu.Lock()
+	isSparkplug := m.spHandler != nil
+	cfg := m.cfg
+	m.mu.Unlock()
+
+	if isSparkplug {
+		m.onConnectSparkplug(c, cfg)
+	} else {
+		m.onConnectJSON(c)
+	}
+}
+
+// onConnectSparkplug handles Sparkplug B session establishment:
+//  1. Publishes STATE = "ONLINE" (retained, QoS 1) — the Primary Application birth.
+//  2. Subscribes to the configured group wildcard.
+func (m *Manager) onConnectSparkplug(c paho.Client, cfg worker.MQTTConfigSnapshot) {
+	// Publish Primary Application STATE birth certificate.
+	stateTopic := sparkplug.StateTopicFor(cfg.SpHostID)
+	tok := c.Publish(stateTopic, 1, true, []byte("ONLINE"))
+	go func() {
+		tok.Wait()
+		if err := tok.Error(); err != nil {
+			log.Printf("mqtt sparkplug STATE publish: %v", err)
+		}
+	}()
+
+	// Subscribe to all messages in the configured Sparkplug B group.
+	wildcard := sparkplug.WildcardFor(cfg.SpGroupID)
+	log.Printf("mqtt sparkplug connected, subscribing %s", wildcard)
+
+	subTok := c.Subscribe(wildcard, 0, func(_ paho.Client, msg paho.Message) {
+		m.onMessage(msg.Topic(), msg.Payload())
+	})
+	go func() {
+		subTok.Wait()
+		if err := subTok.Error(); err != nil {
+			log.Printf("mqtt sparkplug subscribe %s: %v", wildcard, err)
+		}
+	}()
+
+	m.mu.Lock()
+	m.subs[wildcard] = struct{}{}
+	m.mu.Unlock()
+}
+
+// onConnectJSON handles plain-JSON session establishment (original behaviour).
+func (m *Manager) onConnectJSON(c paho.Client) {
 	topics := m.cache.Topics()
 	log.Printf("mqtt connected, subscribing %d topic(s)", len(topics))
 	for _, t := range topics {
@@ -158,9 +240,67 @@ func (m *Manager) onConnect(c paho.Client) {
 	}
 }
 
+// onConnectionLost is called by paho whenever the TCP connection drops.
+func (m *Manager) onConnectionLost(_ paho.Client, err error) {
+	m.connected.Store(false)
+	log.Printf("mqtt connection lost: %v", err)
+
+	// Mark all currently-online Sparkplug B nodes stale in IEC-104.
+	m.mu.Lock()
+	handler := m.spHandler
+	reg := m.registry
+	m.mu.Unlock()
+
+	if handler == nil || reg == nil {
+		return
+	}
+	for _, nk := range reg.MarkAllOffline() {
+		base := sparkplug.Namespace + "/" + nk.GroupID + "/" + nk.EdgeNodeID
+		handler.MarkNodeStale(base)
+	}
+}
+
 func (m *Manager) onMessage(topic string, payload []byte) {
 	m.messages.Add(1)
 	m.lastMsg.Store(time.Now().UnixNano())
+
+	m.mu.Lock()
+	handler := m.spHandler
+	m.mu.Unlock()
+
+	if handler != nil {
+		t, ok := sparkplug.ParseTopic(topic)
+		if !ok {
+			return // not a valid spBv1.0 topic (e.g., the STATE topic itself)
+		}
+		handler.Dispatch(t, payload)
+		return
+	}
+
+	// JSON mode: original hot path.
 	maps := m.cache.Lookup(topic)
 	worker.ParseAndDispatch(topic, payload, maps, m.iec, m.hist)
+}
+
+// publishRebirth sends an NCMD message requesting the EoN node to re-publish
+// its NBIRTH.  Called by SparkplugHandler on out-of-sequence NDATA.
+func (m *Manager) publishRebirth(groupID, nodeID string) {
+	m.mu.Lock()
+	c := m.client
+	connected := m.connected.Load()
+	m.mu.Unlock()
+
+	if c == nil || !connected {
+		return
+	}
+	topic := fmt.Sprintf("%s/%s/NCMD/%s", sparkplug.Namespace, groupID, nodeID)
+	payload := sparkplug.EncodeNCMDRebirth()
+	tok := c.Publish(topic, 0, false, payload)
+	go func() {
+		tok.Wait()
+		if err := tok.Error(); err != nil {
+			log.Printf("mqtt NCMD rebirth %s/%s: %v", groupID, nodeID, err)
+		}
+	}()
+	log.Printf("sparkplug: sent NCMD rebirth to %s/%s", groupID, nodeID)
 }

@@ -28,7 +28,7 @@ func (h *MappingHandler) notify() {
 	}
 }
 
-const mapCols = `id,server_id,topic_id,device_name,variable_type,characteristic,json_key,iec104_type,ioa,unit,scale,enabled`
+const mapCols = `id,server_id,topic_id,device_name,variable_type,characteristic,json_key,quality_key,metric_name,iec104_type,ioa,unit,scale,enabled`
 
 func (h *MappingHandler) list(w http.ResponseWriter, r *http.Request) {
 	var out []models.SignalMapping
@@ -77,8 +77,8 @@ func (h *MappingHandler) create(w http.ResponseWriter, r *http.Request) {
 	if m.Scale == 0 {
 		m.Scale = 1.0
 	}
-	res, err := h.DB.Exec(`INSERT INTO signal_mappings(server_id,topic_id,device_name,variable_type,characteristic,json_key,iec104_type,ioa,unit,scale,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		m.ServerID, m.TopicID, m.DeviceName, m.VariableType, m.Characteristic, m.JSONKey, m.IEC104Type, m.IOA, m.Unit, m.Scale, m.Enabled)
+	res, err := h.DB.Exec(`INSERT INTO signal_mappings(server_id,topic_id,device_name,variable_type,characteristic,json_key,quality_key,metric_name,iec104_type,ioa,unit,scale,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		m.ServerID, m.TopicID, m.DeviceName, m.VariableType, m.Characteristic, m.JSONKey, m.QualityKey, m.MetricName, m.IEC104Type, m.IOA, m.Unit, m.Scale, m.Enabled)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -110,8 +110,8 @@ func (h *MappingHandler) update(w http.ResponseWriter, r *http.Request) {
 	if m.Scale == 0 {
 		m.Scale = 1.0
 	}
-	if _, err := h.DB.Exec(`UPDATE signal_mappings SET server_id=?,topic_id=?,device_name=?,variable_type=?,characteristic=?,json_key=?,iec104_type=?,ioa=?,unit=?,scale=?,enabled=? WHERE id=?`,
-		m.ServerID, m.TopicID, m.DeviceName, m.VariableType, m.Characteristic, m.JSONKey, m.IEC104Type, m.IOA, m.Unit, m.Scale, m.Enabled, id); err != nil {
+	if _, err := h.DB.Exec(`UPDATE signal_mappings SET server_id=?,topic_id=?,device_name=?,variable_type=?,characteristic=?,json_key=?,quality_key=?,metric_name=?,iec104_type=?,ioa=?,unit=?,scale=?,enabled=? WHERE id=?`,
+		m.ServerID, m.TopicID, m.DeviceName, m.VariableType, m.Characteristic, m.JSONKey, m.QualityKey, m.MetricName, m.IEC104Type, m.IOA, m.Unit, m.Scale, m.Enabled, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}

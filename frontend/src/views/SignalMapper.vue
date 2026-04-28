@@ -114,6 +114,7 @@ const filteredMappings = computed(() => {
     const srv = serverById.value[m.server_id]
     return [
       m.device_name, m.variable_type, m.characteristic, m.json_key,
+      m.quality_key, m.metric_name,
       m.iec104_type, String(m.ioa), m.unit,
       t?.topic ?? '', dev?.name ?? '', dev?.description ?? '',
       srv?.name ?? '', srv ? String(srv.port) : '',
@@ -201,7 +202,7 @@ watch(search, q => {
 function empty(): SignalMapping {
   return {
     id: 0, server_id: 0, topic_id: 0, device_name: '', variable_type: '', characteristic: '',
-    json_key: '', iec104_type: 'M_ME_TF_1', ioa: 0, unit: '', scale: 1.0, enabled: true,
+    json_key: '', quality_key: '', metric_name: '', iec104_type: 'M_ME_TF_1', ioa: 0, unit: '', scale: 1.0, enabled: true,
   }
 }
 
@@ -284,7 +285,7 @@ watch(() => editing.server_id, sid => {
 function validate(): string | null {
   if (!editing.server_id) return 'IEC-104 server is required'
   if (!editing.topic_id) return 'Topic is required'
-  if (!editing.json_key.trim()) return 'JSON key is required'
+  if (!editing.metric_name.trim() && !editing.json_key.trim()) return 'JSON key or Sparkplug metric name is required'
   if (!editing.iec104_type) return 'IEC 104 type required'
   if (!Number.isInteger(editing.ioa) || editing.ioa <= 0) return 'IOA must be positive int'
   const dup = mappings.value.find(
@@ -365,7 +366,7 @@ onMounted(reload)
         <DialogContent class="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{{ isEdit ? `Edit mapping #${editing.id}` : 'New mapping' }}</DialogTitle>
-            <DialogDescription>Bind a JSON key from an MQTT topic to an IEC 104 point.</DialogDescription>
+            <DialogDescription>Bind an MQTT signal (JSON key or Sparkplug B metric) to an IEC 104 point.</DialogDescription>
           </DialogHeader>
 
           <div class="grid grid-cols-6 gap-x-4 gap-y-3 py-2">
@@ -400,8 +401,17 @@ onMounted(reload)
               <Input v-model="editing.device_name" placeholder="Inversor 1" />
             </div>
             <div class="col-span-3 space-y-1.5">
-              <Label>JSON key</Label>
+              <Label>JSON key <span class="text-muted-foreground font-normal text-[10px]">(JSON mode)</span></Label>
               <Input v-model="editing.json_key" placeholder="IA" />
+            </div>
+
+            <div class="col-span-3 space-y-1.5">
+              <Label>Sparkplug metric name <span class="text-muted-foreground font-normal text-[10px]">(Sparkplug B mode)</span></Label>
+              <Input v-model="editing.metric_name" placeholder="outputs/power" class="font-mono" />
+            </div>
+            <div class="col-span-3 space-y-1.5">
+              <Label>Quality JSON key <span class="text-muted-foreground font-normal text-[10px]">(optional)</span></Label>
+              <Input v-model="editing.quality_key" placeholder="quality" class="font-mono" />
             </div>
 
             <div class="col-span-3 space-y-1.5">
@@ -626,7 +636,7 @@ onMounted(reload)
                       <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
                         <TableHead class="w-14 text-[10px] uppercase tracking-[0.18em] font-bold pl-20">IOA</TableHead>
                         <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">Variable</TableHead>
-                        <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">JSON key</TableHead>
+                        <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">Signal key</TableHead>
                         <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">IEC 104</TableHead>
                         <TableHead class="text-right text-[10px] uppercase tracking-[0.18em] font-bold">Scale</TableHead>
                         <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">Unit</TableHead>
@@ -641,7 +651,13 @@ onMounted(reload)
                           <div class="font-medium text-xs">{{ m.variable_type || m.device_name || '—' }}</div>
                           <div v-if="m.characteristic" class="text-[10px] text-muted-foreground">{{ m.characteristic }}</div>
                         </TableCell>
-                        <TableCell class="font-mono text-xs">{{ m.json_key }}</TableCell>
+                        <TableCell class="font-mono text-xs">
+                          <template v-if="m.metric_name">
+                            <span class="text-[color:var(--epm-bosque)]">{{ m.metric_name }}</span>
+                            <span class="text-[10px] text-muted-foreground ml-1">spB</span>
+                          </template>
+                          <template v-else>{{ m.json_key }}</template>
+                        </TableCell>
                         <TableCell>
                           <span class="inline-flex items-center rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[color:color-mix(in_srgb,var(--epm-citrico)_22%,transparent)] text-[color:var(--epm-bosque)]">
                             {{ m.iec104_type }}
@@ -688,7 +704,7 @@ onMounted(reload)
                 <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Topic</TableHead>
                 <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Device</TableHead>
                 <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Variable type</TableHead>
-                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">JSON key</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Signal key</TableHead>
                 <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">IEC 104</TableHead>
                 <TableHead class="text-right text-[10px] uppercase tracking-[0.2em] font-bold">Scale</TableHead>
                 <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Unit</TableHead>
@@ -704,7 +720,13 @@ onMounted(reload)
                 </TableCell>
                 <TableCell class="font-semibold">{{ m.device_name }}</TableCell>
                 <TableCell class="text-muted-foreground text-xs">{{ m.variable_type }}</TableCell>
-                <TableCell class="font-mono text-xs">{{ m.json_key }}</TableCell>
+                <TableCell class="font-mono text-xs">
+                  <template v-if="m.metric_name">
+                    <span class="text-[color:var(--epm-bosque)]">{{ m.metric_name }}</span>
+                    <span class="text-[10px] text-muted-foreground ml-1">spB</span>
+                  </template>
+                  <template v-else>{{ m.json_key }}</template>
+                </TableCell>
                 <TableCell>
                   <span class="inline-flex items-center rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[color:color-mix(in_srgb,var(--epm-citrico)_22%,transparent)] text-[color:var(--epm-bosque)]">
                     {{ m.iec104_type }}

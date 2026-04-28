@@ -1,0 +1,296 @@
+package worker
+
+import (
+	"log"
+	"time"
+
+	"goGateway/internal/iec104"
+	"goGateway/internal/sparkplug"
+)
+
+// SparkplugHandler processes incoming Sparkplug B MQTT messages and dispatches
+// decoded metric values to the IEC 60870-5-104 slave fleet.
+//
+// The gateway acts as a Sparkplug B Primary Application (SCADA Host):
+//   - It does NOT publish NBIRTH/NDATA of its own.
+//   - It subscribes to EoN node traffic and forwards metrics to IEC-104.
+//   - It publishes STATE (ONLINE/OFFLINE) via the MQTT client.
+//   - It publishes NCMD Rebirth when an out-of-sequence NDATA is detected.
+type SparkplugHandler struct {
+	registry *sparkplug.Registry
+	cache    *MappingCache
+	srv      iec104.Server
+	hist     *HistoryLogger
+	// rebirthFn is called when the handler needs to publish an NCMD Rebirth.
+	// The mqtt.Manager sets this field after creating the handler.
+	rebirthFn func(groupID, nodeID string)
+}
+
+// NewSparkplugHandler returns a handler ready to process Sparkplug B messages.
+func NewSparkplugHandler(
+	registry *sparkplug.Registry,
+	cache *MappingCache,
+	srv iec104.Server,
+	hist *HistoryLogger,
+) *SparkplugHandler {
+	return &SparkplugHandler{
+		registry: registry,
+		cache:    cache,
+		srv:      srv,
+		hist:     hist,
+	}
+}
+
+// SetRebirthFn sets the callback used to publish an NCMD Rebirth when an
+// out-of-sequence message is detected.  The callback is provided by
+// mqtt.Manager after the handler is created.
+func (h *SparkplugHandler) SetRebirthFn(fn func(groupID, nodeID string)) {
+	h.rebirthFn = fn
+}
+
+// Dispatch routes a decoded Sparkplug B topic to the appropriate handler.
+func (h *SparkplugHandler) Dispatch(topic sparkplug.Topic, raw []byte) {
+	switch topic.MsgType {
+	case sparkplug.MsgNBIRTH:
+		h.handleNBIRTH(topic, raw)
+	case sparkplug.MsgNDEATH:
+		h.handleNDEATH(topic, raw)
+	case sparkplug.MsgNDATA:
+		h.handleNDATA(topic, raw)
+	case sparkplug.MsgDBIRTH:
+		h.handleDBIRTH(topic, raw)
+	case sparkplug.MsgDDEATH:
+		h.handleDDEATH(topic, raw)
+	case sparkplug.MsgDDATA:
+		h.handleDDATA(topic, raw)
+	// STATE, NCMD, DCMD are not consumed by the gateway in this direction.
+	}
+}
+
+// MarkNodeStale dispatches QualityNotTopical to every IEC-104 point mapped to
+// nodeBase.  Called by mqtt.Manager on connection loss or NDEATH.
+func (h *SparkplugHandler) MarkNodeStale(nodeBase string) {
+	maps := h.cache.LookupByNode(nodeBase)
+	now := time.Now()
+	for _, m := range maps {
+		h.srv.Dispatch(m.ServerID, iec104.Point{
+			IOA:       m.IOA,
+			TypeID:    m.IEC104Type,
+			Value:     0,
+			Quality:   iec104.QualityNotTopical,
+			Timestamp: now,
+		})
+	}
+}
+
+// ─── Node-level handlers ─────────────────────────────────────────────────────
+
+func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) {
+	p, err := sparkplug.DecodePayload(raw)
+	if err != nil {
+		log.Printf("sparkplug: NBIRTH decode error (%s/%s): %v", topic.GroupID, topic.EdgeNodeID, err)
+		return
+	}
+	if p.Seq != 0 {
+		log.Printf("sparkplug: NBIRTH seq=%d (expected 0) from %s/%s — ignoring",
+			p.Seq, topic.GroupID, topic.EdgeNodeID)
+		return
+	}
+
+	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
+	session := h.registry.Session(key)
+	session.SetBirth(p)
+
+	nodeBase := topic.NodeBase()
+	ts := msToTime(p.Timestamp)
+
+	for i := range p.Metrics {
+		m := &p.Metrics[i]
+		name := session.ResolveName(m)
+		if name == "" || m.IsTransient {
+			continue
+		}
+		h.dispatchMetric(nodeBase, name, m, ts)
+	}
+
+	log.Printf("sparkplug: NBIRTH %s/%s — %d metric(s)", topic.GroupID, topic.EdgeNodeID, len(p.Metrics))
+}
+
+func (h *SparkplugHandler) handleNDEATH(topic sparkplug.Topic, raw []byte) {
+	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
+	session := h.registry.Session(key)
+	session.SetDeath()
+
+	nodeBase := topic.NodeBase()
+	h.MarkNodeStale(nodeBase)
+
+	// Mark all known devices under this node stale too.
+	log.Printf("sparkplug: NDEATH %s/%s — all points marked stale", topic.GroupID, topic.EdgeNodeID)
+}
+
+func (h *SparkplugHandler) handleNDATA(topic sparkplug.Topic, raw []byte) {
+	p, err := sparkplug.DecodePayload(raw)
+	if err != nil {
+		log.Printf("sparkplug: NDATA decode error (%s/%s): %v", topic.GroupID, topic.EdgeNodeID, err)
+		return
+	}
+
+	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
+	session := h.registry.Session(key)
+
+	if !session.AdvanceSeq(p.Seq) {
+		log.Printf("sparkplug: NDATA out-of-sequence from %s/%s (got %d) — requesting rebirth",
+			topic.GroupID, topic.EdgeNodeID, p.Seq)
+		if h.rebirthFn != nil {
+			h.rebirthFn(topic.GroupID, topic.EdgeNodeID)
+		}
+		return
+	}
+
+	nodeBase := topic.NodeBase()
+	ts := msToTime(p.Timestamp)
+
+	for i := range p.Metrics {
+		m := &p.Metrics[i]
+		name := session.ResolveName(m)
+		if name == "" || m.IsTransient {
+			continue
+		}
+		h.dispatchMetric(nodeBase, name, m, ts)
+	}
+}
+
+// ─── Device-level handlers ───────────────────────────────────────────────────
+
+func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) {
+	p, err := sparkplug.DecodePayload(raw)
+	if err != nil {
+		log.Printf("sparkplug: DBIRTH decode error (%s/%s/%s): %v",
+			topic.GroupID, topic.EdgeNodeID, topic.DeviceID, err)
+		return
+	}
+
+	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
+	session := h.registry.Session(key).Device(topic.DeviceID)
+	session.SetBirth(p)
+
+	devBase := topic.DeviceBase()
+	ts := msToTime(p.Timestamp)
+
+	for i := range p.Metrics {
+		m := &p.Metrics[i]
+		name := session.ResolveName(m)
+		if name == "" || m.IsTransient {
+			continue
+		}
+		h.dispatchMetric(devBase, name, m, ts)
+	}
+
+	log.Printf("sparkplug: DBIRTH %s/%s/%s — %d metric(s)",
+		topic.GroupID, topic.EdgeNodeID, topic.DeviceID, len(p.Metrics))
+}
+
+func (h *SparkplugHandler) handleDDEATH(topic sparkplug.Topic, raw []byte) {
+	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
+	h.registry.Session(key).Device(topic.DeviceID).SetDeath()
+
+	devBase := topic.DeviceBase()
+	h.MarkNodeStale(devBase) // reuses same stale-dispatch logic keyed on devBase
+
+	log.Printf("sparkplug: DDEATH %s/%s/%s — all device points marked stale",
+		topic.GroupID, topic.EdgeNodeID, topic.DeviceID)
+}
+
+func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) {
+	p, err := sparkplug.DecodePayload(raw)
+	if err != nil {
+		log.Printf("sparkplug: DDATA decode error (%s/%s/%s): %v",
+			topic.GroupID, topic.EdgeNodeID, topic.DeviceID, err)
+		return
+	}
+
+	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
+	devSession := h.registry.Session(key).Device(topic.DeviceID)
+
+	if !devSession.AdvanceSeq(p.Seq) {
+		log.Printf("sparkplug: DDATA out-of-sequence from %s/%s/%s (got %d) — requesting rebirth",
+			topic.GroupID, topic.EdgeNodeID, topic.DeviceID, p.Seq)
+		if h.rebirthFn != nil {
+			h.rebirthFn(topic.GroupID, topic.EdgeNodeID)
+		}
+		return
+	}
+
+	devBase := topic.DeviceBase()
+	ts := msToTime(p.Timestamp)
+
+	for i := range p.Metrics {
+		m := &p.Metrics[i]
+		name := devSession.ResolveName(m)
+		if name == "" || m.IsTransient {
+			continue
+		}
+		h.dispatchMetric(devBase, name, m, ts)
+	}
+}
+
+// ─── Core dispatch ───────────────────────────────────────────────────────────
+
+// dispatchMetric resolves nodeBase + metricName → signal mappings and forwards
+// the value to every mapped IEC-104 slave.
+func (h *SparkplugHandler) dispatchMetric(
+	nodeBase, metricName string,
+	m *sparkplug.Metric,
+	ts time.Time,
+) {
+	maps := h.cache.LookupByMetric(nodeBase, metricName)
+	if len(maps) == 0 {
+		return
+	}
+
+	val, hasVal := m.Float64()
+	quality := m.IEC104Quality()
+
+	for _, tm := range maps {
+		scaled := val * tm.Scale
+		if hasVal {
+			h.srv.Dispatch(tm.ServerID, iec104.Point{
+				IOA:       tm.IOA,
+				TypeID:    tm.IEC104Type,
+				Value:     scaled,
+				Quality:   quality,
+				Timestamp: ts,
+			})
+		} else {
+			// is_null metric: push invalid quality with zero value.
+			h.srv.Dispatch(tm.ServerID, iec104.Point{
+				IOA:       tm.IOA,
+				TypeID:    tm.IEC104Type,
+				Value:     0,
+				Quality:   iec104.QualityInvalid,
+				Timestamp: ts,
+			})
+		}
+
+		if hasVal {
+			if !h.hist.Log(HistoryEvent{
+				MappingID: tm.MappingID,
+				SignalKey: tm.SignalKey,
+				Value:     scaled,
+				Quality:   quality,
+				Timestamp: ts,
+			}) {
+				log.Printf("sparkplug: history buffer full, dropped %s", tm.SignalKey)
+			}
+		}
+	}
+}
+
+// msToTime converts a Sparkplug B millisecond-epoch timestamp to time.Time.
+// Falls back to time.Now() when timestamp is zero (not set in payload).
+func msToTime(ms uint64) time.Time {
+	if ms == 0 {
+		return time.Now()
+	}
+	return time.UnixMilli(int64(ms))
+}

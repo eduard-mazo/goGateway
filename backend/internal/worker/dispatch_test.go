@@ -99,5 +99,91 @@ func TestParseAndDispatch_Inverter(t *testing.T) {
 	}
 }
 
+func TestParseMQTTQuality(t *testing.T) {
+	cases := []struct {
+		json string
+		want int
+	}{
+		{`0`, iec104.QualityGood},
+		{`128`, iec104.QualityInvalid},
+		{`192`, iec104.QualityInvalid | iec104.QualityNotTopical},
+		{`"GOOD"`, iec104.QualityGood},
+		{`"BAD"`, iec104.QualityInvalid},
+		{`"UNCERTAIN"`, iec104.QualityNotTopical},
+		{`"STALE"`, iec104.QualityNotTopical},
+		{`"SUBSTITUTED"`, iec104.QualitySubstituted},
+		{`"BLOCKED"`, iec104.QualityBlocked},
+		{`"unknown"`, iec104.QualityGood},
+	}
+	for _, c := range cases {
+		got := parseMQTTQuality([]byte(c.json))
+		if got != c.want {
+			t.Errorf("parseMQTTQuality(%s) = 0x%02x, want 0x%02x", c.json, got, c.want)
+		}
+	}
+}
+
+func TestParseAndDispatch_Quality(t *testing.T) {
+	dbh, _ := db.Open(":memory:")
+	defer dbh.Close()
+	hist := NewHistoryLogger(dbh, 64, 10, 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hist.Run(ctx)
+
+	dbh.MustExec(`INSERT INTO devices(id,server_id,name) VALUES(1,1,'dev')`)
+	dbh.MustExec(`INSERT INTO topics(id,device_id,topic,enabled) VALUES(1,1,'t',1)`)
+
+	t.Run("payload_level_integer", func(t *testing.T) {
+		srv := &fakeSrv{}
+		payload := `{"quality":128,"power":1.0}`
+		maps := []TopicMapping{
+			{MappingID: 1, ServerID: 1, JSONKey: "power", IEC104Type: "M_ME_NC_1", IOA: 1, Scale: 1},
+		}
+		dbh.MustExec(`INSERT OR IGNORE INTO signal_mappings(id,server_id,topic_id,json_key,iec104_type,ioa,scale,enabled) VALUES(1,1,1,'power','M_ME_NC_1',1,1,1)`)
+		ParseAndDispatch("t", []byte(payload), maps, srv, hist)
+		if len(srv.points) != 1 || srv.points[0].Quality != iec104.QualityInvalid {
+			t.Errorf("want QualityInvalid (0x80), got 0x%02x", srv.points[0].Quality)
+		}
+	})
+
+	t.Run("payload_level_string", func(t *testing.T) {
+		srv := &fakeSrv{}
+		payload := `{"quality":"UNCERTAIN","power":2.0}`
+		maps := []TopicMapping{
+			{MappingID: 1, ServerID: 1, JSONKey: "power", IEC104Type: "M_ME_NC_1", IOA: 1, Scale: 1},
+		}
+		ParseAndDispatch("t", []byte(payload), maps, srv, hist)
+		if len(srv.points) != 1 || srv.points[0].Quality != iec104.QualityNotTopical {
+			t.Errorf("want QualityNotTopical (0x40), got 0x%02x", srv.points[0].Quality)
+		}
+	})
+
+	t.Run("per_signal_key_overrides_payload", func(t *testing.T) {
+		srv := &fakeSrv{}
+		// payload quality is GOOD but per-signal key says BAD
+		payload := `{"quality":0,"power":3.0,"power_q":128}`
+		maps := []TopicMapping{
+			{MappingID: 1, ServerID: 1, JSONKey: "power", QualityKey: "power_q", IEC104Type: "M_ME_NC_1", IOA: 1, Scale: 1},
+		}
+		ParseAndDispatch("t", []byte(payload), maps, srv, hist)
+		if len(srv.points) != 1 || srv.points[0].Quality != iec104.QualityInvalid {
+			t.Errorf("want QualityInvalid from per-signal key, got 0x%02x", srv.points[0].Quality)
+		}
+	})
+
+	t.Run("no_quality_key_defaults_good", func(t *testing.T) {
+		srv := &fakeSrv{}
+		payload := `{"power":4.0}`
+		maps := []TopicMapping{
+			{MappingID: 1, ServerID: 1, JSONKey: "power", IEC104Type: "M_ME_NC_1", IOA: 1, Scale: 1},
+		}
+		ParseAndDispatch("t", []byte(payload), maps, srv, hist)
+		if len(srv.points) != 1 || srv.points[0].Quality != iec104.QualityGood {
+			t.Errorf("want QualityGood, got 0x%02x", srv.points[0].Quality)
+		}
+	})
+}
+
 // Compile-time check: fakeSrv satisfies iec104.Server.
 var _ iec104.Server = (*fakeSrv)(nil)

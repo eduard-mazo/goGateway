@@ -21,7 +21,9 @@ func (h *MQTTConfigHandler) Mount(r chi.Router) {
 
 func (h *MQTTConfigHandler) get(w http.ResponseWriter, r *http.Request) {
 	var c models.MQTTConfig
-	if err := h.DB.Get(&c, `SELECT id,host,port,username,password,client_id,use_tls FROM mqtt_config WHERE id=1`); err != nil {
+	if err := h.DB.Get(&c, `SELECT id,host,port,username,password,client_id,use_tls,
+	                               sparkplug_enabled,sp_group_id,sp_host_id
+	                          FROM mqtt_config WHERE id=1`); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -34,8 +36,14 @@ func (h *MQTTConfigHandler) update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	_, err := h.DB.Exec(`UPDATE mqtt_config SET host=?,port=?,username=?,password=?,client_id=?,use_tls=? WHERE id=1`,
-		c.Host, c.Port, c.Username, c.Password, c.ClientID, c.UseTLS)
+	_, err := h.DB.Exec(
+		`UPDATE mqtt_config
+		    SET host=?,port=?,username=?,password=?,client_id=?,use_tls=?,
+		        sparkplug_enabled=?,sp_group_id=?,sp_host_id=?
+		  WHERE id=1`,
+		c.Host, c.Port, c.Username, c.Password, c.ClientID, c.UseTLS,
+		c.SparkplugEnabled, c.SpGroupID, c.SpHostID,
+	)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return

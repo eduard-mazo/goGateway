@@ -29,6 +29,9 @@ export interface MQTTConfig {
   password: string
   client_id: string
   use_tls: boolean
+  sparkplug_enabled: boolean
+  sp_group_id: string
+  sp_host_id: string
 }
 
 // IEC104Gateway = host-wide IEC-104 settings. Singleton.
@@ -64,6 +67,8 @@ export interface SignalMapping {
   variable_type: string
   characteristic: string
   json_key: string
+  quality_key: string
+  metric_name: string
   iec104_type: string
   ioa: number
   unit: string

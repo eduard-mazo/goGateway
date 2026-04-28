@@ -14,13 +14,16 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE INDEX IF NOT EXISTS idx_devices_server ON devices(server_id);
 
 CREATE TABLE IF NOT EXISTS mqtt_config (
-    id       INTEGER PRIMARY KEY CHECK (id = 1),
-    host     TEXT NOT NULL DEFAULT 'localhost',
-    port     INTEGER NOT NULL DEFAULT 1883,
-    username TEXT DEFAULT '',
-    password TEXT DEFAULT '',
-    client_id TEXT DEFAULT 'goGateway',
-    use_tls  INTEGER NOT NULL DEFAULT 0
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    host              TEXT    NOT NULL DEFAULT 'localhost',
+    port              INTEGER NOT NULL DEFAULT 1883,
+    username          TEXT    DEFAULT '',
+    password          TEXT    DEFAULT '',
+    client_id         TEXT    DEFAULT 'goGateway',
+    use_tls           INTEGER NOT NULL DEFAULT 0,
+    sparkplug_enabled INTEGER NOT NULL DEFAULT 0,
+    sp_group_id       TEXT    NOT NULL DEFAULT 'goGateway',
+    sp_host_id        TEXT    NOT NULL DEFAULT 'goGateway-host'
 );
 INSERT OR IGNORE INTO mqtt_config (id) VALUES (1);
 
@@ -82,6 +85,8 @@ CREATE TABLE IF NOT EXISTS signal_mappings (
     variable_type  TEXT DEFAULT '',
     characteristic TEXT DEFAULT '',
     json_key       TEXT NOT NULL,
+    quality_key    TEXT NOT NULL DEFAULT '',
+    metric_name    TEXT NOT NULL DEFAULT '',
     iec104_type    TEXT NOT NULL,
     ioa            INTEGER NOT NULL,
     unit           TEXT DEFAULT '',

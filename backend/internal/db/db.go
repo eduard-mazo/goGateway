@@ -89,7 +89,56 @@ func migrate(db *sqlx.DB) error {
 				return fmt.Errorf("signal_mappings rebuild: %w", err)
 			}
 		}
+
+		// signal_mappings: add quality_key column (per-signal quality JSON key).
+		var hasQualityKey int
+		if err := db.Get(&hasQualityKey, `SELECT COUNT(*) FROM pragma_table_info('signal_mappings') WHERE name='quality_key'`); err != nil {
+			return err
+		}
+		if hasQualityKey == 0 {
+			if _, err := db.Exec(`ALTER TABLE signal_mappings ADD COLUMN quality_key TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("add quality_key column: %w", err)
+			}
+		}
+
+		// signal_mappings: add metric_name column (Sparkplug B metric identifier).
+		var hasMetricName int
+		if err := db.Get(&hasMetricName, `SELECT COUNT(*) FROM pragma_table_info('signal_mappings') WHERE name='metric_name'`); err != nil {
+			return err
+		}
+		if hasMetricName == 0 {
+			if _, err := db.Exec(`ALTER TABLE signal_mappings ADD COLUMN metric_name TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("add metric_name column: %w", err)
+			}
+		}
 	}
+
+	// mqtt_config: add Sparkplug B columns.
+	// Guard with table-existence check: on a fresh DB mqtt_config does not exist
+	// yet at migrate() time — schema.sql creates it with the columns already
+	// present, so there is nothing to do.
+	var hasMQTTConfig int
+	if err := db.Get(&hasMQTTConfig, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mqtt_config'`); err != nil {
+		return err
+	}
+	if hasMQTTConfig > 0 {
+		for _, col := range []struct{ name, def string }{
+			{"sparkplug_enabled", "INTEGER NOT NULL DEFAULT 0"},
+			{"sp_group_id", "TEXT NOT NULL DEFAULT 'goGateway'"},
+			{"sp_host_id", "TEXT NOT NULL DEFAULT 'goGateway-host'"},
+		} {
+			var has int
+			if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('mqtt_config') WHERE name=?`, col.name); err != nil {
+				return err
+			}
+			if has == 0 {
+				if _, err := db.Exec(`ALTER TABLE mqtt_config ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
+					return fmt.Errorf("add mqtt_config.%s: %w", col.name, err)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 

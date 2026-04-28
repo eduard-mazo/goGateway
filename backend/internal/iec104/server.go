@@ -88,8 +88,11 @@ const (
 // --- Quality bits (QDS / SIQ / DIQ) ---------------------------------------
 
 const (
-	QualityGood    = 0x00
-	QualityInvalid = 0x80 // IV bit
+	QualityGood        = 0x00
+	QualityInvalid     = 0x80 // IV — value not usable
+	QualityNotTopical  = 0x40 // NT — value is old/stale
+	QualitySubstituted = 0x20 // SB — value was manually substituted
+	QualityBlocked     = 0x10 // BL — value update blocked
 )
 
 // seqMask enforces the 15-bit IEC-104 sequence number space (N(S)/N(R)).
