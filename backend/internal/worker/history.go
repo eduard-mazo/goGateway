@@ -84,7 +84,38 @@ func (h *HistoryLogger) Run(ctx context.Context) {
 			}
 		case <-tick.C:
 			flush()
+			h.trim()
 		}
+	}
+}
+
+const histMaxBytes = 250 * 1024 * 1024 // 250 MB
+
+// trim deletes the oldest 25 % of history rows when the DB data exceeds 250 MB.
+// Uses (page_count - freelist_count) * page_size so free pages after DELETE are
+// correctly excluded without needing a VACUUM.
+func (h *HistoryLogger) trim() {
+	var pageCount, freeCount, pageSize int64
+	if h.db.Get(&pageCount, `PRAGMA page_count`) != nil ||
+		h.db.Get(&freeCount, `PRAGMA freelist_count`) != nil ||
+		h.db.Get(&pageSize, `PRAGMA page_size`) != nil {
+		return
+	}
+	if (pageCount-freeCount)*pageSize <= histMaxBytes {
+		return
+	}
+	var total int64
+	if err := h.db.Get(&total, `SELECT COUNT(*) FROM history`); err != nil || total == 0 {
+		return
+	}
+	del := total / 4
+	if del < 1000 {
+		del = 1000
+	}
+	if _, err := h.db.Exec(
+		`DELETE FROM history WHERE id IN (SELECT id FROM history ORDER BY id ASC LIMIT ?)`, del,
+	); err != nil {
+		log.Printf("history trim: %v", err)
 	}
 }
 

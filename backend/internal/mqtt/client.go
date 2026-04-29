@@ -221,21 +221,21 @@ func (m *Manager) onConnectSparkplug(c paho.Client, cfg worker.MQTTConfigSnapsho
 
 // onConnectJSON handles plain-JSON session establishment (original behaviour).
 func (m *Manager) onConnectJSON(c paho.Client) {
-	topics := m.cache.Topics()
-	log.Printf("mqtt connected, subscribing %d topic(s)", len(topics))
-	for _, t := range topics {
-		topic := t
-		tok := c.Subscribe(topic, 0, func(_ paho.Client, msg paho.Message) {
+	tqos := m.cache.TopicsQoS()
+	log.Printf("mqtt connected, subscribing %d topic(s)", len(tqos))
+	for topic, qos := range tqos {
+		t, q := topic, qos
+		tok := c.Subscribe(t, q, func(_ paho.Client, msg paho.Message) {
 			m.onMessage(msg.Topic(), msg.Payload())
 		})
 		go func() {
 			tok.Wait()
 			if err := tok.Error(); err != nil {
-				log.Printf("mqtt subscribe %s: %v", topic, err)
+				log.Printf("mqtt subscribe %s (qos %d): %v", t, q, err)
 			}
 		}()
 		m.mu.Lock()
-		m.subs[topic] = struct{}{}
+		m.subs[t] = struct{}{}
 		m.mu.Unlock()
 	}
 }

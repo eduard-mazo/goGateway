@@ -31,6 +31,7 @@ type MappingCache struct {
 	db    *sqlx.DB
 	mu    sync.RWMutex
 	m     map[string][]TopicMapping // JSON mode: exact topic → mappings
+	qos   map[string]byte           // JSON mode: topic → QoS (from topics.qos)
 	sp    map[string][]TopicMapping // Sparkplug B: nodeBase\x00metricName → mappings
 	spAll map[string][]TopicMapping // Sparkplug B: nodeBase → all mappings for that node
 }
@@ -39,6 +40,7 @@ func NewMappingCache(db *sqlx.DB) *MappingCache {
 	return &MappingCache{
 		db:    db,
 		m:     map[string][]TopicMapping{},
+		qos:   map[string]byte{},
 		sp:    map[string][]TopicMapping{},
 		spAll: map[string][]TopicMapping{},
 	}
@@ -46,7 +48,7 @@ func NewMappingCache(db *sqlx.DB) *MappingCache {
 
 func (c *MappingCache) Reload() error {
 	rows, err := c.db.Queryx(`
-        SELECT sm.id, sm.server_id, sm.topic_id, t.topic, sm.json_key,
+        SELECT sm.id, sm.server_id, sm.topic_id, t.topic, t.qos, sm.json_key,
                sm.quality_key, sm.metric_name, sm.iec104_type, sm.ioa, sm.scale, sm.device_name
           FROM signal_mappings sm
           JOIN topics t ON t.id = sm.topic_id
@@ -58,14 +60,16 @@ func (c *MappingCache) Reload() error {
 	defer rows.Close()
 
 	next := map[string][]TopicMapping{}
+	nextQoS := map[string]byte{}
 	sp := map[string][]TopicMapping{}
 	spAll := map[string][]TopicMapping{}
 
 	for rows.Next() {
 		var tm TopicMapping
 		var deviceName string
+		var topicQoS int
 		if err := rows.Scan(
-			&tm.MappingID, &tm.ServerID, &tm.TopicID, &tm.Topic,
+			&tm.MappingID, &tm.ServerID, &tm.TopicID, &tm.Topic, &topicQoS,
 			&tm.JSONKey, &tm.QualityKey, &tm.MetricName,
 			&tm.IEC104Type, &tm.IOA, &tm.Scale, &deviceName,
 		); err != nil {
@@ -84,11 +88,16 @@ func (c *MappingCache) Reload() error {
 		} else {
 			// JSON mode: exact topic string.
 			next[tm.Topic] = append(next[tm.Topic], tm)
+			// Take the highest QoS seen for this topic across all its mappings.
+			if q := byte(topicQoS); q > nextQoS[tm.Topic] {
+				nextQoS[tm.Topic] = q
+			}
 		}
 	}
 
 	c.mu.Lock()
 	c.m = next
+	c.qos = nextQoS
 	c.sp = sp
 	c.spAll = spAll
 	c.mu.Unlock()
@@ -119,13 +128,14 @@ func (c *MappingCache) LookupByNode(nodeBase string) []TopicMapping {
 	return c.spAll[nodeBase]
 }
 
-// Topics = distinct subscribed topics.
-func (c *MappingCache) Topics() []string {
+// TopicsQoS returns topic → QoS for all active JSON-mode topics.
+// The QoS is the highest value configured across all mappings for that topic.
+func (c *MappingCache) TopicsQoS() map[string]byte {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	out := make([]string, 0, len(c.m))
-	for t := range c.m {
-		out = append(out, t)
+	out := make(map[string]byte, len(c.qos))
+	for t, q := range c.qos {
+		out[t] = q
 	}
 	return out
 }
