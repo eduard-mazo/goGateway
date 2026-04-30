@@ -279,7 +279,8 @@ watch(() => editing.server_id, sid => {
   const t = topics.value.find(x => x.id === editing.topic_id)
   const dev = t ? deviceById.value[t.device_id] : null
   if (!dev || dev.server_id !== sid) editing.topic_id = 0
-  editing.ioa = suggestIOA(sid, editing.id)
+  // Only suggest a new IOA when creating; keep the stored value on edit.
+  if (editing.id === 0) editing.ioa = suggestIOA(sid)
 })
 
 function validate(): string | null {

@@ -967,11 +967,9 @@ func encodeInfoObject(p Point) (byte, []byte, error) {
 
 	case "M_DP_NA_1":
 		diq := q & 0xF0
-		if p.Value > 0 {
-			diq |= 0x02
-		} else {
-			diq |= 0x01
-		}
+		// DPI bits: 0=intermediate, 1=OFF, 2=ON, 3=indeterminate (IEC 60870-5-101 §7.2.6.4)
+		dpi := byte(math.Round(p.Value)) & 0x03
+		diq |= dpi
 		b := make([]byte, 0, 4)
 		b = append(b, ioa...)
 		b = append(b, diq)
