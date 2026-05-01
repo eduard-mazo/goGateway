@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -84,13 +86,15 @@ func (v *VMAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 		return fmt.Errorf("vm write: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body) //nolint:errcheck
 	if resp.StatusCode >= 400 {
-		msg := fmt.Sprintf("http %d", resp.StatusCode)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		msg := fmt.Sprintf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody)))
 		v.errorCount.Add(1)
 		v.lastErrMsg.Store(msg)
+		log.Printf("tsdb [victoriametrics] write rejected: %s", msg)
 		return fmt.Errorf("vm write: %s", msg)
 	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
 	v.writeCount.Add(int64(len(batch)))
 	v.bytesTotal.Add(int64(n))
 	v.rateTracker.record(int64(len(batch)))
@@ -136,7 +140,12 @@ func (v *VMAdapter) Close() error {
 func encodeLineProtocolGzip(batch []DataPoint) (io.Reader, int, error) {
 	var buf bytes.Buffer
 	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	skipped := 0
 	for _, p := range batch {
+		if p.Measurement == "" {
+			skipped++
+			continue
+		}
 		fmt.Fprint(gz, escLP(p.Measurement))
 		for k, val := range p.Tags {
 			fmt.Fprintf(gz, ",%s=%s", escLP(k), escLP(val))
@@ -154,6 +163,9 @@ func encodeLineProtocolGzip(batch []DataPoint) (io.Reader, int, error) {
 	}
 	if err := gz.Close(); err != nil {
 		return nil, 0, err
+	}
+	if skipped > 0 {
+		log.Printf("tsdb [victoriametrics] skipped %d points with empty measurement (IEC104Type not set)", skipped)
 	}
 	return &buf, buf.Len(), nil
 }

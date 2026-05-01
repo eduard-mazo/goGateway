@@ -274,11 +274,13 @@ func (h *SparkplugHandler) dispatchMetric(
 
 		if hasVal {
 			if !h.hist.Log(HistoryEvent{
-				MappingID: tm.MappingID,
-				SignalKey: tm.SignalKey,
-				Value:     scaled,
-				Quality:   quality,
-				Timestamp: ts,
+				MappingID:  tm.MappingID,
+				SignalKey:  tm.SignalKey,
+				Value:      scaled,
+				Quality:    quality,
+				Timestamp:  ts,
+				IOA:        tm.IOA,
+				IEC104Type: tm.IEC104Type,
 			}) {
 				log.Printf("sparkplug: history buffer full, dropped %s", tm.SignalKey)
 			}
