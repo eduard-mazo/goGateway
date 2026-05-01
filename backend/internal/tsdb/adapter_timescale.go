@@ -2,11 +2,13 @@ package tsdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -79,8 +81,17 @@ func NewTimescaleAdapter(ctx context.Context, cfg TimescaleConfig) (*TimescaleAd
 func (a *TimescaleAdapter) Name() string { return "timescaledb" }
 
 // WriteBatch uses pgx COPY — the fastest bulk insert path, no SQL parsing overhead.
+// On unique-constraint violation (same ts+measurement+ioa in the batch), falls back
+// to INSERT ON CONFLICT DO NOTHING so duplicate points are silently skipped.
 func (a *TimescaleAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
-	return a.doCopy(ctx, batch)
+	err := a.doCopy(ctx, batch)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return a.doInsertSafe(ctx, batch)
+		}
+	}
+	return err
 }
 
 // WriteBatchSafe uses INSERT ON CONFLICT DO NOTHING — used during WAL replay
@@ -89,10 +100,32 @@ func (a *TimescaleAdapter) WriteBatchSafe(ctx context.Context, batch []DataPoint
 	return a.doInsertSafe(ctx, batch)
 }
 
+// dedupBatch keeps only the last DataPoint per (measurement, ioa) pair.
+// The accumulator forwards every raw point from the channel without
+// deduplication, so the same signal can appear multiple times within one
+// flush window with an identical timestamp — which violates the unique
+// index on (ts, measurement, ioa).
+func dedupBatch(batch []DataPoint) []DataPoint {
+	type key struct{ meas, ioa string }
+	seen := make(map[key]int, len(batch))
+	out := batch[:0:len(batch)]
+	for _, p := range batch {
+		k := key{p.Measurement, p.Tags["ioa"]}
+		if idx, ok := seen[k]; ok {
+			out[idx] = p // overwrite with newer value
+		} else {
+			seen[k] = len(out)
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func (a *TimescaleAdapter) doCopy(ctx context.Context, batch []DataPoint) error {
 	if len(batch) == 0 {
 		return nil
 	}
+	batch = dedupBatch(batch)
 	rows := make([][]any, 0, len(batch))
 	for _, p := range batch {
 		tagsJSON, _ := json.Marshal(p.Tags)

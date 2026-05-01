@@ -3,6 +3,7 @@ package tsdb
 import (
 	"context"
 	"fmt"
+	"log"
 	"runtime"
 	"sync"
 	"time"
@@ -280,6 +281,8 @@ func (p *WritePipeline) fanOut() {
 					}
 					if err != nil {
 						cb.RecordFailure()
+						log.Printf("tsdb [%s] write error (attempt 1, batch %d pts): %v",
+							backend.Name(), len(work.batch), err)
 						p.scheduleRetry(work, backend, 1)
 						return
 					}
@@ -323,8 +326,9 @@ func (p *WritePipeline) retryWorker(target TSDBWriter) {
 				return
 			}
 			if item.attempt > p.cfg.MaxRetries {
-				p.dlq.Push(item.backend.Name(), item.batch, //nolint:errcheck
-					fmt.Sprintf("max retries %d exceeded", p.cfg.MaxRetries), item.attempt)
+				reason := fmt.Sprintf("max retries %d exceeded", p.cfg.MaxRetries)
+				log.Printf("tsdb [%s] DLQ: %s (batch %d pts)", item.backend.Name(), reason, len(item.batch))
+				p.dlq.Push(item.backend.Name(), item.batch, reason, item.attempt) //nolint:errcheck
 				item.ackTracker.Ack(item.walID)
 				continue
 			}
@@ -366,6 +370,8 @@ func (p *WritePipeline) retryWorker(target TSDBWriter) {
 
 			if err != nil {
 				cb.RecordFailure()
+				log.Printf("tsdb [%s] retry %d error (batch %d pts): %v",
+					item.backend.Name(), item.attempt, len(item.batch), err)
 				item.attempt++
 				select {
 				case q <- item:

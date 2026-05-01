@@ -78,11 +78,10 @@ function fmtBytes(b: number) {
       </div>
     </dl>
 
-    <!-- Last error -->
+    <!-- Last error — full text, line-wrapped -->
     <p
       v-if="backend.lastError"
-      class="truncate text-[11px] text-orange-400 font-mono"
-      :title="backend.lastError"
+      class="break-all text-[11px] text-orange-400 font-mono leading-tight"
     >{{ backend.lastError }}</p>
 
     <!-- Sparkline -->
