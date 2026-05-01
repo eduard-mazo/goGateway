@@ -84,3 +84,39 @@ export interface History {
   quality: number
   timestamp: string
 }
+
+// TSDB pipeline types
+export interface TSDBBackendStatus {
+  name: string
+  type: string
+  healthy: boolean
+  writeRate: number
+  errorRate: number
+  bytesSent: number
+  circuitOpen: boolean
+  lastError?: string
+}
+
+export interface TSDBStatus {
+  backends: TSDBBackendStatus[]
+  walPending: number
+  dlqDepth: number
+  inputRate: number
+  inputQueue: number
+  retryQueues: Record<string, number>
+  timestamp: string
+}
+
+export interface TSDBDLQEntry {
+  id: number
+  backend: string
+  ts: string
+  reason: string
+  retries: number
+  batch: unknown[]
+}
+
+export interface TSDBDLQList {
+  count: number
+  entries: TSDBDLQEntry[]
+}

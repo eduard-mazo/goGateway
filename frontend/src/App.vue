@@ -4,6 +4,7 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Toaster } from '@/components/ui/sonner'
 import {
   Gauge, Radio, Server, Table2, History as HistoryIcon, Cpu,
+  Database,
   PanelLeftClose, PanelLeftOpen, Moon, Sun, Menu, X,
 } from 'lucide-vue-next'
 import { useStatus } from '@/composables/useStatus'
@@ -19,6 +20,7 @@ const nav = [
   { to: '/mqtt', label: 'MQTT', icon: Radio },
   { to: '/iec104', label: 'IEC 104', icon: Server },
   { to: '/history', label: 'History', icon: HistoryIcon },
+  { to: '/tsdb', label: 'TSDB Pipeline', icon: Database },
 ]
 
 const collapsed = ref(false)        // desktop mini mode

@@ -9,5 +9,6 @@ export const router = createRouter({
     { path: '/mqtt', component: () => import('./views/MqttConfig.vue'), meta: { title: 'MQTT Broker' } },
     { path: '/iec104', component: () => import('./views/Iec104Config.vue'), meta: { title: 'IEC 60870-5-104' } },
     { path: '/history', component: () => import('./views/History.vue'), meta: { title: 'History' } },
+    { path: '/tsdb', component: () => import('./views/TSDBView.vue'), meta: { title: 'TSDB Pipeline' } },
   ],
 })

@@ -85,11 +85,13 @@ func ParseAndDispatch(
 			Timestamp: ts,
 		})
 		if !hist.Log(HistoryEvent{
-			MappingID: m.MappingID,
-			SignalKey: m.SignalKey,
-			Value:     scaled,
-			Quality:   quality,
-			Timestamp: ts,
+			MappingID:  m.MappingID,
+			SignalKey:  m.SignalKey,
+			Value:      scaled,
+			Quality:    quality,
+			Timestamp:  ts,
+			IOA:        m.IOA,
+			IEC104Type: m.IEC104Type,
 		}) {
 			log.Printf("history buffer full, dropped %s", m.SignalKey)
 		}

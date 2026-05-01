@@ -2,27 +2,33 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/jmoiron/sqlx"
+
+	"goGateway/internal/tsdb"
 )
 
 // HistoryEvent = one row to persist.
 type HistoryEvent struct {
-	MappingID int64
-	SignalKey string
-	Value     float64
-	Quality   int
-	Timestamp time.Time
+	MappingID  int64
+	SignalKey  string
+	Value      float64
+	Quality    int
+	Timestamp  time.Time
+	IOA        int    // IEC-104 Information Object Address
+	IEC104Type string // ASDU type, e.g. M_ME_NC_1
 }
 
 // HistoryLogger = async batched writer. Drops on full buffer (never blocks hot path).
 type HistoryLogger struct {
-	db    *sqlx.DB
-	ch    chan HistoryEvent
-	batch int
-	flush time.Duration
+	db       *sqlx.DB
+	ch       chan HistoryEvent
+	batch    int
+	flush    time.Duration
+	tsdbPipe *tsdb.WritePipeline // optional; nil = disabled
 }
 
 func NewHistoryLogger(db *sqlx.DB, bufSize, batch int, flush time.Duration) *HistoryLogger {
@@ -38,8 +44,24 @@ func NewHistoryLogger(db *sqlx.DB, bufSize, batch int, flush time.Duration) *His
 	return &HistoryLogger{db: db, ch: make(chan HistoryEvent, bufSize), batch: batch, flush: flush}
 }
 
+// SetTSDB attaches an optional TSDB write pipeline. Each logged event is
+// also forwarded as a DataPoint for high-throughput time-series storage.
+func (h *HistoryLogger) SetTSDB(p *tsdb.WritePipeline) { h.tsdbPipe = p }
+
 // Log = non-blocking enqueue. Returns false if buffer full.
 func (h *HistoryLogger) Log(e HistoryEvent) bool {
+	if h.tsdbPipe != nil {
+		pt := tsdb.DataPoint{
+			Measurement: e.IEC104Type,
+			Tags: map[string]string{
+				"ioa":        fmt.Sprintf("%d", e.IOA),
+				"signal_key": e.SignalKey,
+			},
+			Fields:    map[string]float64{"value": e.Value, "quality": float64(e.Quality)},
+			Timestamp: e.Timestamp,
+		}
+		h.tsdbPipe.Push(pt) //nolint:errcheck
+	}
 	select {
 	case h.ch <- e:
 		return true

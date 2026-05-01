@@ -16,6 +16,7 @@ import (
 	"goGateway/internal/db"
 	"goGateway/internal/iec104"
 	"goGateway/internal/mqtt"
+	"goGateway/internal/tsdb"
 	"goGateway/internal/worker"
 )
 
@@ -44,6 +45,14 @@ func main() {
 
 	// History logger — async batched writer.
 	hist := worker.NewHistoryLogger(database, 4096, 100, 2*time.Second)
+
+	// TSDB pipeline (optional). Only started when at least one backend is configured.
+	var tsdbPipeline *tsdb.WritePipeline
+	tsdbPipeline = initTSDB(ctx, cfg.TSDB)
+	if tsdbPipeline != nil {
+		hist.SetTSDB(tsdbPipeline)
+	}
+
 	histDone := make(chan struct{})
 	go func() {
 		hist.Run(ctx)
@@ -63,6 +72,7 @@ func main() {
 	// REST API.
 	startedAt := time.Now()
 	handler := api.NewRouter(api.Deps{
+		TSDB: tsdbPipeline,
 		DB:         database,
 		NotifyMQTT: mqttMgr.Notify,
 		NotifyIEC104: func() {
@@ -132,6 +142,43 @@ func loadIEC104(database *sqlx.DB, mgr *iec104.Manager) error {
 		return err
 	}
 	return mgr.Reload(gw, servers)
+}
+
+// initTSDB builds and starts the write pipeline when at least one backend is
+// configured. Returns nil (no-op) when both connection strings are empty.
+func initTSDB(ctx context.Context, cfg config.TSDBConfig) *tsdb.WritePipeline {
+	var backends []tsdb.TSDBWriter
+
+	if cfg.VMUrl != "" {
+		backends = append(backends, tsdb.NewVMAdapter(tsdb.VMConfig{URL: cfg.VMUrl}))
+		log.Printf("tsdb: VictoriaMetrics → %s", cfg.VMUrl)
+	}
+	if cfg.TimescaleDSN != "" {
+		a, err := tsdb.NewTimescaleAdapter(ctx, tsdb.TimescaleConfig{DSN: cfg.TimescaleDSN})
+		if err != nil {
+			log.Printf("tsdb: timescale init failed: %v", err)
+		} else {
+			backends = append(backends, a)
+			log.Printf("tsdb: TimescaleDB connected")
+		}
+	}
+	if len(backends) == 0 {
+		return nil
+	}
+
+	os.MkdirAll("data", 0755) //nolint:errcheck
+	p, err := tsdb.NewWritePipeline(tsdb.PipelineConfig{
+		Backends: backends,
+		WALPath:  cfg.WALPath,
+		DLQPath:  cfg.DLQPath,
+	})
+	if err != nil {
+		log.Printf("tsdb: pipeline init failed: %v", err)
+		return nil
+	}
+	go p.Run(ctx)
+	log.Printf("tsdb: pipeline started (%d backends)", len(backends))
+	return p
 }
 
 // closeDatabase checkpoints the WAL into the main DB file and closes the
