@@ -98,6 +98,7 @@ export interface TSDBBackendStatus {
 }
 
 export interface TSDBStatus {
+  running: boolean
   backends: TSDBBackendStatus[]
   walPending: number
   dlqDepth: number
@@ -119,4 +120,25 @@ export interface TSDBDLQEntry {
 export interface TSDBDLQList {
   count: number
   entries: TSDBDLQEntry[]
+}
+
+export interface TSDBConfig {
+  id: number
+  backend: 'none' | 'victoriametrics' | 'timescaledb' | 'both'
+  vm_url: string
+  vm_username: string
+  vm_password: string
+  ts_dsn: string
+  ts_table: string
+  wal_path: string
+  dlq_path: string
+  batch_size: number
+  flush_ms: number
+  enabled: boolean
+}
+
+export interface TSDBTestResult {
+  ok: boolean
+  latency_ms?: number
+  message: string
 }

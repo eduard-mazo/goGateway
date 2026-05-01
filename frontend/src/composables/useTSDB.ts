@@ -6,26 +6,19 @@ export function useTSDB(pollMs = 2000) {
   const status  = ref<TSDBStatus | null>(null)
   const dlq     = ref<TSDBDLQList>({ count: 0, entries: [] })
   const error   = ref<string | null>(null)
-  const enabled = ref(true) // becomes false when API returns 404 (TSDB not configured)
   let timer: ReturnType<typeof setInterval> | null = null
 
   async function fetchStatus() {
-    if (!enabled.value) return
     try {
       const r = await api.get<TSDBStatus>('/tsdb/status')
       status.value = r.data
       error.value  = null
     } catch (e: any) {
-      if (e?.response?.status === 404) {
-        enabled.value = false // no TSDB configured
-      } else {
-        error.value = e?.message ?? 'fetch failed'
-      }
+      error.value = e?.message ?? 'fetch failed'
     }
   }
 
   async function fetchDLQ() {
-    if (!enabled.value) return
     try {
       const r = await api.get<TSDBDLQList>('/tsdb/dlq')
       dlq.value = r.data
@@ -67,7 +60,7 @@ export function useTSDB(pollMs = 2000) {
   )
 
   return {
-    status, dlq, error, enabled,
+    status, dlq, error,
     fetchStatus, fetchDLQ, replayDLQ,
     totalWriteRate, anyCircuitOpen, systemAlert,
   }

@@ -20,10 +20,11 @@ type Deps struct {
 	NotifyMQTT     func() // reload MQTT client on cfg/topic change
 	NotifyIEC104   func() // reload IEC 104 server on cfg change
 	NotifyMappings func() // reload mapping cache on mapping change
+	NotifyTSDB     func() // reload TSDB pipeline on cfg change
 
 	MQTT      *mqtt.Manager
 	IEC104    iec104.Server
-	TSDB      *tsdb.WritePipeline // optional; nil disables /api/tsdb routes
+	TSDBMgr   *tsdb.Manager
 	StartedAt time.Time
 }
 
@@ -47,13 +48,12 @@ func NewRouter(d Deps) http.Handler {
 		r.Route("/mappings", (&MappingHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)
 		r.Route("/history", (&HistoryHandler{DB: d.DB}).Mount)
 		r.Route("/status", (&StatusHandler{DB: d.DB, MQTT: d.MQTT, IEC104: d.IEC104, StartedAt: d.StartedAt}).Mount)
-		if d.TSDB != nil {
-			tsdbH := tsdb.NewHandler(d.TSDB)
-			r.Get("/tsdb/status", tsdbH.ServeStatus)
-			r.Get("/tsdb/dlq", tsdbH.ServeDLQ)
-			r.Post("/tsdb/dlq/replay", tsdbH.ServeDLQReplay)
-			r.Get("/tsdb/points", tsdbH.ServePoints)
-		}
+		r.Route("/tsdb-config", (&TSDBConfigHandler{DB: d.DB, Notify: d.NotifyTSDB}).Mount)
+		tsdbH := tsdb.NewHandler(d.TSDBMgr)
+		r.Get("/tsdb/status", tsdbH.ServeStatus)
+		r.Get("/tsdb/dlq", tsdbH.ServeDLQ)
+		r.Post("/tsdb/dlq/replay", tsdbH.ServeDLQReplay)
+		r.Get("/tsdb/points", tsdbH.ServePoints)
 	})
 
 	// Embedded SPA — serves frontend/dist bundled into the binary.

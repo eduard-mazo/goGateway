@@ -15,6 +15,7 @@ import (
 	"goGateway/internal/config"
 	"goGateway/internal/db"
 	"goGateway/internal/iec104"
+	"goGateway/internal/models"
 	"goGateway/internal/mqtt"
 	"goGateway/internal/tsdb"
 	"goGateway/internal/worker"
@@ -46,11 +47,15 @@ func main() {
 	// History logger — async batched writer.
 	hist := worker.NewHistoryLogger(database, 4096, 100, 2*time.Second)
 
-	// TSDB pipeline (optional). Only started when at least one backend is configured.
-	var tsdbPipeline *tsdb.WritePipeline
-	tsdbPipeline = initTSDB(ctx, cfg.TSDB)
-	if tsdbPipeline != nil {
-		hist.SetTSDB(tsdbPipeline)
+	// TSDB manager — owns the pipeline lifecycle; reloaded from DB on config save.
+	tsdbMgr := tsdb.NewManager(ctx, hist.SetTSDB)
+
+	// Load initial TSDB config from DB and start pipeline if enabled.
+	var tsdbCfg models.TSDBConfig
+	if err := database.Get(&tsdbCfg, `SELECT id,backend,vm_url,vm_username,vm_password,ts_dsn,ts_table,wal_path,dlq_path,batch_size,flush_ms,enabled FROM tsdb_config WHERE id=1`); err != nil {
+		log.Printf("tsdb: load config: %v", err)
+	} else {
+		tsdbMgr.Reload(tsdbCfg)
 	}
 
 	histDone := make(chan struct{})
@@ -72,7 +77,6 @@ func main() {
 	// REST API.
 	startedAt := time.Now()
 	handler := api.NewRouter(api.Deps{
-		TSDB: tsdbPipeline,
 		DB:         database,
 		NotifyMQTT: mqttMgr.Notify,
 		NotifyIEC104: func() {
@@ -81,9 +85,18 @@ func main() {
 			}
 		},
 		NotifyMappings: mqttMgr.Notify, // mapping change = resubscribe + refresh cache
-		MQTT:           mqttMgr,
-		IEC104:         iecMgr,
-		StartedAt:      startedAt,
+		NotifyTSDB: func() {
+			var reloadCfg models.TSDBConfig
+			if err := database.Get(&reloadCfg, `SELECT id,backend,vm_url,vm_username,vm_password,ts_dsn,ts_table,wal_path,dlq_path,batch_size,flush_ms,enabled FROM tsdb_config WHERE id=1`); err != nil {
+				log.Printf("tsdb: reload config: %v", err)
+				return
+			}
+			tsdbMgr.Reload(reloadCfg)
+		},
+		MQTT:      mqttMgr,
+		IEC104:    iecMgr,
+		TSDBMgr:   tsdbMgr,
+		StartedAt: startedAt,
 	})
 
 	srv := &http.Server{
@@ -108,9 +121,10 @@ func main() {
 	//   1. stop accepting HTTP   → no new writes from the API
 	//   2. stop MQTT             → no new samples from the bus
 	//   3. stop IEC-104 fleet    → disconnect SCADA masters
-	//   4. cancel ctx            → history drains its buffer via ctx.Done
-	//   5. wait for drain        → all rows flushed
-	//   6. checkpoint + close DB → WAL merged, no truncated tail
+	//   4. stop TSDB pipeline    → flush remaining points
+	//   5. cancel ctx            → history drains its buffer via ctx.Done
+	//   6. wait for drain        → all rows flushed
+	//   7. checkpoint + close DB → WAL merged, no truncated tail
 	shCtx, shCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shCancel()
 	if err := srv.Shutdown(shCtx); err != nil {
@@ -118,6 +132,7 @@ func main() {
 	}
 	mqttMgr.Stop()
 	_ = iecMgr.Stop()
+	tsdbMgr.Stop()
 
 	cancel()
 	select {
@@ -142,43 +157,6 @@ func loadIEC104(database *sqlx.DB, mgr *iec104.Manager) error {
 		return err
 	}
 	return mgr.Reload(gw, servers)
-}
-
-// initTSDB builds and starts the write pipeline when at least one backend is
-// configured. Returns nil (no-op) when both connection strings are empty.
-func initTSDB(ctx context.Context, cfg config.TSDBConfig) *tsdb.WritePipeline {
-	var backends []tsdb.TSDBWriter
-
-	if cfg.VMUrl != "" {
-		backends = append(backends, tsdb.NewVMAdapter(tsdb.VMConfig{URL: cfg.VMUrl}))
-		log.Printf("tsdb: VictoriaMetrics → %s", cfg.VMUrl)
-	}
-	if cfg.TimescaleDSN != "" {
-		a, err := tsdb.NewTimescaleAdapter(ctx, tsdb.TimescaleConfig{DSN: cfg.TimescaleDSN})
-		if err != nil {
-			log.Printf("tsdb: timescale init failed: %v", err)
-		} else {
-			backends = append(backends, a)
-			log.Printf("tsdb: TimescaleDB connected")
-		}
-	}
-	if len(backends) == 0 {
-		return nil
-	}
-
-	os.MkdirAll("data", 0755) //nolint:errcheck
-	p, err := tsdb.NewWritePipeline(tsdb.PipelineConfig{
-		Backends: backends,
-		WALPath:  cfg.WALPath,
-		DLQPath:  cfg.DLQPath,
-	})
-	if err != nil {
-		log.Printf("tsdb: pipeline init failed: %v", err)
-		return nil
-	}
-	go p.Run(ctx)
-	log.Printf("tsdb: pipeline started (%d backends)", len(backends))
-	return p
 }
 
 // closeDatabase checkpoints the WAL into the main DB file and closes the

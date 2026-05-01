@@ -107,3 +107,19 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS idx_history_mapping_ts ON history(mapping_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_history_ts ON history(timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS tsdb_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    backend     TEXT    NOT NULL DEFAULT 'none',
+    vm_url      TEXT    NOT NULL DEFAULT '',
+    vm_username TEXT    NOT NULL DEFAULT '',
+    vm_password TEXT    NOT NULL DEFAULT '',
+    ts_dsn      TEXT    NOT NULL DEFAULT '',
+    ts_table    TEXT    NOT NULL DEFAULT 'signals',
+    wal_path    TEXT    NOT NULL DEFAULT 'data/wal.bolt',
+    dlq_path    TEXT    NOT NULL DEFAULT 'data/dlq.bolt',
+    batch_size  INTEGER NOT NULL DEFAULT 2000,
+    flush_ms    INTEGER NOT NULL DEFAULT 100,
+    enabled     INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO tsdb_config(id) VALUES(1);
