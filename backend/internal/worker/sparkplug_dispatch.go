@@ -19,8 +19,7 @@ import (
 type SparkplugHandler struct {
 	registry *sparkplug.Registry
 	cache    *MappingCache
-	srv      iec104.Server
-	hist     *HistoryLogger
+	d        Dispatcher
 	// rebirthFn is called when the handler needs to publish an NCMD Rebirth.
 	// The mqtt.Manager sets this field after creating the handler.
 	rebirthFn func(groupID, nodeID string)
@@ -30,14 +29,12 @@ type SparkplugHandler struct {
 func NewSparkplugHandler(
 	registry *sparkplug.Registry,
 	cache *MappingCache,
-	srv iec104.Server,
-	hist *HistoryLogger,
+	d Dispatcher,
 ) *SparkplugHandler {
 	return &SparkplugHandler{
 		registry: registry,
 		cache:    cache,
-		srv:      srv,
-		hist:     hist,
+		d:        d,
 	}
 }
 
@@ -73,13 +70,7 @@ func (h *SparkplugHandler) MarkNodeStale(nodeBase string) {
 	maps := h.cache.LookupByNode(nodeBase)
 	now := time.Now()
 	for _, m := range maps {
-		h.srv.Dispatch(m.ServerID, iec104.Point{
-			IOA:       m.IOA,
-			TypeID:    m.IEC104Type,
-			Value:     0,
-			Quality:   iec104.QualityNotTopical,
-			Timestamp: now,
-		})
+		h.d.Dispatch(m, 0, iec104.QualityNotTopical, now)
 	}
 }
 
@@ -254,36 +245,10 @@ func (h *SparkplugHandler) dispatchMetric(
 	for _, tm := range maps {
 		scaled := val * tm.Scale
 		if hasVal {
-			h.srv.Dispatch(tm.ServerID, iec104.Point{
-				IOA:       tm.IOA,
-				TypeID:    tm.IEC104Type,
-				Value:     scaled,
-				Quality:   quality,
-				Timestamp: ts,
-			})
+			h.d.Dispatch(tm, scaled, quality, ts)
 		} else {
 			// is_null metric: push invalid quality with zero value.
-			h.srv.Dispatch(tm.ServerID, iec104.Point{
-				IOA:       tm.IOA,
-				TypeID:    tm.IEC104Type,
-				Value:     0,
-				Quality:   iec104.QualityInvalid,
-				Timestamp: ts,
-			})
-		}
-
-		if hasVal {
-			if !h.hist.Log(HistoryEvent{
-				MappingID:  tm.MappingID,
-				SignalKey:  tm.SignalKey,
-				Value:      scaled,
-				Quality:    quality,
-				Timestamp:  ts,
-				IOA:        tm.IOA,
-				IEC104Type: tm.IEC104Type,
-			}) {
-				log.Printf("sparkplug: history buffer full, dropped %s", tm.SignalKey)
-			}
+			h.d.Dispatch(tm, 0, iec104.QualityInvalid, ts)
 		}
 	}
 }

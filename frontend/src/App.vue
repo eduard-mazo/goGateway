@@ -18,6 +18,7 @@ const nav = [
   { to: '/mappings', label: 'Signal Mapping', icon: Table2 },
   { to: '/devices', label: 'Devices & Topics', icon: Cpu },
   { to: '/mqtt', label: 'MQTT', icon: Radio },
+  { to: '/nats', label: 'NATS Fan-Out', icon: Database },
   { to: '/iec104', label: 'IEC 104', icon: Server },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/tsdb', label: 'TSDB Pipeline', icon: Database },

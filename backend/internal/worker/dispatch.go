@@ -27,8 +27,7 @@ func ParseAndDispatch(
 	topic string,
 	payload []byte,
 	mappings []TopicMapping,
-	srv iec104.Server,
-	hist *HistoryLogger,
+	d Dispatcher,
 ) {
 	if len(mappings) == 0 {
 		return
@@ -42,9 +41,9 @@ func ParseAndDispatch(
 
 	// Timestamp: prefer payload "date" (RFC3339), else now.
 	ts := time.Now()
-	if d, ok := raw["date"]; ok {
+	if dv, ok := raw["date"]; ok {
 		var s string
-		if json.Unmarshal(d, &s) == nil {
+		if json.Unmarshal(dv, &s) == nil {
 			if parsed, err := time.Parse(time.RFC3339, s); err == nil {
 				ts = parsed
 			}
@@ -77,24 +76,7 @@ func ParseAndDispatch(
 			}
 		}
 
-		srv.Dispatch(m.ServerID, iec104.Point{
-			IOA:       m.IOA,
-			TypeID:    m.IEC104Type,
-			Value:     scaled,
-			Quality:   quality,
-			Timestamp: ts,
-		})
-		if !hist.Log(HistoryEvent{
-			MappingID:  m.MappingID,
-			SignalKey:  m.SignalKey,
-			Value:      scaled,
-			Quality:    quality,
-			Timestamp:  ts,
-			IOA:        m.IOA,
-			IEC104Type: m.IEC104Type,
-		}) {
-			log.Printf("history buffer full, dropped %s", m.SignalKey)
-		}
+		d.Dispatch(m, scaled, quality, ts)
 	}
 }
 

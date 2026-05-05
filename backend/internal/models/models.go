@@ -95,21 +95,31 @@ type SignalMapping struct {
 }
 
 // TSDBConfig = time-series pipeline settings. Singleton (id=1).
-// backend: 'none' | 'victoriametrics' | 'timescaledb' | 'both'
+// TSDBConfig = time-series pipeline settings. Singleton (id=1).
 type TSDBConfig struct {
-	ID         int64  `db:"id"          json:"id"`
-	Backend    string `db:"backend"     json:"backend"`
-	VMUrl      string `db:"vm_url"      json:"vm_url"`
+	ID         int64  `db:"id" json:"id"`
+	Backend    string `db:"backend" json:"backend"`
+	VMUrl      string `db:"vm_url" json:"vm_url"`
 	VMUsername string `db:"vm_username" json:"vm_username"`
 	VMPassword string `db:"vm_password" json:"vm_password"`
-	TsDSN      string `db:"ts_dsn"      json:"ts_dsn"`
-	TsTable    string `db:"ts_table"    json:"ts_table"`
-	WALPath    string `db:"wal_path"    json:"wal_path"`
-	DLQPath    string `db:"dlq_path"    json:"dlq_path"`
-	BatchSize  int    `db:"batch_size"  json:"batch_size"`
-	FlushMs    int    `db:"flush_ms"    json:"flush_ms"`
-	Enabled    bool   `db:"enabled"     json:"enabled"`
+	TsDSN      string `db:"ts_dsn" json:"ts_dsn"`
+	TsTable    string `db:"ts_table" json:"ts_table"`
+	WALPath    string `db:"wal_path" json:"wal_path"`
+	DLQPath    string `db:"dlq_path" json:"dlq_path"`
+	BatchSize  int    `db:"batch_size" json:"batch_size"`
+	FlushMs    int    `db:"flush_ms" json:"flush_ms"`
+	Enabled    bool   `db:"enabled" json:"enabled"`
 }
+
+// NATSConfig = settings for the NATS JetStream fan-out buffer. Singleton (id=1).
+type NATSConfig struct {
+	ID         int64  `db:"id" json:"id"`
+	Host       string `db:"host" json:"host"`
+	Port       int    `db:"port" json:"port"`
+	StreamName string `db:"stream_name" json:"stream_name"`
+	Enabled    bool   `db:"enabled" json:"enabled"`
+}
+
 
 // History = time-series log row.
 type History struct {

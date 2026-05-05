@@ -12,7 +12,6 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/jmoiron/sqlx"
 
-	"goGateway/internal/iec104"
 	"goGateway/internal/sparkplug"
 	"goGateway/internal/worker"
 )
@@ -22,8 +21,7 @@ import (
 type Manager struct {
 	db    *sqlx.DB
 	cache *worker.MappingCache
-	iec   iec104.Server
-	hist  *worker.HistoryLogger
+	d     worker.Dispatcher
 
 	mu        sync.Mutex
 	client    paho.Client
@@ -66,8 +64,8 @@ func (m *Manager) Status() Status {
 	}
 }
 
-func NewManager(db *sqlx.DB, cache *worker.MappingCache, iec iec104.Server, hist *worker.HistoryLogger) *Manager {
-	return &Manager{db: db, cache: cache, iec: iec, hist: hist, subs: map[string]struct{}{}}
+func NewManager(db *sqlx.DB, cache *worker.MappingCache, d worker.Dispatcher) *Manager {
+	return &Manager{db: db, cache: cache, d: d, subs: map[string]struct{}{}}
 }
 
 // Start = initial connect + subscribe. Safe to call before config exists.
@@ -114,7 +112,7 @@ func (m *Manager) reload() error {
 		if m.registry == nil {
 			m.registry = sparkplug.NewRegistry()
 		}
-		m.spHandler = worker.NewSparkplugHandler(m.registry, m.cache, m.iec, m.hist)
+		m.spHandler = worker.NewSparkplugHandler(m.registry, m.cache, m.d)
 		m.spHandler.SetRebirthFn(m.publishRebirth)
 		m.cfg = worker.MQTTConfigSnapshot{
 			SpGroupID: cfg.SpGroupID,
@@ -279,7 +277,7 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 
 	// JSON mode: original hot path.
 	maps := m.cache.Lookup(topic)
-	worker.ParseAndDispatch(topic, payload, maps, m.iec, m.hist)
+	worker.ParseAndDispatch(topic, payload, maps, m.d)
 }
 
 // publishRebirth sends an NCMD message requesting the EoN node to re-publish

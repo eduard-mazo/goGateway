@@ -17,6 +17,7 @@ import (
 	"goGateway/internal/iec104"
 	"goGateway/internal/models"
 	"goGateway/internal/mqtt"
+	"goGateway/internal/nats"
 	"goGateway/internal/tsdb"
 	"goGateway/internal/worker"
 )
@@ -58,6 +59,38 @@ func main() {
 		tsdbMgr.Reload(tsdbCfg)
 	}
 
+	// NATS Fan-out integration.
+	var natsCfg models.NATSConfig
+	if err := database.Get(&natsCfg, `SELECT id,host,port,stream_name,enabled FROM nats_config WHERE id=1`); err != nil {
+		log.Printf("nats: load config: %v", err)
+	}
+
+	var natsClient *nats.Client
+	var dispatcher worker.Dispatcher = worker.NewDirectDispatcher(iecMgr, hist)
+
+	if natsCfg.Enabled {
+		natsClient = nats.NewClient(natsCfg)
+		if err := natsClient.Connect(); err != nil {
+			log.Printf("nats: connect error (falling back to direct dispatch): %v", err)
+		} else {
+			dispatcher = worker.NewNatsDispatcher(natsClient, natsCfg.StreamName)
+			// Start NATS workers.
+			scadaWorker := worker.NewSCADAWorker(natsClient, natsCfg.StreamName, iecMgr)
+			go func() {
+				if err := scadaWorker.Run(ctx); err != nil {
+					log.Printf("scada worker: %v", err)
+				}
+			}()
+
+			tsdbWorker := worker.NewTSDBWorker(natsClient, natsCfg.StreamName, tsdbMgr.Pipeline())
+			go func() {
+				if err := tsdbWorker.Run(ctx); err != nil {
+					log.Printf("tsdb worker: %v", err)
+				}
+			}()
+		}
+	}
+
 	histDone := make(chan struct{})
 	go func() {
 		hist.Run(ctx)
@@ -69,7 +102,7 @@ func main() {
 	if err := cache.Reload(); err != nil {
 		log.Printf("initial cache reload: %v", err)
 	}
-	mqttMgr := mqtt.NewManager(database, cache, iecMgr, hist)
+	mqttMgr := mqtt.NewManager(database, cache, dispatcher)
 	if err := mqttMgr.Start(ctx); err != nil {
 		log.Printf("mqtt start: %v", err)
 	}
@@ -92,6 +125,9 @@ func main() {
 				return
 			}
 			tsdbMgr.Reload(reloadCfg)
+		},
+		NotifyNATS: func() {
+			log.Printf("nats: config changed (restart required to apply)")
 		},
 		MQTT:      mqttMgr,
 		IEC104:    iecMgr,
@@ -133,6 +169,9 @@ func main() {
 	mqttMgr.Stop()
 	_ = iecMgr.Stop()
 	tsdbMgr.Stop()
+	if natsClient != nil {
+		natsClient.Close()
+	}
 
 	cancel()
 	select {

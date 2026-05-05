@@ -123,3 +123,12 @@ CREATE TABLE IF NOT EXISTS tsdb_config (
     enabled     INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO tsdb_config(id) VALUES(1);
+
+CREATE TABLE IF NOT EXISTS nats_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    host        TEXT    NOT NULL DEFAULT 'localhost',
+    port        INTEGER NOT NULL DEFAULT 4222,
+    stream_name TEXT    NOT NULL DEFAULT 'GOGATEWAY',
+    enabled     INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO nats_config(id) VALUES(1);

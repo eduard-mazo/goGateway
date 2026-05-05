@@ -62,7 +62,8 @@ func TestParseAndDispatch_Inverter(t *testing.T) {
 			m.MappingID, m.JSONKey, m.IEC104Type, m.IOA, m.Scale)
 	}
 
-	ParseAndDispatch("t1", []byte(inverterPayload), maps, srv, hist)
+	dispatcher := NewDirectDispatcher(srv, hist)
+	ParseAndDispatch("t1", []byte(inverterPayload), maps, dispatcher)
 
 	if len(srv.points) != 3 {
 		t.Fatalf("want 3 dispatched (missing key skipped), got %d", len(srv.points))
@@ -141,7 +142,8 @@ func TestParseAndDispatch_Quality(t *testing.T) {
 			{MappingID: 1, ServerID: 1, JSONKey: "power", IEC104Type: "M_ME_NC_1", IOA: 1, Scale: 1},
 		}
 		dbh.MustExec(`INSERT OR IGNORE INTO signal_mappings(id,server_id,topic_id,json_key,iec104_type,ioa,scale,enabled) VALUES(1,1,1,'power','M_ME_NC_1',1,1,1)`)
-		ParseAndDispatch("t", []byte(payload), maps, srv, hist)
+		dispatcher := NewDirectDispatcher(srv, hist)
+		ParseAndDispatch("t", []byte(payload), maps, dispatcher)
 		if len(srv.points) != 1 || srv.points[0].Quality != iec104.QualityInvalid {
 			t.Errorf("want QualityInvalid (0x80), got 0x%02x", srv.points[0].Quality)
 		}
@@ -153,7 +155,8 @@ func TestParseAndDispatch_Quality(t *testing.T) {
 		maps := []TopicMapping{
 			{MappingID: 1, ServerID: 1, JSONKey: "power", IEC104Type: "M_ME_NC_1", IOA: 1, Scale: 1},
 		}
-		ParseAndDispatch("t", []byte(payload), maps, srv, hist)
+		dispatcher := NewDirectDispatcher(srv, hist)
+		ParseAndDispatch("t", []byte(payload), maps, dispatcher)
 		if len(srv.points) != 1 || srv.points[0].Quality != iec104.QualityNotTopical {
 			t.Errorf("want QualityNotTopical (0x40), got 0x%02x", srv.points[0].Quality)
 		}
@@ -166,7 +169,8 @@ func TestParseAndDispatch_Quality(t *testing.T) {
 		maps := []TopicMapping{
 			{MappingID: 1, ServerID: 1, JSONKey: "power", QualityKey: "power_q", IEC104Type: "M_ME_NC_1", IOA: 1, Scale: 1},
 		}
-		ParseAndDispatch("t", []byte(payload), maps, srv, hist)
+		dispatcher := NewDirectDispatcher(srv, hist)
+		ParseAndDispatch("t", []byte(payload), maps, dispatcher)
 		if len(srv.points) != 1 || srv.points[0].Quality != iec104.QualityInvalid {
 			t.Errorf("want QualityInvalid from per-signal key, got 0x%02x", srv.points[0].Quality)
 		}
@@ -178,7 +182,8 @@ func TestParseAndDispatch_Quality(t *testing.T) {
 		maps := []TopicMapping{
 			{MappingID: 1, ServerID: 1, JSONKey: "power", IEC104Type: "M_ME_NC_1", IOA: 1, Scale: 1},
 		}
-		ParseAndDispatch("t", []byte(payload), maps, srv, hist)
+		dispatcher := NewDirectDispatcher(srv, hist)
+		ParseAndDispatch("t", []byte(payload), maps, dispatcher)
 		if len(srv.points) != 1 || srv.points[0].Quality != iec104.QualityGood {
 			t.Errorf("want QualityGood, got 0x%02x", srv.points[0].Quality)
 		}

@@ -142,3 +142,11 @@ export interface TSDBTestResult {
   latency_ms?: number
   message: string
 }
+
+export interface NATSConfig {
+  id: number
+  host: string
+  port: number
+  stream_name: string
+  enabled: boolean
+}
