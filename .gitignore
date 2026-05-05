@@ -2,19 +2,24 @@
 /gateway
 /gateway.exe
 /gateway.zip
+/goGateway
+/goGateway-linux-amd64
+/goGateway-linux-ppc64le
 /backend/bin/
 
-# Generated frontend bundle (built by `make frontend`).
-# backend/internal/web/dist is committed so `go build` works without pnpm.
+# Generated frontend bundle
 /frontend/dist/
+/backend/internal/web/dist/
 
 # Runtime state
-/gateway.db
-/gateway.db-wal
-/gateway.db-shm
-/backend/gateway.db
-/backend/gateway.db-wal
-/backend/gateway.db-shm
+/*.db
+/*.db-wal
+/*.db-shm
+/data/*.bolt
+/backend/data/*.bolt
+/backend/*.db
+/backend/*.db-wal
+/backend/*.db-shm
 
 # Misc
 *.log
