@@ -20,7 +20,11 @@ type TopicMapping struct {
 	IEC104Type string
 	IOA        int
 	Scale      float64
-	SignalKey  string // = device_name + "." + json_key (for history label)
+	Business   string
+	Company    string
+	// SignalPath = full signal identity: business/company/B1/.../signal.
+	// Pre-computed for JSON mode; set at dispatch time for Sparkplug mode.
+	SignalPath string
 }
 
 // MappingCache = topic → []TopicMapping. Rebuilt on notifier fire.
@@ -49,7 +53,8 @@ func NewMappingCache(db *sqlx.DB) *MappingCache {
 func (c *MappingCache) Reload() error {
 	rows, err := c.db.Queryx(`
         SELECT sm.id, sm.server_id, sm.topic_id, t.topic, t.qos, sm.json_key,
-               sm.quality_key, sm.metric_name, sm.iec104_type, sm.ioa, sm.scale, sm.device_name
+               sm.quality_key, sm.metric_name, sm.iec104_type, sm.ioa, sm.scale,
+               sm.device_name, sm.business, sm.company
           FROM signal_mappings sm
           JOIN topics t ON t.id = sm.topic_id
           JOIN iec104_servers s ON s.id = sm.server_id
@@ -71,24 +76,24 @@ func (c *MappingCache) Reload() error {
 		if err := rows.Scan(
 			&tm.MappingID, &tm.ServerID, &tm.TopicID, &tm.Topic, &topicQoS,
 			&tm.JSONKey, &tm.QualityKey, &tm.MetricName,
-			&tm.IEC104Type, &tm.IOA, &tm.Scale, &deviceName,
+			&tm.IEC104Type, &tm.IOA, &tm.Scale,
+			&deviceName, &tm.Business, &tm.Company,
 		); err != nil {
 			return err
 		}
 		if tm.Scale == 0 {
 			tm.Scale = 1.0
 		}
-		tm.SignalKey = deviceName + "." + tm.JSONKey
 
 		if tm.MetricName != "" {
-			// Sparkplug B mapping: topic column holds nodeBase (e.g. spBv1.0/group/node).
+			// Sparkplug B: SignalPath built at dispatch time from runtime topic fields.
 			key := tm.Topic + "\x00" + tm.MetricName
 			sp[key] = append(sp[key], tm)
 			spAll[tm.Topic] = append(spAll[tm.Topic], tm)
 		} else {
-			// JSON mode: exact topic string.
+			// JSON mode: path = business/company/topic/json_key — fully deterministic.
+			tm.SignalPath = tm.Business + "/" + tm.Company + "/" + tm.Topic + "/" + tm.JSONKey
 			next[tm.Topic] = append(next[tm.Topic], tm)
-			// Take the highest QoS seen for this topic across all its mappings.
 			if q := byte(topicQoS); q > nextQoS[tm.Topic] {
 				nextQoS[tm.Topic] = q
 			}

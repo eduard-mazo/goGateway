@@ -1,0 +1,36 @@
+[Unit]
+Description=goGateway — IEC 60870-5-104 / MQTT / TSDB Protocol Gateway
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Container]
+# Image loaded offline: podman load -i goGateway-ppc64le.tar
+Image=localhost/gogateway:ppc64le
+Pull=never
+ContainerName=goGateway
+
+# All mutable state: gateway.db + wal.bolt + dlq.bolt
+# mkdir -p /var/lib/goGateway && chown 65534:65534 /var/lib/goGateway
+Volume=/var/lib/goGateway:/data:Z,rw
+
+# Host networking required — IEC-104 slave ports are DB-driven, unknown at deploy time
+Network=host
+
+Environment=GW_DB=/data/gateway.db
+Environment=GW_HTTP=:8080
+Environment=GW_IEC_DEBUG=0
+
+# Static binary on ports >1024 needs no capabilities
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+
+[Service]
+Restart=always
+# Shutdown budget matches gateway drain: ≤10s HTTP/MQTT/IEC-104 + ≤5s history flush
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

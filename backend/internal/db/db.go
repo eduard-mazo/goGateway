@@ -111,6 +111,39 @@ func migrate(db *sqlx.DB) error {
 				return fmt.Errorf("add metric_name column: %w", err)
 			}
 		}
+
+		// signal_mappings: add business and company columns (signal path identity).
+		for _, col := range []struct{ name, def string }{
+			{"business", "TEXT NOT NULL DEFAULT ''"},
+			{"company", "TEXT NOT NULL DEFAULT ''"},
+		} {
+			var has int
+			if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('signal_mappings') WHERE name=?`, col.name); err != nil {
+				return err
+			}
+			if has == 0 {
+				if _, err := db.Exec(`ALTER TABLE signal_mappings ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
+					return fmt.Errorf("add signal_mappings.%s: %w", col.name, err)
+				}
+			}
+		}
+	}
+
+	// history: rename signal_key → signal_path.
+	var hasHistory int
+	if err := db.Get(&hasHistory, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='history'`); err != nil {
+		return err
+	}
+	if hasHistory > 0 {
+		var hasSignalKey int
+		if err := db.Get(&hasSignalKey, `SELECT COUNT(*) FROM pragma_table_info('history') WHERE name='signal_key'`); err != nil {
+			return err
+		}
+		if hasSignalKey > 0 {
+			if _, err := db.Exec(`ALTER TABLE history RENAME COLUMN signal_key TO signal_path`); err != nil {
+				return fmt.Errorf("rename history.signal_key: %w", err)
+			}
+		}
 	}
 
 	// mqtt_config: add Sparkplug B columns.

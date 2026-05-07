@@ -10,18 +10,19 @@ import {
 import { useStatus } from '@/composables/useStatus'
 import StatusPill from '@/components/StatusPill.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { t } from '@/i18n'
 
 const { status } = useStatus()
 
 const nav = [
-  { to: '/', label: 'Overview', icon: Gauge },
-  { to: '/mappings', label: 'Signal Mapping', icon: Table2 },
-  { to: '/devices', label: 'Devices & Topics', icon: Cpu },
-  { to: '/mqtt', label: 'MQTT', icon: Radio },
-  { to: '/nats', label: 'NATS Fan-Out', icon: Database },
-  { to: '/iec104', label: 'IEC 104', icon: Server },
-  { to: '/history', label: 'History', icon: HistoryIcon },
-  { to: '/tsdb', label: 'TSDB Pipeline', icon: Database },
+  { to: '/', label: t.nav.overview, icon: Gauge },
+  { to: '/mappings', label: t.nav.mappings, icon: Table2 },
+  { to: '/devices', label: t.nav.devices, icon: Cpu },
+  { to: '/mqtt', label: t.nav.mqtt, icon: Radio },
+  { to: '/nats', label: t.nav.nats, icon: Database },
+  { to: '/iec104', label: t.nav.iec104, icon: Server },
+  { to: '/history', label: t.nav.history, icon: HistoryIcon },
+  { to: '/tsdb', label: t.nav.tsdb, icon: Database },
 ]
 
 const collapsed = ref(false)        // desktop mini mode
@@ -70,23 +71,23 @@ type FleetState = 'ok' | 'warn' | 'fault' | 'idle' | 'wait'
 const iecFleet = computed<{ state: FleetState; label: string; value: string }>(() => {
   const ip = status.value?.iec104.listen_ip || '0.0.0.0'
   const list = status.value?.iec104.servers ?? []
-  if (!list.length) return { state: 'idle', label: 'IEC 104', value: `${ip} · no endpoints` }
+  if (!list.length) return { state: 'idle', label: 'IEC 104', value: `${ip} · sin endpoints` }
   const enabled = list.filter(s => s.enabled)
-  if (!enabled.length) return { state: 'idle', label: 'IEC 104', value: `${ip} · disabled` }
+  if (!enabled.length) return { state: 'idle', label: 'IEC 104', value: `${ip} · ${t.status.disabled}` }
   const running = enabled.filter(s => s.running)
-  if (!running.length) return { state: 'fault', label: 'IEC 104', value: `${ip} · bind failed` }
+  if (!running.length) return { state: 'fault', label: 'IEC 104', value: `${ip} · ${t.status.bindFailed}` }
   if (running.length < enabled.length) {
-    return { state: 'warn', label: 'IEC 104', value: `${ip} · ${running.length}/${enabled.length} bound` }
+    return { state: 'warn', label: 'IEC 104', value: `${ip} · ${running.length}/${enabled.length} enlazados` }
   }
   const totalActivated = list.reduce((n, s) => n + s.activated, 0)
   const totalTCP = list.reduce((n, s) => n + s.clients, 0)
   if (totalActivated > 0) {
-    return { state: 'ok', label: 'IEC 104', value: `${ip} · ${totalActivated} protocol link${totalActivated === 1 ? '' : 's'}` }
+    return { state: 'ok', label: 'IEC 104', value: `${ip} · ${totalActivated} enlace${totalActivated === 1 ? '' : 's'} protocolo` }
   }
   if (totalTCP > 0) {
-    return { state: 'warn', label: 'IEC 104', value: `${ip} · ${totalTCP} TCP, no STARTDT` }
+    return { state: 'warn', label: 'IEC 104', value: `${ip} · ${totalTCP} TCP, sin STARTDT` }
   }
-  return { state: 'wait', label: 'IEC 104', value: `${ip} · listening` }
+  return { state: 'wait', label: 'IEC 104', value: `${ip} · ${t.status.listening}` }
 })
 
 function fmtUptime(s: number) {
@@ -158,22 +159,22 @@ function fmtUptime(s: number) {
       <div class="border-t border-sidebar-border p-3 space-y-1 shrink-0">
         <button
           class="w-full flex items-center gap-3 rounded-sm px-3 py-2 text-sm hover:bg-sidebar-accent transition-colors"
-          :title="dark ? 'Light mode' : 'Dark mode'"
+          :title="dark ? t.nav.lightMode : t.nav.darkMode"
           @click="toggleTheme"
         >
           <component :is="dark ? Sun : Moon" class="h-4 w-4 shrink-0" />
-          <span class="sidebar-label">{{ dark ? 'Light' : 'Dark' }}</span>
+          <span class="sidebar-label">{{ dark ? t.nav.lightMode : t.nav.darkMode }}</span>
         </button>
         <button
           class="hidden md:flex w-full items-center gap-3 rounded-sm px-3 py-2 text-sm hover:bg-sidebar-accent transition-colors"
-          :title="collapsed ? 'Expand' : 'Collapse'"
+          :title="t.nav.collapse"
           @click="toggleSidebar"
         >
           <component :is="collapsed ? PanelLeftOpen : PanelLeftClose" class="h-4 w-4 shrink-0" />
-          <span class="sidebar-label">Collapse</span>
+          <span class="sidebar-label">{{ t.nav.collapse }}</span>
         </button>
         <div class="px-3 pt-3 sidebar-wide-only">
-          <div class="text-[10px] uppercase tracking-[0.22em] text-[color:var(--epm-citrico)] font-semibold">Uptime</div>
+          <div class="text-[10px] uppercase tracking-[0.22em] text-[color:var(--epm-citrico)] font-semibold">{{ t.nav.uptime }}</div>
           <div class="font-mono text-xs mt-1 text-white/90">{{ fmtUptime(status?.uptime_seconds ?? 0) }}</div>
         </div>
       </div>

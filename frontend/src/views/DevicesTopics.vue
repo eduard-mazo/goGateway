@@ -2,6 +2,7 @@
 import { ref, onMounted, computed, reactive, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { api, type Device, type Topic, type IEC104Server } from '@/api'
+import { t as i18n } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -166,11 +167,11 @@ async function saveDevice() {
 async function deleteDevice(d: Device) {
   const topicCount = (topicsByDevice.value.get(d.id) ?? []).length
   const ok = await confirm({
-    title: 'Delete device',
-    message: `Cascades to ${topicCount} topic${topicCount === 1 ? '' : 's'} and every signal mapping under them. Cannot be undone.`,
+    title: 'Eliminar dispositivo',
+    message: `Cascada a ${topicCount} tópico${topicCount === 1 ? '' : 's'} y todos los mapeos bajo ellos. No se puede deshacer.`,
     detail: `${d.name}${d.description ? ' — ' + d.description : ''}`,
     variant: 'danger',
-    confirmText: 'Delete device',
+    confirmText: 'Eliminar dispositivo',
     challenge: topicCount > 0 ? d.name : undefined,
   })
   if (!ok) return
@@ -228,11 +229,11 @@ async function toggleTopic(t: Topic) {
 
 async function deleteTopic(t: Topic) {
   const ok = await confirm({
-    title: 'Delete topic',
-    message: 'All signal mappings under this topic cascade. Cannot be undone.',
+    title: 'Eliminar tópico',
+    message: 'Todos los mapeos de señales bajo este tópico se eliminan. No se puede deshacer.',
     detail: `${t.topic} · QoS ${t.qos}`,
     variant: 'danger',
-    confirmText: 'Delete topic',
+    confirmText: 'Eliminar tópico',
   })
   if (!ok) return
   try {
@@ -270,12 +271,12 @@ onMounted(reload)
           <Cpu class="h-5 w-5" />
         </div>
         <div class="min-w-0">
-          <div class="text-[11px] uppercase tracking-[0.26em] font-bold text-[color:var(--epm-bosque)]">Infrastructure</div>
-          <h1 class="mt-1 mb-1">Devices &amp; topics</h1>
+          <div class="text-[11px] uppercase tracking-[0.26em] font-bold text-[color:var(--epm-bosque)]">Infraestructura</div>
+          <h1 class="mt-1 mb-1">{{ i18n.devices.title }}</h1>
           <p class="text-sm text-muted-foreground">
-            {{ servers.length }} server{{ servers.length === 1 ? '' : 's' }} ·
-            {{ devices.length }} device{{ devices.length === 1 ? '' : 's' }} ·
-            {{ topics.length }} topic{{ topics.length === 1 ? '' : 's' }}
+            {{ servers.length }} servidor{{ servers.length === 1 ? '' : 'es' }} ·
+            {{ devices.length }} dispositivo{{ devices.length === 1 ? '' : 's' }} ·
+            {{ topics.length }} tópico{{ topics.length === 1 ? '' : 's' }}
           </p>
         </div>
       </div>
@@ -307,10 +308,10 @@ onMounted(reload)
 
     <!-- Tree -->
     <div v-if="!servers.length" class="card-soft p-6 text-sm text-muted-foreground">
-      No IEC-104 servers configured. Add at least one under <strong>IEC 104</strong> first.
+      Sin servidores IEC-104 configurados. Agregue al menos uno en <strong>IEC 104</strong> primero.
     </div>
     <div v-else-if="!tree.length" class="card-soft p-6 text-sm text-muted-foreground">
-      Nothing matches the current filter.
+      Nada coincide con el filtro actual.
     </div>
 
     <div
@@ -349,7 +350,7 @@ onMounted(reload)
         <Button
           v-if="sn.server"
           variant="ghost" size="icon"
-          title="Add device under this server"
+          title="Agregar dispositivo"
           class="text-muted-foreground hover:text-[color:var(--epm-bosque)]"
           @click="openCreateDevice(sn.server.id)"
         >
@@ -360,7 +361,7 @@ onMounted(reload)
       <!-- Devices -->
       <div v-show="isOpen(`s:${sn.server?.id ?? -999}`)" class="border-t border-border bg-muted/20">
         <div v-if="!sn.devices.length" class="px-10 py-3 text-xs text-muted-foreground italic">
-          No devices on this server yet. Click + to add one.
+          Sin dispositivos en este servidor. Haga clic en + para agregar uno.
         </div>
         <div
           v-for="dn in sn.devices"
@@ -392,7 +393,7 @@ onMounted(reload)
             <span class="font-mono text-[10px] text-muted-foreground shrink-0">
               {{ dn.topics.length }} topic{{ dn.topics.length === 1 ? '' : 's' }}
             </span>
-            <Button variant="ghost" size="icon" title="Add topic" class="text-muted-foreground hover:text-[color:var(--epm-bosque)]" @click="openCreateTopic(dn.device.id)">
+            <Button variant="ghost" size="icon" title="Agregar tópico" class="text-muted-foreground hover:text-[color:var(--epm-bosque)]" @click="openCreateTopic(dn.device.id)">
               <Plus class="h-4 w-4" />
             </Button>
             <Button variant="ghost" size="icon" title="Edit device" @click="openEditDevice(dn.device)">
@@ -406,7 +407,7 @@ onMounted(reload)
           <!-- Topics under this device -->
           <div v-show="isOpen(`s:${sn.server?.id ?? -999}:d:${dn.device.id}`)">
             <div v-if="!dn.topics.length" class="pl-20 py-2 text-xs text-muted-foreground italic">
-              No topics yet. Click + on the device row to subscribe.
+              Sin tópicos aún. Haga clic en + en la fila del dispositivo para suscribirse.
             </div>
             <div v-else class="overflow-x-auto">
               <Table>
@@ -453,16 +454,16 @@ onMounted(reload)
     <Dialog v-model:open="devDialog">
       <DialogContent class="max-w-md">
         <DialogHeader>
-          <DialogTitle>{{ isEditDev ? `Edit device #${editingDev.id}` : 'New device' }}</DialogTitle>
+          <DialogTitle>{{ isEditDev ? `Editar dispositivo #${editingDev.id}` : 'Nuevo dispositivo' }}</DialogTitle>
           <DialogDescription>
-            A device groups MQTT topics under one logical asset (e.g. inverter, weather station).
-            It is owned by one IEC-104 slave: same physical asset on two slaves is two device rows.
+            Un dispositivo agrupa tópicos MQTT bajo un activo lógico (ej. inversor, estación meteorológica).
+            Pertenece a un esclavo IEC-104: el mismo activo físico en dos esclavos son dos filas.
           </DialogDescription>
         </DialogHeader>
 
         <div class="grid grid-cols-1 gap-3 py-2">
           <div class="space-y-1.5">
-            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">IEC-104 server</Label>
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Servidor IEC-104</Label>
             <Select v-model="editingDev.server_id">
               <SelectTrigger class="w-full"><SelectValue placeholder="Select slave endpoint…" /></SelectTrigger>
               <SelectContent>
@@ -473,19 +474,19 @@ onMounted(reload)
             </Select>
           </div>
           <div class="space-y-1.5">
-            <Label for="dname" class="text-[11px] uppercase tracking-[0.18em] font-bold">Name</Label>
+            <Label for="dname" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ i18n.devices.device }}</Label>
             <Input id="dname" v-model="editingDev.name" placeholder="INV_1" class="rounded-sm font-mono" @keyup.enter="saveDevice" />
           </div>
           <div class="space-y-1.5">
-            <Label for="ddesc" class="text-[11px] uppercase tracking-[0.18em] font-bold">Description</Label>
+            <Label for="ddesc" class="text-[11px] uppercase tracking-[0.18em] font-bold">Descripción</Label>
             <Input id="ddesc" v-model="editingDev.description" placeholder="Inversor 1" class="rounded-sm" @keyup.enter="saveDevice" />
           </div>
         </div>
 
         <DialogFooter>
-          <Button variant="outline" @click="devDialog = false" class="rounded-sm">Cancel</Button>
+          <Button variant="outline" @click="devDialog = false" class="rounded-sm">{{ i18n.common.cancel }}</Button>
           <Button @click="saveDevice" class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm">
-            {{ isEditDev ? 'Save changes' : 'Create' }}
+            {{ isEditDev ? i18n.common.save : 'Crear' }}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -495,15 +496,15 @@ onMounted(reload)
     <Dialog v-model:open="topicDialog">
       <DialogContent class="max-w-md">
         <DialogHeader>
-          <DialogTitle>{{ isEditTopic ? `Edit topic #${editingTopic.id}` : 'New topic' }}</DialogTitle>
+          <DialogTitle>{{ isEditTopic ? `Editar tópico #${editingTopic.id}` : 'Nuevo tópico' }}</DialogTitle>
           <DialogDescription>
-            MQTT subscription string. Wildcards (<code>+</code>, <code>#</code>) are accepted.
+            Cadena de suscripción MQTT. Se aceptan comodines (<code>+</code>, <code>#</code>).
           </DialogDescription>
         </DialogHeader>
 
         <div class="grid grid-cols-3 gap-3 py-2">
           <div class="col-span-3 space-y-1.5">
-            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Device</Label>
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ i18n.devices.device }}</Label>
             <div class="rounded-sm border border-border bg-muted/30 px-3 py-2 text-sm font-bold">
               {{ devById[editingTopic.device_id]?.name ?? '?' }}
               <span class="ml-2 text-muted-foreground font-normal">
@@ -512,23 +513,23 @@ onMounted(reload)
             </div>
           </div>
           <div class="col-span-2 space-y-1.5">
-            <Label for="tstr" class="text-[11px] uppercase tracking-[0.18em] font-bold">Topic</Label>
+            <Label for="tstr" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ i18n.devices.topic }}</Label>
             <Input id="tstr" v-model="editingTopic.topic" placeholder="EPM/SSFV/.../INV_1" class="rounded-sm font-mono" @keyup.enter="saveTopic" />
           </div>
           <div class="col-span-1 space-y-1.5">
-            <Label for="tqos" class="text-[11px] uppercase tracking-[0.18em] font-bold">QoS</Label>
+            <Label for="tqos" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ i18n.devices.qos }}</Label>
             <Input id="tqos" v-model.number="editingTopic.qos" type="number" min="0" max="2" class="rounded-sm" />
           </div>
           <div class="col-span-3 flex items-center gap-3 pt-1">
             <Switch id="ten" v-model="editingTopic.enabled" />
-            <Label for="ten">Enabled</Label>
+            <Label for="ten">{{ i18n.devices.enabled }}</Label>
           </div>
         </div>
 
         <DialogFooter>
-          <Button variant="outline" @click="topicDialog = false" class="rounded-sm">Cancel</Button>
+          <Button variant="outline" @click="topicDialog = false" class="rounded-sm">{{ i18n.common.cancel }}</Button>
           <Button @click="saveTopic" class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm">
-            {{ isEditTopic ? 'Save changes' : 'Create' }}
+            {{ isEditTopic ? i18n.common.save : 'Crear' }}
           </Button>
         </DialogFooter>
       </DialogContent>

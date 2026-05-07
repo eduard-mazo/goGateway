@@ -131,13 +131,11 @@ func (w *TSDBWorker) Run(ctx context.Context) error {
 
 		// Push to TSDB pipeline (matches HistoryLogger logic)
 		err = w.tsdbPipe.Push(tsdb.DataPoint{
-			Measurement: pt.TypeID,
+			Measurement: lastPathSegment(pt.SignalPath),
 			Timestamp:   pt.Timestamp,
 			Tags: map[string]string{
-				"mapping_id": fmt.Sprintf("%d", pt.MappingID),
-				"signal_key": pt.SignalKey,
-				"ioa":        fmt.Sprintf("%d", pt.IOA),
-				"server_id":  fmt.Sprintf("%d", pt.ServerID),
+				"path":      pt.SignalPath,
+				"server_id": fmt.Sprintf("%d", pt.ServerID),
 			},
 			Fields: map[string]float64{
 				"value":   pt.Value,

@@ -20,7 +20,7 @@ type InternalPoint struct {
 	Value      float64   `json:"value"`
 	Quality    int       `json:"quality"`
 	Timestamp  time.Time `json:"timestamp"`
-	SignalKey  string    `json:"signal_key"`
+	SignalPath string    `json:"signal_path"`
 }
 
 // Dispatcher abstracts the destination for decoded samples.
@@ -49,14 +49,13 @@ func (d *DirectDispatcher) Dispatch(tm TopicMapping, val float64, quality int, t
 
 	if !d.hist.Log(HistoryEvent{
 		MappingID:  tm.MappingID,
-		SignalKey:  tm.SignalKey,
+		SignalPath: tm.SignalPath,
 		Value:      val,
 		Quality:    quality,
 		Timestamp:  ts,
 		IOA:        tm.IOA,
-		IEC104Type: tm.IEC104Type,
 	}) {
-		log.Printf("history buffer full, dropped %s", tm.SignalKey)
+		log.Printf("history buffer full, dropped %s", tm.SignalPath)
 	}
 }
 
@@ -80,7 +79,7 @@ func (d *NatsDispatcher) Dispatch(tm TopicMapping, val float64, quality int, ts 
 		Value:      val,
 		Quality:    quality,
 		Timestamp:  ts,
-		SignalKey:  tm.SignalKey,
+		SignalPath: tm.SignalPath,
 	}
 
 	data, err := json.Marshal(pt)

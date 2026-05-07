@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { AlertTriangle, Trash2, ShieldQuestion } from 'lucide-vue-next'
 import { confirmState, settleConfirm, type ConfirmVariant } from '@/composables/useConfirm'
+import { t } from '@/i18n'
 
 const challengeInput = ref('')
 const inputRef = ref<HTMLInputElement | null>(null)
@@ -24,7 +25,7 @@ const variantTone = computed<Record<ConfirmVariant, {
     iconColor: 'text-[color:var(--signal-fault)]',
     icon: Trash2,
     cta: 'bg-[color:var(--signal-fault)] hover:bg-[color:color-mix(in_srgb,var(--signal-fault)_85%,black)] text-white',
-    label: 'Destructive action',
+    label: t.confirm.danger,
   },
   warn: {
     ribbon: 'bg-[color:var(--signal-warn)]',
@@ -32,7 +33,7 @@ const variantTone = computed<Record<ConfirmVariant, {
     iconColor: 'text-[color:var(--signal-warn)]',
     icon: AlertTriangle,
     cta: 'bg-[color:var(--signal-warn)] hover:bg-[color:color-mix(in_srgb,var(--signal-warn)_85%,black)] text-[color:var(--epm-ink)]',
-    label: 'Caution',
+    label: t.confirm.warn,
   },
   primary: {
     ribbon: 'bg-[color:var(--epm-bosque)]',
@@ -40,7 +41,7 @@ const variantTone = computed<Record<ConfirmVariant, {
     iconColor: 'text-[color:var(--epm-bosque)]',
     icon: ShieldQuestion,
     cta: 'bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white',
-    label: 'Confirm',
+    label: t.confirm.primary,
   },
 }))
 
@@ -115,9 +116,9 @@ function onKey(e: KeyboardEvent) {
         <!-- Type-to-confirm challenge -->
         <div v-if="requiresChallenge" class="mt-4 space-y-1.5">
           <Label class="text-[10px] uppercase tracking-[0.18em] font-bold">
-            Type
+            {{ t.confirm.typeToConfirm }}
             <code class="font-mono px-1 py-0.5 rounded-sm bg-muted text-foreground">{{ confirmState.challenge }}</code>
-            to confirm
+            {{ t.confirm.toConfirm }}
           </Label>
           <Input
             ref="inputRef"

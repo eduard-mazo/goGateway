@@ -81,7 +81,7 @@ func NewTimescaleAdapter(ctx context.Context, cfg TimescaleConfig) (*TimescaleAd
 func (a *TimescaleAdapter) Name() string { return "timescaledb" }
 
 // WriteBatch uses pgx COPY — the fastest bulk insert path, no SQL parsing overhead.
-// On unique-constraint violation (same ts+measurement+ioa in the batch), falls back
+// On unique-constraint violation (same ts+signal_path in the batch), falls back
 // to INSERT ON CONFLICT DO NOTHING so duplicate points are silently skipped.
 func (a *TimescaleAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 	err := a.doCopy(ctx, batch)
@@ -100,19 +100,20 @@ func (a *TimescaleAdapter) WriteBatchSafe(ctx context.Context, batch []DataPoint
 	return a.doInsertSafe(ctx, batch)
 }
 
-// dedupBatch keeps only the last DataPoint per (measurement, ioa) pair.
-// The accumulator forwards every raw point from the channel without
-// deduplication, so the same signal can appear multiple times within one
-// flush window with an identical timestamp — which violates the unique
-// index on (ts, measurement, ioa).
+// dedupBatch drops only exact (ts, signal_path) duplicates — the pair that
+// would violate the unique index. Points for the same signal at different
+// timestamps are all kept, so high-frequency signals (b1/b2) reach the DB.
 func dedupBatch(batch []DataPoint) []DataPoint {
-	type key struct{ meas, ioa string }
+	type key struct {
+		path string
+		nsec int64
+	}
 	seen := make(map[key]int, len(batch))
 	out := batch[:0:len(batch)]
 	for _, p := range batch {
-		k := key{p.Measurement, p.Tags["ioa"]}
+		k := key{path: p.Tags["path"], nsec: p.Timestamp.UnixNano()}
 		if idx, ok := seen[k]; ok {
-			out[idx] = p // overwrite with newer value
+			out[idx] = p // keep last value for true duplicate
 		} else {
 			seen[k] = len(out)
 			out = append(out, p)
@@ -132,7 +133,7 @@ func (a *TimescaleAdapter) doCopy(ctx context.Context, batch []DataPoint) error 
 		rows = append(rows, []any{
 			p.Timestamp,
 			p.Measurement,
-			p.Tags["ioa"],
+			p.Tags["path"],
 			primaryValue(p.Fields),
 			tagsJSON,
 		})
@@ -140,7 +141,7 @@ func (a *TimescaleAdapter) doCopy(ctx context.Context, batch []DataPoint) error 
 	n, err := a.pool.CopyFrom(
 		ctx,
 		pgx.Identifier{a.cfg.Table},
-		[]string{"ts", "measurement", "ioa", "value", "tags"},
+		[]string{"ts", "signal", "signal_path", "value", "tags"},
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
@@ -164,14 +165,14 @@ func (a *TimescaleAdapter) doInsertSafe(ctx context.Context, batch []DataPoint) 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	q := fmt.Sprintf(`INSERT INTO %s (ts,measurement,ioa,value,tags)
+	q := fmt.Sprintf(`INSERT INTO %s (ts,signal,signal_path,value,tags)
 		VALUES ($1,$2,$3,$4,$5)
-		ON CONFLICT (ts,measurement,ioa) DO NOTHING`, a.cfg.Table)
+		ON CONFLICT (ts,signal_path) DO NOTHING`, a.cfg.Table)
 
 	b := &pgx.Batch{}
 	for _, p := range batch {
 		tagsJSON, _ := json.Marshal(p.Tags)
-		b.Queue(q, p.Timestamp, p.Measurement, p.Tags["ioa"], primaryValue(p.Fields), tagsJSON)
+		b.Queue(q, p.Timestamp, p.Measurement, p.Tags["path"], primaryValue(p.Fields), tagsJSON)
 	}
 	res := tx.SendBatch(ctx, b)
 	for range batch {

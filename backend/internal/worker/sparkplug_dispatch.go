@@ -2,6 +2,7 @@ package worker
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	"goGateway/internal/iec104"
@@ -66,10 +67,13 @@ func (h *SparkplugHandler) Dispatch(topic sparkplug.Topic, raw []byte) {
 
 // MarkNodeStale dispatches QualityNotTopical to every IEC-104 point mapped to
 // nodeBase.  Called by mqtt.Manager on connection loss or NDEATH.
+// nodeBase = "spBv1.0/{group}/{node}" or "spBv1.0/{group}/{node}/{device}".
 func (h *SparkplugHandler) MarkNodeStale(nodeBase string) {
 	maps := h.cache.LookupByNode(nodeBase)
 	now := time.Now()
+	stripped := strings.TrimPrefix(nodeBase, sparkplug.Namespace+"/")
 	for _, m := range maps {
+		m.SignalPath = m.Business + "/" + m.Company + "/" + stripped + "/" + m.MetricName
 		h.d.Dispatch(m, 0, iec104.QualityNotTopical, now)
 	}
 }
@@ -92,7 +96,6 @@ func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) {
 	session := h.registry.Session(key)
 	session.SetBirth(p)
 
-	nodeBase := topic.NodeBase()
 	ts := msToTime(p.Timestamp)
 
 	for i := range p.Metrics {
@@ -101,7 +104,7 @@ func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) {
 		if name == "" || m.IsTransient {
 			continue
 		}
-		h.dispatchMetric(nodeBase, name, m, ts)
+		h.dispatchMetric(topic, false, name, m, ts)
 	}
 
 	log.Printf("sparkplug: NBIRTH %s/%s — %d metric(s)", topic.GroupID, topic.EdgeNodeID, len(p.Metrics))
@@ -138,7 +141,6 @@ func (h *SparkplugHandler) handleNDATA(topic sparkplug.Topic, raw []byte) {
 		return
 	}
 
-	nodeBase := topic.NodeBase()
 	ts := msToTime(p.Timestamp)
 
 	for i := range p.Metrics {
@@ -147,7 +149,7 @@ func (h *SparkplugHandler) handleNDATA(topic sparkplug.Topic, raw []byte) {
 		if name == "" || m.IsTransient {
 			continue
 		}
-		h.dispatchMetric(nodeBase, name, m, ts)
+		h.dispatchMetric(topic, false, name, m, ts)
 	}
 }
 
@@ -165,7 +167,6 @@ func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) {
 	session := h.registry.Session(key).Device(topic.DeviceID)
 	session.SetBirth(p)
 
-	devBase := topic.DeviceBase()
 	ts := msToTime(p.Timestamp)
 
 	for i := range p.Metrics {
@@ -174,7 +175,7 @@ func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) {
 		if name == "" || m.IsTransient {
 			continue
 		}
-		h.dispatchMetric(devBase, name, m, ts)
+		h.dispatchMetric(topic, true, name, m, ts)
 	}
 
 	log.Printf("sparkplug: DBIRTH %s/%s/%s — %d metric(s)",
@@ -212,7 +213,6 @@ func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) {
 		return
 	}
 
-	devBase := topic.DeviceBase()
 	ts := msToTime(p.Timestamp)
 
 	for i := range p.Metrics {
@@ -221,19 +221,29 @@ func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) {
 		if name == "" || m.IsTransient {
 			continue
 		}
-		h.dispatchMetric(devBase, name, m, ts)
+		h.dispatchMetric(topic, true, name, m, ts)
 	}
 }
 
 // ─── Core dispatch ───────────────────────────────────────────────────────────
 
-// dispatchMetric resolves nodeBase + metricName → signal mappings and forwards
-// the value to every mapped IEC-104 slave.
+// dispatchMetric resolves the metric to signal mappings and forwards values to
+// every mapped IEC-104 slave. isDevice=true uses DeviceBase for the cache
+// lookup and includes topic.DeviceID in the signal path.
 func (h *SparkplugHandler) dispatchMetric(
-	nodeBase, metricName string,
+	topic sparkplug.Topic,
+	isDevice bool,
+	metricName string,
 	m *sparkplug.Metric,
 	ts time.Time,
 ) {
+	var nodeBase string
+	if isDevice && topic.DeviceID != "" {
+		nodeBase = topic.DeviceBase()
+	} else {
+		nodeBase = topic.NodeBase()
+	}
+
 	maps := h.cache.LookupByMetric(nodeBase, metricName)
 	if len(maps) == 0 {
 		return
@@ -243,6 +253,7 @@ func (h *SparkplugHandler) dispatchMetric(
 	quality := m.IEC104Quality()
 
 	for _, tm := range maps {
+		tm.SignalPath = spSignalPath(tm.Business, tm.Company, topic, isDevice, metricName)
 		scaled := val * tm.Scale
 		if hasVal {
 			h.d.Dispatch(tm, scaled, quality, ts)
@@ -251,6 +262,17 @@ func (h *SparkplugHandler) dispatchMetric(
 			h.d.Dispatch(tm, 0, iec104.QualityInvalid, ts)
 		}
 	}
+}
+
+// spSignalPath builds the full signal path for a Sparkplug B metric.
+// Format: business/company/group/node[/device]/metricName
+func spSignalPath(business, company string, topic sparkplug.Topic, isDevice bool, metricName string) string {
+	parts := []string{business, company, topic.GroupID, topic.EdgeNodeID}
+	if isDevice && topic.DeviceID != "" {
+		parts = append(parts, topic.DeviceID)
+	}
+	parts = append(parts, metricName)
+	return strings.Join(parts, "/")
 }
 
 // msToTime converts a Sparkplug B millisecond-epoch timestamp to time.Time.

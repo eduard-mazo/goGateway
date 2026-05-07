@@ -92,6 +92,8 @@ type SignalMapping struct {
 	Unit           string  `db:"unit"           json:"unit"`
 	Scale          float64 `db:"scale"          json:"scale"`
 	Enabled        bool    `db:"enabled"        json:"enabled"`
+	Business       string  `db:"business"       json:"business"`
+	Company        string  `db:"company"        json:"company"`
 }
 
 // TSDBConfig = time-series pipeline settings. Singleton (id=1).
@@ -123,10 +125,10 @@ type NATSConfig struct {
 
 // History = time-series log row.
 type History struct {
-	ID        int64     `db:"id" json:"id"`
-	MappingID int64     `db:"mapping_id" json:"mapping_id"`
-	SignalKey string    `db:"signal_key" json:"signal_key"`
-	Value     float64   `db:"value" json:"value"`
-	Quality   int       `db:"quality" json:"quality"`
-	Timestamp time.Time `db:"timestamp" json:"timestamp"`
+	ID         int64     `db:"id" json:"id"`
+	MappingID  int64     `db:"mapping_id" json:"mapping_id"`
+	SignalPath string    `db:"signal_path" json:"signal_path"`
+	Value      float64   `db:"value" json:"value"`
+	Quality    int       `db:"quality" json:"quality"`
+	Timestamp  time.Time `db:"timestamp" json:"timestamp"`
 }

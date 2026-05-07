@@ -74,12 +74,14 @@ export interface SignalMapping {
   unit: string
   scale: number
   enabled: boolean
+  business: string
+  company: string
 }
 
 export interface History {
   id: number
   mapping_id: number
-  signal_key: string
+  signal_path: string
   value: number
   quality: number
   timestamp: string

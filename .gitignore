@@ -5,7 +5,11 @@
 /goGateway
 /goGateway-linux-amd64
 /goGateway-linux-ppc64le
+/goGateway-ppc64le.tar
 /backend/bin/
+
+# Dev container data volume (make dev-container)
+/dev-data/
 
 # Generated frontend bundle
 /frontend/dist/

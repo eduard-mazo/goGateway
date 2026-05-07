@@ -1,0 +1,20 @@
+# Development / local-test image — linux/amd64, Alpine-based
+# ============================================================
+# NOT for production.  Alpine gives you a shell, curl, and wget
+# so you can exec in and poke at the running gateway.
+#
+# Build:  make dev-container
+# The binary is pre-built by make as goGateway-linux-amd64.
+FROM --platform=linux/amd64 alpine:3.21
+
+RUN apk add --no-cache ca-certificates tzdata curl
+
+# Pre-built static binary (built by: make backend-rh-amd64 inside dev-container target)
+COPY goGateway-linux-amd64 /usr/local/bin/goGateway
+
+# Same mount point as the production image so config/habits transfer.
+WORKDIR /data
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/goGateway"]

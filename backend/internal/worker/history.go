@@ -2,8 +2,8 @@ package worker
 
 import (
 	"context"
-	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -14,12 +14,11 @@ import (
 // HistoryEvent = one row to persist.
 type HistoryEvent struct {
 	MappingID  int64
-	SignalKey  string
+	SignalPath string // full path: business/company/B1/.../signal
 	Value      float64
 	Quality    int
 	Timestamp  time.Time
-	IOA        int    // IEC-104 Information Object Address
-	IEC104Type string // ASDU type, e.g. M_ME_NC_1
+	IOA        int // IEC-104 Information Object Address (dispatch only, not stored in TSDB)
 }
 
 // HistoryLogger = async batched writer. Drops on full buffer (never blocks hot path).
@@ -52,13 +51,10 @@ func (h *HistoryLogger) SetTSDB(p *tsdb.WritePipeline) { h.tsdbPipe = p }
 func (h *HistoryLogger) Log(e HistoryEvent) bool {
 	if h.tsdbPipe != nil {
 		pt := tsdb.DataPoint{
-			Measurement: e.IEC104Type,
-			Tags: map[string]string{
-				"ioa":        fmt.Sprintf("%d", e.IOA),
-				"signal_key": e.SignalKey,
-			},
-			Fields:    map[string]float64{"value": e.Value, "quality": float64(e.Quality)},
-			Timestamp: e.Timestamp,
+			Measurement: lastPathSegment(e.SignalPath),
+			Tags:        map[string]string{"path": e.SignalPath},
+			Fields:      map[string]float64{"value": e.Value, "quality": float64(e.Quality)},
+			Timestamp:   e.Timestamp,
 		}
 		h.tsdbPipe.Push(pt) //nolint:errcheck
 	}
@@ -141,19 +137,27 @@ func (h *HistoryLogger) trim() {
 	}
 }
 
+// lastPathSegment returns the last "/" segment of a path, or the full string if no slash.
+func lastPathSegment(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[i+1:]
+	}
+	return path
+}
+
 func (h *HistoryLogger) writeBatch(batch []HistoryEvent) error {
 	tx, err := h.db.Beginx()
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Preparex(`INSERT INTO history(mapping_id,signal_key,value,quality,timestamp) VALUES(?,?,?,?,?)`)
+	stmt, err := tx.Preparex(`INSERT INTO history(mapping_id,signal_path,value,quality,timestamp) VALUES(?,?,?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
 	}
 	defer stmt.Close()
 	for _, e := range batch {
-		if _, err := stmt.Exec(e.MappingID, e.SignalKey, e.Value, e.Quality, e.Timestamp); err != nil {
+		if _, err := stmt.Exec(e.MappingID, e.SignalPath, e.Value, e.Quality, e.Timestamp); err != nil {
 			tx.Rollback()
 			return err
 		}

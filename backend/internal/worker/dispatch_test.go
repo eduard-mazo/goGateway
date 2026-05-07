@@ -47,10 +47,10 @@ func TestParseAndDispatch_Inverter(t *testing.T) {
 
 	srv := &fakeSrv{}
 	maps := []TopicMapping{
-		{MappingID: 1, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "IA", IEC104Type: "M_ME_TF_1", IOA: 16385, Scale: 1, SignalKey: "Inversor 1.IA"},
-		{MappingID: 2, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "UAB", IEC104Type: "M_ME_TF_1", IOA: 16386, Scale: 1, SignalKey: "Inversor 1.UAB"},
-		{MappingID: 3, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "OS", IEC104Type: "M_ME_NB_1", IOA: 16387, Scale: 1, SignalKey: "Inversor 1.OS"},
-		{MappingID: 4, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "MISSING", IEC104Type: "M_ME_TF_1", IOA: 16388, Scale: 1, SignalKey: "Inversor 1.MISSING"},
+		{MappingID: 1, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "IA", IEC104Type: "M_ME_TF_1", IOA: 16385, Scale: 1, SignalPath: "acme/plant/t1/IA"},
+		{MappingID: 2, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "UAB", IEC104Type: "M_ME_TF_1", IOA: 16386, Scale: 1, SignalPath: "acme/plant/t1/UAB"},
+		{MappingID: 3, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "OS", IEC104Type: "M_ME_NB_1", IOA: 16387, Scale: 1, SignalPath: "acme/plant/t1/OS"},
+		{MappingID: 4, ServerID: 1, TopicID: 1, Topic: "t1", JSONKey: "MISSING", IEC104Type: "M_ME_TF_1", IOA: 16388, Scale: 1, SignalPath: "acme/plant/t1/MISSING"},
 	}
 
 	// seed mapping rows so history FK passes. iec104_servers id=1 is seeded

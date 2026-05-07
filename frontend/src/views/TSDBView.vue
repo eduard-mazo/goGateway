@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { toast } from 'vue-sonner'
 import { api, type TSDBConfig, type TSDBTestResult } from '@/api'
+import { t } from '@/i18n'
 import { useTSDB } from '@/composables/useTSDB'
 import BackendCard from '@/components/tsdb/BackendCard.vue'
 import DLQTable    from '@/components/tsdb/DLQTable.vue'
@@ -33,10 +34,10 @@ const advancedOpen = ref(false)
 const showDsn = ref(false)
 
 const backendOptions = [
-  { value: 'none',             label: 'None' },
+  { value: 'none',             label: t.tsdb.none },
   { value: 'victoriametrics',  label: 'VictoriaMetrics' },
   { value: 'timescaledb',      label: 'TimescaleDB' },
-  { value: 'both',             label: 'Both' },
+  { value: 'both',             label: t.tsdb.both },
 ] as const
 
 const showVM = computed(() =>
@@ -65,9 +66,9 @@ async function save() {
   saving.value = true
   try {
     cfg.value = (await api.put<TSDBConfig>('/tsdb-config', cfg.value)).data
-    toast.success('TSDB config saved · pipeline reloading')
+    toast.success(t.nats.saved)
   } catch (e: any) {
-    toast.error('Save failed: ' + (e?.response?.data?.error ?? e?.message ?? e))
+    toast.error(t.nats.saveFailed + (e?.response?.data?.error ?? e?.message ?? e))
   } finally {
     saving.value = false
   }
@@ -128,13 +129,13 @@ onMounted(load)
             <Database class="h-5 w-5" />
           </div>
           <div>
-            <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Configuration</div>
-            <div class="font-sans text-lg font-extrabold tracking-tight mt-0.5">Time-Series Pipeline</div>
+            <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">{{ t.tsdb.config }}</div>
+            <div class="font-sans text-lg font-extrabold tracking-tight mt-0.5">{{ t.tsdb.subtitle }}</div>
           </div>
         </div>
         <p class="text-xs text-muted-foreground hidden sm:block max-w-xs text-right">
-          Store every signal sample in VictoriaMetrics and/or TimescaleDB
-          for long-term analytics and dashboards.
+          Almacena cada muestra de señal en VictoriaMetrics y/o TimescaleDB
+          para análisis y dashboards de largo plazo.
         </p>
       </div>
 
@@ -142,7 +143,7 @@ onMounted(load)
 
         <!-- Backend selector -->
         <div class="space-y-2">
-          <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Backend</Label>
+          <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.tsdb.backend }}</Label>
           <div class="inline-flex rounded-sm border border-border overflow-hidden">
             <button
               v-for="opt in backendOptions"
@@ -164,16 +165,16 @@ onMounted(load)
           </div>
           <div class="p-4 space-y-4">
             <div class="space-y-1.5">
-              <Label for="vm_url" class="text-[11px] uppercase tracking-[0.18em] font-bold">Write URL</Label>
+              <Label for="vm_url" class="text-[11px] uppercase tracking-[0.18em] font-bold">URL de escritura</Label>
               <Input id="vm_url" v-model="cfg.vm_url" placeholder="http://vm-host:8428" class="rounded-sm font-mono" />
             </div>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div class="space-y-1.5">
-                <Label for="vm_user" class="text-[11px] uppercase tracking-[0.18em] font-bold">Username</Label>
+                <Label for="vm_user" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.username }}</Label>
                 <Input id="vm_user" v-model="cfg.vm_username" autocomplete="off" class="rounded-sm" />
               </div>
               <div class="space-y-1.5">
-                <Label for="vm_pass" class="text-[11px] uppercase tracking-[0.18em] font-bold">Password</Label>
+                <Label for="vm_pass" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.password }}</Label>
                 <Input id="vm_pass" v-model="cfg.vm_password" type="password" autocomplete="new-password" class="rounded-sm" />
               </div>
             </div>
@@ -187,7 +188,7 @@ onMounted(load)
                 @click="testVM"
               >
                 <FlaskConical class="h-3.5 w-3.5" />
-                {{ testingVM ? 'Testing…' : 'Test Connection' }}
+                {{ testingVM ? 'Probando…' : t.tsdb.test }}
               </Button>
               <span v-if="testResultVM" class="flex items-center gap-1.5 text-sm font-medium"
                 :class="testResultVM.ok ? 'text-emerald-500' : 'text-destructive'">
@@ -238,7 +239,7 @@ onMounted(load)
                 @click="testTS"
               >
                 <FlaskConical class="h-3.5 w-3.5" />
-                {{ testingTS ? 'Testing…' : 'Test Connection' }}
+                {{ testingTS ? 'Probando…' : t.tsdb.test }}
               </Button>
               <span v-if="testResultTS" class="flex items-center gap-1.5 text-sm font-medium"
                 :class="testResultTS.ok ? 'text-emerald-500' : 'text-destructive'">
@@ -293,10 +294,10 @@ onMounted(load)
           <Switch id="enabled" v-model="cfg.enabled" />
           <div class="flex-1">
             <Label for="enabled" class="font-bold inline-flex items-center gap-1.5">
-              <Zap class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" /> Enable Pipeline
+              <Zap class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" /> Habilitar Pipeline
             </Label>
             <div class="text-xs text-muted-foreground mt-0.5">
-              When disabled, no samples are forwarded to the time-series backend.
+              Cuando está deshabilitado, no se envían muestras al backend de series de tiempo.
             </div>
           </div>
         </div>
@@ -311,10 +312,10 @@ onMounted(load)
           class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm px-6"
         >
           <Save class="h-4 w-4 mr-2" />
-          {{ saving ? 'Saving…' : 'Save & apply' }}
+          {{ saving ? t.tsdb.saving : t.tsdb.save }}
         </Button>
         <Button variant="outline" @click="load" class="rounded-sm">
-          <RefreshCw class="h-4 w-4 mr-2" /> Reload
+          <RefreshCw class="h-4 w-4 mr-2" /> {{ t.common.reload }}
         </Button>
       </div>
     </section>
@@ -331,7 +332,7 @@ onMounted(load)
           Circuit breaker open
         </span>
         <span v-if="status!.dlqDepth > 0" class="text-destructive font-medium flex items-center gap-2">
-          DLQ: {{ status!.dlqDepth }} entries
+          {{ t.tsdb.dlqTitle }}: {{ status!.dlqDepth }} entradas
           <button
             class="rounded px-2 py-0.5 text-xs font-bold bg-destructive text-destructive-foreground hover:bg-destructive/80"
             @click="handleReplay"
@@ -345,33 +346,33 @@ onMounted(load)
       <!-- Stats row -->
       <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         <div class="rounded-md border border-border bg-card px-4 py-3">
-          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">Write rate</p>
+          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">{{ t.tsdb.writeRate }}</p>
           <p class="mt-1 font-mono text-lg font-semibold tabular-nums">
             {{ totalWriteRate.toFixed(0) }}<span class="text-xs text-muted-foreground">/s</span>
           </p>
         </div>
         <div class="rounded-md border border-border bg-card px-4 py-3">
-          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">Input rate</p>
+          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">Tasa entrada</p>
           <p class="mt-1 font-mono text-lg font-semibold tabular-nums">
             {{ (status!.inputRate ?? 0).toFixed(0) }}<span class="text-xs text-muted-foreground">/s</span>
           </p>
         </div>
         <div class="rounded-md border border-border bg-card px-4 py-3">
-          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">Input queue</p>
+          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">Cola entrada</p>
           <p
             class="mt-1 font-mono text-lg font-semibold tabular-nums"
             :class="(status!.inputQueue ?? 0) > 50000 ? 'text-orange-400' : ''"
           >{{ status!.inputQueue ?? 0 }}</p>
         </div>
         <div class="rounded-md border border-border bg-card px-4 py-3">
-          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">WAL pending</p>
+          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">{{ t.tsdb.walPending }}</p>
           <p
             class="mt-1 font-mono text-lg font-semibold tabular-nums"
             :class="(status!.walPending ?? 0) > 100 ? 'text-orange-400' : ''"
           >{{ status!.walPending ?? 0 }}</p>
         </div>
         <div class="rounded-md border border-border bg-card px-4 py-3">
-          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">DLQ</p>
+          <p class="text-[11px] uppercase tracking-wide text-muted-foreground">{{ t.tsdb.dlqDepth }}</p>
           <p
             class="mt-1 font-mono text-lg font-semibold tabular-nums"
             :class="(status!.dlqDepth ?? 0) > 0 ? 'text-destructive' : ''"

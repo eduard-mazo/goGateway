@@ -92,18 +92,20 @@ CREATE TABLE IF NOT EXISTS signal_mappings (
     unit           TEXT DEFAULT '',
     scale          REAL NOT NULL DEFAULT 1.0,
     enabled        INTEGER NOT NULL DEFAULT 1,
+    business       TEXT NOT NULL DEFAULT '',
+    company        TEXT NOT NULL DEFAULT '',
     UNIQUE (server_id, ioa)
 );
 CREATE INDEX IF NOT EXISTS idx_sigmap_topic ON signal_mappings(topic_id);
 CREATE INDEX IF NOT EXISTS idx_sigmap_server ON signal_mappings(server_id);
 
 CREATE TABLE IF NOT EXISTS history (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    mapping_id INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
-    signal_key TEXT NOT NULL,
-    value      REAL NOT NULL,
-    quality    INTEGER NOT NULL DEFAULT 0,
-    timestamp  DATETIME NOT NULL
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    mapping_id  INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
+    signal_path TEXT NOT NULL,
+    value       REAL NOT NULL,
+    quality     INTEGER NOT NULL DEFAULT 0,
+    timestamp   DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_history_mapping_ts ON history(mapping_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_history_ts ON history(timestamp DESC);

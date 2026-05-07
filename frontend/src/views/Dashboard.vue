@@ -2,6 +2,7 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { api, type History, type SignalMapping } from '@/api'
 import { useStatus } from '@/composables/useStatus'
+import { t } from '@/i18n'
 import StatCard from '@/components/StatCard.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -75,11 +76,11 @@ const iecState = computed<'ok' | 'warn' | 'fault' | 'idle' | 'wait'>(() => {
 })
 const iecStateLabel = computed(() => {
   switch (iecState.value) {
-    case 'ok': return 'Protocol up'
-    case 'warn': return 'TCP only'
-    case 'fault': return 'Bind failed'
-    case 'wait': return 'Listening'
-    default: return 'Idle'
+    case 'ok': return t.status.protocolUp
+    case 'warn': return t.status.tcpOnly
+    case 'fault': return t.status.bindFailed
+    case 'wait': return t.status.listening
+    default: return t.status.idle
   }
 })
 const iecSummary = computed(() => {
@@ -88,7 +89,7 @@ const iecSummary = computed(() => {
   if (!list.length) return ip
   if (list.length === 1) return `${ip}:${list[0].port}`
   const active = list.reduce((n, s) => n + (s.activated > 0 ? 1 : 0), 0)
-  return `${ip} · ${active}/${list.filter(s => s.enabled).length} protocol up`
+  return `${ip} · ${active}/${list.filter(s => s.enabled).length} protocolo activo`
 })
 function fmt(ts: string) { try { return new Date(ts).toLocaleTimeString() } catch { return ts } }
 function fmtAgo(ts?: string | null) {
@@ -113,28 +114,27 @@ function fmtNumber(n?: number | null) {
           <div class="flex items-center gap-3 mb-3">
             <div class="h-1 w-10 bg-[color:var(--epm-bosque)]" />
             <span class="text-[11px] uppercase tracking-[0.26em] text-[color:var(--epm-bosque)] font-bold">
-              Operator console · live
+              {{ t.dashboard.subtitle }}
             </span>
           </div>
           <h1 class="max-w-2xl">
-            Telemetry flowing from
+            {{ t.dashboard.heroTitle }}
             <span class="text-[color:var(--epm-bosque)]">MQTT</span>
-            into
+            {{ t.dashboard.heroMid }}
             <span class="text-[color:var(--epm-citrico-deep)]" style="color: var(--epm-citrico-deep)">IEC&nbsp;60870-5-104</span>.
           </h1>
           <p class="mt-4 max-w-xl text-sm text-muted-foreground leading-relaxed">
-            Broker topics map to IOAs, values stream through the gateway and land in the
-            time-series log — every sample timestamped, every point cached.
+            {{ t.dashboard.heroDesc }}
           </p>
           <div class="mt-6 flex flex-wrap items-center gap-2">
             <RouterLink to="/mappings">
               <Button class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm px-5">
-                <Layers class="h-4 w-4 mr-2" /> Open mappings
+                <Layers class="h-4 w-4 mr-2" /> {{ t.dashboard.openMappings }}
               </Button>
             </RouterLink>
             <RouterLink to="/mqtt">
               <Button variant="outline" class="rounded-sm border-[color:var(--epm-bosque)] text-[color:var(--epm-bosque)]">
-                Broker settings
+                {{ t.dashboard.brokerSettings }}
               </Button>
             </RouterLink>
           </div>
@@ -155,28 +155,28 @@ function fmtNumber(n?: number | null) {
     <!-- KPIs -->
     <section class="grid grid-cols-2 lg:grid-cols-4 gap-4">
       <StatCard
-        label="Mappings"
+        :label="t.dashboard.mappings"
         :value="fmtNumber(status?.mappings)"
-        :hint="`${status?.topics ?? 0} topics · ${status?.devices ?? 0} devices`"
+        :hint="`${status?.topics ?? 0} tópicos · ${status?.devices ?? 0} dispositivos`"
         :icon="Layers"
         accent
       />
       <StatCard
-        label="Messages in"
+        :label="t.dashboard.messagesIn"
         :value="fmtNumber(status?.mqtt.messages)"
         :hint="`${msgRate.toFixed(2)} msg/s`"
         :icon="Radio"
       />
       <StatCard
-        label="IEC 104 points"
+        :label="t.dashboard.iec104Points"
         :value="fmtNumber(status?.iec104.points)"
-        hint="cached live values"
+        :hint="t.dashboard.cachedValues"
         :icon="Gauge"
       />
       <StatCard
-        label="History rows"
+        :label="t.dashboard.historyRows"
         :value="fmtNumber(status?.history_count)"
-        :hint="`last sample ${fmtAgo(status?.last_sample_at)}`"
+        :hint="`${t.dashboard.lastSample} ${fmtAgo(status?.last_sample_at)}`"
         :icon="Database"
       />
     </section>
@@ -190,23 +190,23 @@ function fmtNumber(n?: number | null) {
               <Radio class="h-4 w-4 text-[color:var(--epm-bosque)]" />
             </div>
             <div>
-              <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">MQTT broker</div>
-              <div class="font-mono text-sm mt-1 truncate max-w-[260px]">{{ status?.mqtt.broker || 'not configured' }}</div>
+              <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">{{ t.dashboard.mqttBroker }}</div>
+              <div class="font-mono text-sm mt-1 truncate max-w-[260px]">{{ status?.mqtt.broker || t.common.notConfigured }}</div>
             </div>
           </div>
-          <StatusPill :state="brokerState" :label="brokerState === 'ok' ? 'Connected' : 'Down'" />
+          <StatusPill :state="brokerState" :label="brokerState === 'ok' ? t.status.connected : t.status.down" />
         </div>
         <dl class="grid grid-cols-3 text-sm">
           <div class="px-6 py-5">
-            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Subscribed</dt>
+            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Suscritos</dt>
             <dd class="font-mono text-2xl font-bold tabular mt-2 text-[color:var(--epm-bosque)]">{{ status?.mqtt.topics ?? 0 }}</dd>
           </div>
           <div class="px-6 py-5 border-l border-border">
-            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Msg in</dt>
+            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Msgs recibidos</dt>
             <dd class="font-mono text-2xl font-bold tabular mt-2">{{ fmtNumber(status?.mqtt.messages) }}</dd>
           </div>
           <div class="px-6 py-5 border-l border-border">
-            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Rate</dt>
+            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Velocidad</dt>
             <dd class="font-mono text-2xl font-bold tabular mt-2">
               {{ msgRate.toFixed(2) }}<span class="text-xs text-muted-foreground ml-1 font-normal">/s</span>
             </dd>
@@ -214,7 +214,7 @@ function fmtNumber(n?: number | null) {
         </dl>
         <div class="px-6 py-3 border-t border-border text-right bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
           <RouterLink to="/mqtt" class="inline-flex items-center gap-1 text-xs font-bold text-[color:var(--epm-bosque)] hover:underline">
-            Broker config <ArrowRight class="h-3 w-3" />
+            {{ t.dashboard.brokerConfig }} <ArrowRight class="h-3 w-3" />
           </RouterLink>
         </div>
       </div>
@@ -226,7 +226,7 @@ function fmtNumber(n?: number | null) {
               <Server class="h-4 w-4 text-[color:var(--epm-bosque)]" />
             </div>
             <div>
-              <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">IEC 60870-5-104</div>
+              <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">IEC&nbsp;60870-5-104</div>
               <div class="font-mono text-sm mt-1">
                 {{ iecSummary }}
               </div>
@@ -236,21 +236,21 @@ function fmtNumber(n?: number | null) {
         </div>
         <dl class="grid grid-cols-3 text-sm">
           <div class="px-6 py-5">
-            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Endpoints</dt>
+            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">{{ t.dashboard.endpoints }}</dt>
             <dd class="font-mono text-2xl font-bold tabular mt-2">{{ iecServers.length }}</dd>
           </div>
           <div class="px-6 py-5 border-l border-border">
-            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Points</dt>
+            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">{{ t.dashboard.points }}</dt>
             <dd class="font-mono text-2xl font-bold tabular mt-2 text-[color:var(--epm-bosque)]">{{ status?.iec104.points ?? 0 }}</dd>
           </div>
           <div class="px-6 py-5 border-l border-border">
-            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Mappings</dt>
+            <dt class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">{{ t.dashboard.mappings }}</dt>
             <dd class="font-mono text-2xl font-bold tabular mt-2">{{ status?.mappings ?? 0 }}</dd>
           </div>
         </dl>
         <div class="px-6 py-3 border-t border-border text-right bg-[color:color-mix(in_srgb,var(--epm-bosque)_6%,transparent)]">
           <RouterLink to="/iec104" class="inline-flex items-center gap-1 text-xs font-bold text-[color:var(--epm-bosque)] hover:underline">
-            Server config <ArrowRight class="h-3 w-3" />
+            {{ t.dashboard.serverConfig }} <ArrowRight class="h-3 w-3" />
           </RouterLink>
         </div>
       </div>
@@ -264,16 +264,16 @@ function fmtNumber(n?: number | null) {
             <Activity class="h-4 w-4 text-[color:var(--epm-bosque)]" />
           </div>
           <div>
-            <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">Live feed</div>
-            <div class="font-sans font-extrabold text-lg leading-none mt-1 tracking-tight">Recent samples</div>
+            <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">{{ t.dashboard.liveFeed }}</div>
+            <div class="font-sans font-extrabold text-lg leading-none mt-1 tracking-tight">{{ t.dashboard.recentSamples }}</div>
           </div>
         </div>
         <div class="flex items-center gap-3">
           <span class="font-mono text-[11px] text-muted-foreground inline-flex items-center gap-1">
-            <Clock class="h-3 w-3" /> every 2.5s
+            <Clock class="h-3 w-3" /> {{ t.dashboard.every25s }}
           </span>
           <RouterLink to="/history">
-            <Button variant="outline" size="sm" class="rounded-sm">Open history</Button>
+            <Button variant="outline" size="sm" class="rounded-sm">{{ t.dashboard.openHistory }}</Button>
           </RouterLink>
         </div>
       </div>
@@ -281,19 +281,19 @@ function fmtNumber(n?: number | null) {
         <Table>
           <TableHeader>
             <TableRow class="border-b border-border bg-[color:color-mix(in_srgb,var(--epm-citrico)_7%,transparent)]">
-              <TableHead class="w-28 text-[10px] uppercase tracking-[0.2em] font-bold">Time</TableHead>
-              <TableHead class="w-20 text-[10px] uppercase tracking-[0.2em] font-bold">IOA</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Signal</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Type</TableHead>
-              <TableHead class="text-right text-[10px] uppercase tracking-[0.2em] font-bold">Value</TableHead>
-              <TableHead class="w-16 text-[10px] uppercase tracking-[0.2em] font-bold">Unit</TableHead>
+              <TableHead class="w-28 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.dashboard.cols.time }}</TableHead>
+              <TableHead class="w-20 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.dashboard.cols.ioa }}</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.dashboard.cols.signal }}</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.dashboard.cols.type }}</TableHead>
+              <TableHead class="text-right text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.dashboard.cols.value }}</TableHead>
+              <TableHead class="w-16 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.dashboard.cols.unit }}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             <TableRow v-for="r in recent" :key="r.id" class="data-row border-b border-border/60">
               <TableCell class="font-mono text-xs text-muted-foreground">{{ fmt(r.timestamp) }}</TableCell>
               <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-bosque)]">{{ mapById[r.mapping_id]?.ioa ?? '—' }}</TableCell>
-              <TableCell class="font-mono text-xs">{{ r.signal_key }}</TableCell>
+              <TableCell class="font-mono text-xs">{{ r.signal_path }}</TableCell>
               <TableCell>
                 <span class="inline-flex items-center rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[color:color-mix(in_srgb,var(--epm-citrico)_22%,transparent)] text-[color:var(--epm-bosque)]">
                   {{ mapById[r.mapping_id]?.iec104_type ?? '—' }}
@@ -304,7 +304,7 @@ function fmtNumber(n?: number | null) {
             </TableRow>
             <TableRow v-if="!recent.length">
               <TableCell colspan="6" class="text-center text-muted-foreground py-12">
-                No samples yet. Publish to a subscribed topic to see data here.
+                {{ t.dashboard.noSamples }}
               </TableCell>
             </TableRow>
           </TableBody>
