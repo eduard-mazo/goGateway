@@ -103,7 +103,9 @@ func (m *Manager) Reload(cfg models.TSDBConfig) {
 		flushMs = 100
 	}
 
-	os.MkdirAll("data", 0755) //nolint:errcheck
+	if err := os.MkdirAll("data", 0755); err != nil {
+		log.Printf("tsdb: mkdir data: %v", err)
+	}
 	pipe, err := NewWritePipeline(PipelineConfig{
 		Backends:      backends,
 		WALPath:       walPath,

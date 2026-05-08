@@ -248,6 +248,18 @@ func (p *WritePipeline) accumulator() {
 	}
 }
 
+// writeToBackend calls WriteBatchSafe during WAL replay (idempotent) or
+// WriteBatch for normal writes. Centralises the replay branch that was
+// duplicated in fanOut and retryWorker.
+func writeToBackend(ctx context.Context, backend TSDBWriter, batch []DataPoint, isReplay bool) error {
+	if isReplay {
+		if ts, ok := backend.(*TimescaleAdapter); ok {
+			return ts.WriteBatchSafe(ctx, batch)
+		}
+	}
+	return backend.WriteBatch(ctx, batch)
+}
+
 // fanOut dispatches each batch to all backends in parallel goroutines.
 func (p *WritePipeline) fanOut() {
 	defer p.wg.Done()
@@ -269,16 +281,7 @@ func (p *WritePipeline) fanOut() {
 					}
 					writeCtx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
 					defer cancel()
-					var err error
-					if work.isReplay {
-						if ts, ok := backend.(*TimescaleAdapter); ok {
-							err = ts.WriteBatchSafe(writeCtx, work.batch)
-						} else {
-							err = backend.WriteBatch(writeCtx, work.batch)
-						}
-					} else {
-						err = backend.WriteBatch(writeCtx, work.batch)
-					}
+					err := writeToBackend(writeCtx, backend, work.batch, work.isReplay)
 					if err != nil {
 						cb.RecordFailure()
 						log.Printf("tsdb [%s] write error (attempt 1, batch %d pts): %v",
@@ -356,16 +359,7 @@ func (p *WritePipeline) retryWorker(target TSDBWriter) {
 			}
 
 			writeCtx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
-			var err error
-			if item.isReplay {
-				if ts, ok := item.backend.(*TimescaleAdapter); ok {
-					err = ts.WriteBatchSafe(writeCtx, item.batch)
-				} else {
-					err = item.backend.WriteBatch(writeCtx, item.batch)
-				}
-			} else {
-				err = item.backend.WriteBatch(writeCtx, item.batch)
-			}
+			err := writeToBackend(writeCtx, item.backend, item.batch, item.isReplay)
 			cancel()
 
 			if err != nil {

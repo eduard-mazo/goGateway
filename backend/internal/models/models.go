@@ -97,7 +97,6 @@ type SignalMapping struct {
 }
 
 // TSDBConfig = time-series pipeline settings. Singleton (id=1).
-// TSDBConfig = time-series pipeline settings. Singleton (id=1).
 type TSDBConfig struct {
 	ID         int64  `db:"id" json:"id"`
 	Backend    string `db:"backend" json:"backend"`

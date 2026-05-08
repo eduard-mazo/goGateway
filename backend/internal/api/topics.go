@@ -55,7 +55,11 @@ func (h *TopicHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TopicHandler) update(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	var t models.Topic
 	if err := decode(r, &t); err != nil {
 		writeErr(w, 400, err.Error())
@@ -72,7 +76,11 @@ func (h *TopicHandler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TopicHandler) delete(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	if _, err := h.DB.Exec(`DELETE FROM topics WHERE id=?`, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return

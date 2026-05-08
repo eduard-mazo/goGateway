@@ -41,6 +41,12 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 
 	r.Route("/api", func(r chi.Router) {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
+				next.ServeHTTP(w, r)
+			})
+		})
 		r.Route("/devices", (&DeviceHandler{DB: d.DB}).Mount)
 		r.Route("/topics", (&TopicHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
 		r.Route("/mqtt-config", (&MQTTConfigHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)

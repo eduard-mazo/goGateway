@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -23,16 +22,16 @@ func (h *NATSConfigHandler) Mount(r chi.Router) {
 func (h *NATSConfigHandler) get(w http.ResponseWriter, r *http.Request) {
 	var c models.NATSConfig
 	if err := h.DB.Get(&c, `SELECT id,host,port,stream_name,enabled FROM nats_config WHERE id=1`); err != nil {
-		http.Error(w, err.Error(), 500)
+		writeErr(w, 500, "failed to load NATS config")
 		return
 	}
-	json.NewEncoder(w).Encode(c)
+	writeJSON(w, 200, c)
 }
 
 func (h *NATSConfigHandler) update(w http.ResponseWriter, r *http.Request) {
 	var c models.NATSConfig
-	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-		http.Error(w, "bad json", 400)
+	if err := decode(r, &c); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 
@@ -41,7 +40,7 @@ func (h *NATSConfigHandler) update(w http.ResponseWriter, r *http.Request) {
 		c.Host, c.Port, c.StreamName, c.Enabled,
 	)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeErr(w, 500, "failed to save NATS config")
 		return
 	}
 

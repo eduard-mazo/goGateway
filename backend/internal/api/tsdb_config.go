@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,9 +29,13 @@ func (h *TSDBConfigHandler) Mount(r chi.Router) {
 func (h *TSDBConfigHandler) get(w http.ResponseWriter, r *http.Request) {
 	var c models.TSDBConfig
 	if err := h.DB.Get(&c, `SELECT id,backend,vm_url,vm_username,vm_password,ts_dsn,ts_table,wal_path,dlq_path,batch_size,flush_ms,enabled FROM tsdb_config WHERE id=1`); err != nil {
-		writeErr(w, 500, err.Error())
+		writeErr(w, 500, "failed to load TSDB config")
 		return
 	}
+	// Never send credentials over the wire — the UI form starts blank and only
+	// updates these fields when the user explicitly types a new value.
+	c.VMPassword = ""
+	c.TsDSN = ""
 	writeJSON(w, 200, c)
 }
 
@@ -55,6 +61,30 @@ func (h *TSDBConfigHandler) update(w http.ResponseWriter, r *http.Request) {
 		c.FlushMs = 100
 	}
 
+	// Reject path traversal attempts in WAL/DLQ paths.
+	for _, p := range []string{c.WALPath, c.DLQPath} {
+		clean := filepath.Clean(p)
+		if strings.HasPrefix(clean, "/") || strings.Contains(clean, "..") {
+			writeErr(w, 400, "wal_path and dlq_path must be relative paths with no .. components")
+			return
+		}
+	}
+
+	// Preserve stored credentials when the client sends empty values.
+	if c.VMPassword == "" || c.TsDSN == "" {
+		var cur models.TSDBConfig
+		if err := h.DB.Get(&cur, `SELECT vm_password,ts_dsn FROM tsdb_config WHERE id=1`); err != nil {
+			writeErr(w, 500, "failed to load TSDB config")
+			return
+		}
+		if c.VMPassword == "" {
+			c.VMPassword = cur.VMPassword
+		}
+		if c.TsDSN == "" {
+			c.TsDSN = cur.TsDSN
+		}
+	}
+
 	_, err := h.DB.Exec(
 		`UPDATE tsdb_config SET backend=?,vm_url=?,vm_username=?,vm_password=?,ts_dsn=?,ts_table=?,wal_path=?,dlq_path=?,batch_size=?,flush_ms=?,enabled=? WHERE id=1`,
 		c.Backend, c.VMUrl, c.VMUsername, c.VMPassword,
@@ -62,10 +92,12 @@ func (h *TSDBConfigHandler) update(w http.ResponseWriter, r *http.Request) {
 		c.BatchSize, c.FlushMs, c.Enabled,
 	)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeErr(w, 500, "failed to save TSDB config")
 		return
 	}
 	c.ID = 1
+	c.VMPassword = ""
+	c.TsDSN = ""
 	if h.Notify != nil {
 		go h.Notify()
 	}

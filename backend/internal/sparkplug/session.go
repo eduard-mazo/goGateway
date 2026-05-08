@@ -196,20 +196,6 @@ func (r *Registry) Session(k NodeKey) *NodeSession {
 	return s
 }
 
-// AllOnline returns all currently online node keys.  Used to mark everything
-// stale when the MQTT connection is lost.
-func (r *Registry) AllOnline() []NodeKey {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]NodeKey, 0, len(r.nodes))
-	for k, s := range r.nodes {
-		if s.Online() {
-			out = append(out, k)
-		}
-	}
-	return out
-}
-
 // MarkAllOffline sets every tracked node to offline without dispatching
 // IEC-104 quality — the caller is responsible for dispatching stale points.
 func (r *Registry) MarkAllOffline() []NodeKey {
