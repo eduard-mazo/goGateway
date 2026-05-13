@@ -82,7 +82,7 @@ func main() {
 				}
 			}()
 
-			tsdbWorker := worker.NewTSDBWorker(natsClient, natsCfg.StreamName, tsdbMgr.Pipeline())
+			tsdbWorker := worker.NewTSDBWorker(natsClient, natsCfg.StreamName, hist)
 			go func() {
 				if err := tsdbWorker.Run(ctx); err != nil {
 					log.Printf("tsdb worker: %v", err)
@@ -103,6 +103,20 @@ func main() {
 		log.Printf("initial cache reload: %v", err)
 	}
 	mqttMgr := mqtt.NewManager(database, cache, dispatcher)
+
+	// SSFV subsystem: JSON handler routes solar equipment topics into TimescaleDB.
+	ssfvCache := worker.NewSSFVMappingCache()
+	ssfvHandler := worker.NewSSFVHandler(ssfvCache, tsdbMgr.Pipeline(), nil)
+	// Wire pool + alarm manager if SSFV adapter is already connected.
+	if sa := tsdbMgr.SSFVAdapter(); sa != nil {
+		alarmMgr := worker.NewAlarmManager(sa.Pool())
+		ssfvHandler.SetAlarmManager(alarmMgr)
+		if err := ssfvCache.Reload(sa.Pool()); err != nil {
+			log.Printf("ssfv cache reload: %v", err)
+		}
+	}
+	mqttMgr.SetSSFVHandler(ssfvHandler)
+
 	if err := mqttMgr.Start(ctx); err != nil {
 		log.Printf("mqtt start: %v", err)
 	}

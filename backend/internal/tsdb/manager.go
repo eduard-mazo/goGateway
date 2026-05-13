@@ -13,12 +13,21 @@ import (
 // Manager owns the pipeline lifecycle: it can start, stop, and hot-reload
 // a WritePipeline when the UI saves new TSDB configuration.
 type Manager struct {
-	mu        sync.Mutex
-	pipe      *WritePipeline
-	cancel    context.CancelFunc
-	done      chan struct{}
-	parentCtx context.Context
-	setHist   func(*WritePipeline)
+	mu          sync.Mutex
+	pipe        *WritePipeline
+	cancel      context.CancelFunc
+	done        chan struct{}
+	parentCtx   context.Context
+	setHist     func(*WritePipeline)
+	ssfvAdapter *SSFVAdapter // non-nil when ssfv schema is connected
+}
+
+// SSFVAdapter returns the active SSFVAdapter or nil.
+// Used by the ssfv catalog API handlers to obtain the PostgreSQL pool.
+func (m *Manager) SSFVAdapter() *SSFVAdapter {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ssfvAdapter
 }
 
 // NewManager creates a Manager. setHist is called whenever the active pipeline
@@ -74,7 +83,20 @@ func (m *Manager) Reload(cfg models.TSDBConfig) {
 				log.Printf("tsdb: timescale init: %v", err)
 			} else {
 				backends = append(backends, a)
-				log.Printf("tsdb: TimescaleDB connected")
+				log.Printf("tsdb: TimescaleDB connected (table=%s)", table)
+			}
+
+			// SSFV adapter — writes to ssfv.Tbl_Valores / Tbl_Alarmas / signals_raw
+			// alongside the generic signals table.
+			ssfvCtx, ssfvCancel := context.WithTimeout(m.parentCtx, 30*time.Second)
+			defer ssfvCancel()
+			sa, ssfvErr := NewSSFVAdapter(ssfvCtx, cfg.TsDSN)
+			if ssfvErr != nil {
+				log.Printf("tsdb: ssfv adapter init: %v (schema may not exist yet — apply migration 007)", ssfvErr)
+			} else {
+				backends = append(backends, sa)
+				m.ssfvAdapter = sa
+				log.Printf("tsdb: SSFV adapter connected (ssfv schema)")
 			}
 		}
 	}
@@ -141,6 +163,7 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked()
+	m.ssfvAdapter = nil
 	if m.setHist != nil {
 		m.setHist(nil)
 	}

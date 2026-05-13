@@ -62,6 +62,8 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/tsdb/dlq", tsdbH.ServeDLQ)
 		r.Post("/tsdb/dlq/replay", tsdbH.ServeDLQReplay)
 		r.Get("/tsdb/points", tsdbH.ServePoints)
+
+		r.Route("/ssfv", NewSSFVHandler(d.TSDBMgr).Mount)
 	})
 
 	// Embedded SPA — serves frontend/dist bundled into the binary.

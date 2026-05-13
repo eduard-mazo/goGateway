@@ -137,6 +137,9 @@ export interface TSDBConfig {
   batch_size: number
   flush_ms: number
   enabled: boolean
+  // Server never returns actual credentials; these flags say whether they're stored.
+  has_ts_dsn?: boolean
+  has_vm_password?: boolean
 }
 
 export interface TSDBTestResult {
@@ -151,4 +154,85 @@ export interface NATSConfig {
   port: number
   stream_name: string
   enabled: boolean
+}
+
+// ─── SSFV (Sistemas Solares Fotovoltaicos) ────────────────────────────────────
+
+export interface SSFVStatus {
+  connected: boolean
+  healthy?: boolean
+  write_rate?: number
+  error_rate?: number
+  circuit_open?: boolean
+  last_error?: string
+}
+
+export interface SSFVPlanta {
+  planta_id?: number
+  nombre: string
+  ubicacion?: string
+  propietario?: string
+  broker_base: string
+  capacidad_kWp?: number
+  fecha_comisionamiento?: string
+  estado: number
+}
+
+export interface SSFVEquipo {
+  equipo_id?: number
+  planta_id: number
+  tipo_id: number
+  nombre_equipo: string
+  nombre_topic: string
+  fabricante?: string
+  modelo?: string
+  nro_serie?: string
+  estado: number
+  // joined
+  tipo_nombre?: string
+  planta_nombre?: string
+}
+
+export interface SSFVSenal {
+  senal_id?: number
+  tipavar_id: number
+  unidad_id: number
+  nombre: string
+  descripcion?: string
+  tipo_valor: 'Instantaneo' | 'Acumulado'
+  codigo_senal: string
+  es_indexada: boolean
+  activo: boolean
+  // joined
+  tipo_var_nombre?: string
+  unidad_simbolo?: string
+}
+
+export interface SSFVAsignacion {
+  equisenal_id?: number
+  senal_id: number
+  equipo_id: number
+  indice_canal?: number
+  nombre_instancia: string
+  activo: boolean
+  // joined
+  senal_nombre?: string
+  codigo_senal?: string
+  nombre_equipo?: string
+  nombre_topic?: string
+  signal_path?: string
+}
+
+export interface SSFVFrontera {
+  frontera_id?: number
+  planta_id: number
+  codigo_nie: string
+  nombre: string
+  tipo_conexion?: string
+  activo: boolean
+  planta_nombre?: string
+}
+
+export interface SSFVCatalogItem {
+  [key: string]: unknown
 }

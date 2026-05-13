@@ -11,5 +11,6 @@ export const router = createRouter({
     { path: '/iec104', component: () => import('./views/Iec104Config.vue'), meta: { title: 'IEC 60870-5-104' } },
     { path: '/history', component: () => import('./views/History.vue'), meta: { title: 'Histórico' } },
     { path: '/tsdb', component: () => import('./views/TSDBView.vue'), meta: { title: 'Pipeline TSDB' } },
+    { path: '/ssfv', component: () => import('./views/SSFVView.vue'), meta: { title: 'SSFV – Plantas Solares' } },
   ],
 })

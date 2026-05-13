@@ -37,6 +37,9 @@ type Manager struct {
 	spHandler *worker.SparkplugHandler
 	bdSeq     atomic.Uint64 // birth/death sequence; increments on every MQTT CONNECT
 	cfg       worker.MQTTConfigSnapshot
+
+	// SSFV JSON handler — intercepts equipment topics before generic dispatch.
+	ssfvHandler *worker.SSFVHandler
 }
 
 // MQTTConfigSnapshot is a copy of the config values the manager needs outside
@@ -66,6 +69,14 @@ func (m *Manager) Status() Status {
 
 func NewManager(db *sqlx.DB, cache *worker.MappingCache, d worker.Dispatcher) *Manager {
 	return &Manager{db: db, cache: cache, d: d, subs: map[string]struct{}{}}
+}
+
+// SetSSFVHandler registers the SSFV JSON handler.
+// Must be called before Start() or Notify() to take effect on next (re)connect.
+func (m *Manager) SetSSFVHandler(h *worker.SSFVHandler) {
+	m.mu.Lock()
+	m.ssfvHandler = h
+	m.mu.Unlock()
 }
 
 // Start = initial connect + subscribe. Safe to call before config exists.
@@ -263,19 +274,25 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 	m.lastMsg.Store(time.Now().UnixNano())
 
 	m.mu.Lock()
-	handler := m.spHandler
+	spHandler := m.spHandler
+	ssfvHandler := m.ssfvHandler
 	m.mu.Unlock()
 
-	if handler != nil {
+	if spHandler != nil {
 		t, ok := sparkplug.ParseTopic(topic)
 		if !ok {
 			return // not a valid spBv1.0 topic (e.g., the STATE topic itself)
 		}
-		handler.Dispatch(t, payload)
+		spHandler.Dispatch(t, payload)
 		return
 	}
 
-	// JSON mode: original hot path.
+	// JSON mode: SSFV handler intercepts equipment topics first.
+	if ssfvHandler != nil && ssfvHandler.Handle(topic, payload) {
+		return
+	}
+
+	// Generic JSON dispatch (IEC-104 + history pipeline).
 	maps := m.cache.Lookup(topic)
 	worker.ParseAndDispatch(topic, payload, maps, m.d)
 }

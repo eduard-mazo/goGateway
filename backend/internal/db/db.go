@@ -129,7 +129,9 @@ func migrate(db *sqlx.DB) error {
 		}
 	}
 
-	// history: rename signal_key → signal_path.
+	// history: rename signal_key → signal_path (legacy migration).
+	// Then truncate: history is no longer written — TimescaleDB is the sole
+	// time-series store. DELETE runs every startup; on an empty table it's a no-op.
 	var hasHistory int
 	if err := db.Get(&hasHistory, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='history'`); err != nil {
 		return err
@@ -143,6 +145,9 @@ func migrate(db *sqlx.DB) error {
 			if _, err := db.Exec(`ALTER TABLE history RENAME COLUMN signal_key TO signal_path`); err != nil {
 				return fmt.Errorf("rename history.signal_key: %w", err)
 			}
+		}
+		if _, err := db.Exec(`DELETE FROM history`); err != nil {
+			return fmt.Errorf("truncate history: %w", err)
 		}
 	}
 
