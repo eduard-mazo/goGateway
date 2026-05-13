@@ -1,7 +1,35 @@
 -- Rename signals: measurement → signal, ioa → signal_path.
--- Wrapped in DO blocks so the migration is idempotent (safe to re-run
--- after a partial failure without the "column does not exist" error).
+--
+-- TimescaleDB blocks RENAME COLUMN on hypertables with compression enabled
+-- (SQLSTATE 0A000). Sequence: remove policy → decompress all chunks →
+-- disable compression → rename → re-enable with new column names → re-add policy.
+--
+-- Uses DO/EXCEPTION blocks so the migration survives version differences in
+-- remove_compression_policy (if_not_exists not available in all releases).
 
+-- 1. Remove compression policy (safe across versions).
+DO $$
+BEGIN
+    PERFORM remove_compression_policy('signals'::regclass);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- 2. Decompress every chunk (safe to call on already-uncompressed chunks).
+DO $$
+DECLARE c regclass;
+BEGIN
+    FOR c IN SELECT * FROM show_chunks('signals'::regclass) LOOP
+        BEGIN
+            PERFORM decompress_chunk(c);
+        EXCEPTION WHEN OTHERS THEN NULL;
+        END;
+    END LOOP;
+END $$;
+
+-- 3. Disable compression so RENAME COLUMN is allowed.
+ALTER TABLE signals SET (timescaledb.compress = FALSE);
+
+-- 4. Rename columns (idempotent).
 DO $$ BEGIN
     IF EXISTS (
         SELECT 1 FROM information_schema.columns
@@ -74,6 +102,20 @@ CREATE OR REPLACE VIEW v_active_alarms AS
 SELECT * FROM v_current_signals
 WHERE  alarm_state NOT IN ('OK') AND invalid = FALSE
 ORDER  BY ts DESC;
+
+-- 5. Re-enable compression with the renamed segmentby column.
+ALTER TABLE signals SET (
+    timescaledb.compress           = TRUE,
+    timescaledb.compress_segmentby = 'signal_path',
+    timescaledb.compress_orderby   = 'ts DESC'
+);
+
+-- 6. Re-add the 7-day compression policy.
+SELECT add_compression_policy(
+    'signals'::regclass,
+    compress_after => INTERVAL '7 days',
+    if_not_exists  => TRUE
+);
 
 COMMENT ON COLUMN signals.signal      IS 'Last segment of the signal path, e.g. Temperature';
 COMMENT ON COLUMN signals.signal_path IS 'Full hierarchical path: business/company/B1/.../signal';

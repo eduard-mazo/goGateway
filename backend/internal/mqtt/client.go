@@ -125,6 +125,9 @@ func (m *Manager) reload() error {
 		}
 		m.spHandler = worker.NewSparkplugHandler(m.registry, m.cache, m.d)
 		m.spHandler.SetRebirthFn(m.publishRebirth)
+		if m.ssfvHandler != nil {
+			m.spHandler.SetSSFVHandler(m.ssfvHandler)
+		}
 		m.cfg = worker.MQTTConfigSnapshot{
 			SpGroupID: cfg.SpGroupID,
 			SpHostID:  cfg.SpHostID,

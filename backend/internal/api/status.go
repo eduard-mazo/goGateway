@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 
+	"goGateway/internal/config"
 	"goGateway/internal/iec104"
 	"goGateway/internal/mqtt"
 )
@@ -32,6 +33,8 @@ type statusResp struct {
 	LastSampleAt  *time.Time    `json:"last_sample_at,omitempty"`
 	UptimeSeconds int64         `json:"uptime_seconds"`
 	StartedAt     time.Time     `json:"started_at"`
+	BuildTime     string        `json:"build_time"`
+	GitCommit     string        `json:"git_commit"`
 }
 
 func (h *StatusHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -40,6 +43,8 @@ func (h *StatusHandler) get(w http.ResponseWriter, r *http.Request) {
 		IEC104:        h.IEC104.Status(),
 		UptimeSeconds: int64(time.Since(h.StartedAt).Seconds()),
 		StartedAt:     h.StartedAt,
+		BuildTime:     config.BuildTime,
+		GitCommit:     config.GitCommit,
 	}
 	_ = h.DB.Get(&resp.Devices, `SELECT COUNT(*) FROM devices`)
 	_ = h.DB.Get(&resp.Topics, `SELECT COUNT(*) FROM topics`)

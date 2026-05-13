@@ -18,9 +18,10 @@ import (
 //   - It publishes STATE (ONLINE/OFFLINE) via the MQTT client.
 //   - It publishes NCMD Rebirth when an out-of-sequence NDATA is detected.
 type SparkplugHandler struct {
-	registry *sparkplug.Registry
-	cache    *MappingCache
-	d        Dispatcher
+	registry    *sparkplug.Registry
+	cache       *MappingCache
+	d           Dispatcher
+	ssfvHandler *SSFVHandler
 	// rebirthFn is called when the handler needs to publish an NCMD Rebirth.
 	// The mqtt.Manager sets this field after creating the handler.
 	rebirthFn func(groupID, nodeID string)
@@ -45,6 +46,10 @@ func NewSparkplugHandler(
 func (h *SparkplugHandler) SetRebirthFn(fn func(groupID, nodeID string)) {
 	h.rebirthFn = fn
 }
+
+// SetSSFVHandler wires an SSFV handler so that metrics whose UNS path matches
+// a known SSFV equipment topic are routed to TimescaleDB instead of IEC-104.
+func (h *SparkplugHandler) SetSSFVHandler(s *SSFVHandler) { h.ssfvHandler = s }
 
 // Dispatch routes a decoded Sparkplug B topic to the appropriate handler.
 func (h *SparkplugHandler) Dispatch(topic sparkplug.Topic, raw []byte) {
@@ -142,11 +147,15 @@ func (h *SparkplugHandler) handleNDATA(topic sparkplug.Topic, raw []byte) {
 	}
 
 	ts := msToTime(p.Timestamp)
+	log.Printf("sparkplug: NDATA %s/%s seq=%d — %d metric(s)",
+		topic.GroupID, topic.EdgeNodeID, p.Seq, len(p.Metrics))
 
 	for i := range p.Metrics {
 		m := &p.Metrics[i]
 		name := session.ResolveName(m)
 		if name == "" || m.IsTransient {
+			log.Printf("sparkplug: NDATA skip metric alias=%d name=%q transient=%v",
+				m.Alias, m.Name, m.IsTransient)
 			continue
 		}
 		h.dispatchMetric(topic, false, name, m, ts)
@@ -237,6 +246,20 @@ func (h *SparkplugHandler) dispatchMetric(
 	m *sparkplug.Metric,
 	ts time.Time,
 ) {
+	// SSFV intercept: metric names are full UNS paths (e.g. "EPM/SSFV/.../INV_1/AP").
+	// Route to TimescaleDB and skip IEC-104 when the path matches a known SSFV topic.
+	if h.ssfvHandler != nil {
+		parts := strings.Split(metricName, "/")
+		if len(parts) >= 2 {
+			mqttTopic := strings.Join(parts[:len(parts)-1], "/")
+			code := parts[len(parts)-1]
+			val, _ := m.Float64()
+			if h.ssfvHandler.HandleMetric(mqttTopic, code, val, ts) {
+				return
+			}
+		}
+	}
+
 	var nodeBase string
 	if isDevice && topic.DeviceID != "" {
 		nodeBase = topic.DeviceBase()
@@ -246,6 +269,7 @@ func (h *SparkplugHandler) dispatchMetric(
 
 	maps := h.cache.LookupByMetric(nodeBase, metricName)
 	if len(maps) == 0 {
+		log.Printf("sparkplug: no mapping for %q in %s", metricName, nodeBase)
 		return
 	}
 
@@ -256,17 +280,24 @@ func (h *SparkplugHandler) dispatchMetric(
 		tm.SignalPath = spSignalPath(tm.Business, tm.Company, topic, isDevice, metricName)
 		scaled := val * tm.Scale
 		if hasVal {
+			log.Printf("sparkplug: dispatch IOA=%d val=%.4f q=%d path=%s", tm.IOA, scaled, quality, tm.SignalPath)
 			h.d.Dispatch(tm, scaled, quality, ts)
 		} else {
-			// is_null metric: push invalid quality with zero value.
+			log.Printf("sparkplug: dispatch IOA=%d val=null (invalid) path=%s", tm.IOA, tm.SignalPath)
 			h.d.Dispatch(tm, 0, iec104.QualityInvalid, ts)
 		}
 	}
 }
 
 // spSignalPath builds the full signal path for a Sparkplug B metric.
-// Format: business/company/group/node[/device]/metricName
+// When metricName is already a full UNS path (starts with business/company),
+// it is used directly to avoid duplicate prefix segments.
+// Otherwise format is: business/company/group/node[/device]/metricName
 func spSignalPath(business, company string, topic sparkplug.Topic, isDevice bool, metricName string) string {
+	prefix := business + "/" + company + "/"
+	if strings.HasPrefix(metricName, prefix) {
+		return metricName
+	}
 	parts := []string{business, company, topic.GroupID, topic.EdgeNodeID}
 	if isDevice && topic.DeviceID != "" {
 		parts = append(parts, topic.DeviceID)

@@ -19,11 +19,28 @@ import (
 // SSFVHandler serves CRUD endpoints for the ssfv schema catalog.
 // It obtains the pool lazily from TSDBMgr so it survives pipeline reloads.
 type SSFVHandler struct {
-	mgr *tsdb.Manager
+	mgr      *tsdb.Manager
+	reloader func() // reloads the worker SSFVMappingCache; set via SetReloader
 }
 
 func NewSSFVHandler(mgr *tsdb.Manager) *SSFVHandler {
 	return &SSFVHandler{mgr: mgr}
+}
+
+// SetReloader registers a callback invoked after any catalog mutation so the
+// in-memory SSFVMappingCache (used by the Sparkplug B dispatch path) stays
+// in sync without a gateway restart.
+func (h *SSFVHandler) SetReloader(fn func()) { h.reloader = fn }
+
+// triggerReload invalidates the adapter-level cache and reloads the worker
+// SSFVMappingCache if a reloader has been registered.
+func (h *SSFVHandler) triggerReload() {
+	if a := h.mgr.SSFVAdapter(); a != nil {
+		a.InvalidateCache()
+	}
+	if h.reloader != nil {
+		h.reloader()
+	}
 }
 
 func (h *SSFVHandler) Mount(r chi.Router) {
@@ -442,9 +459,7 @@ func (h *SSFVHandler) createEquipo(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ssfv: auto-instanciar equipo %d tipo %d: %v", id, body.TipoID, autoErr)
 	}
 
-	if a := h.mgr.SSFVAdapter(); a != nil {
-		a.InvalidateCache()
-	}
+	h.triggerReload()
 	jsonResp(w, http.StatusCreated, map[string]any{"equipo_id": id})
 }
 
@@ -541,10 +556,7 @@ func (h *SSFVHandler) updateEquipo(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Invalidate cache since topic mapping may have changed.
-	if a := h.mgr.SSFVAdapter(); a != nil {
-		a.InvalidateCache()
-	}
+	h.triggerReload()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -778,9 +790,7 @@ func (h *SSFVHandler) createAsignacion(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if a := h.mgr.SSFVAdapter(); a != nil {
-		a.InvalidateCache()
-	}
+	h.triggerReload()
 	jsonResp(w, http.StatusCreated, map[string]any{"equisenal_id": id})
 }
 
@@ -816,16 +826,12 @@ func (h *SSFVHandler) updateAsignacion(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if a := h.mgr.SSFVAdapter(); a != nil {
-		a.InvalidateCache()
-	}
+	h.triggerReload()
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *SSFVHandler) deleteAsignacion(w http.ResponseWriter, r *http.Request) {
-	if a := h.mgr.SSFVAdapter(); a != nil {
-		a.InvalidateCache()
-	}
+	h.triggerReload()
 	h.deleteRow(w, r, `DELETE FROM ssfv."Tbl_Senales_x_Equipo" WHERE "EquiSenal_Id"=$1`)
 }
 
@@ -1061,12 +1067,11 @@ func (h *SSFVHandler) listAlarmas(w http.ResponseWriter, r *http.Request) {
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
 func (h *SSFVHandler) invalidateCache(w http.ResponseWriter, r *http.Request) {
-	a := h.mgr.SSFVAdapter()
-	if a == nil {
+	if h.mgr.SSFVAdapter() == nil {
 		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
 		return
 	}
-	a.InvalidateCache()
+	h.triggerReload()
 	jsonResp(w, http.StatusOK, map[string]any{"invalidated": true})
 }
 

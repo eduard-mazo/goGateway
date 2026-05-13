@@ -22,6 +22,7 @@ type Deps struct {
 	NotifyMappings func() // reload mapping cache on mapping change
 	NotifyTSDB     func() // reload TSDB pipeline on cfg change
 	NotifyNATS     func() // reload NATS/workers on cfg change
+	NotifySSFV     func() // reload worker SSFVMappingCache on catalog change
 
 	MQTT      *mqtt.Manager
 	IEC104    iec104.Server
@@ -63,7 +64,9 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/tsdb/dlq/replay", tsdbH.ServeDLQReplay)
 		r.Get("/tsdb/points", tsdbH.ServePoints)
 
-		r.Route("/ssfv", NewSSFVHandler(d.TSDBMgr).Mount)
+		ssfvApiH := NewSSFVHandler(d.TSDBMgr)
+		ssfvApiH.SetReloader(d.NotifySSFV)
+		r.Route("/ssfv", ssfvApiH.Mount)
 	})
 
 	// Embedded SPA — serves frontend/dist bundled into the binary.

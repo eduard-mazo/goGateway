@@ -111,7 +111,7 @@ func dedupBatch(batch []DataPoint) []DataPoint {
 	seen := make(map[key]int, len(batch))
 	out := batch[:0:len(batch)]
 	for _, p := range batch {
-		k := key{path: p.Tags["path"], nsec: p.Timestamp.UnixNano()}
+		k := key{path: p.Tags["signal_path"], nsec: p.Timestamp.UnixNano()}
 		if idx, ok := seen[k]; ok {
 			out[idx] = p // keep last value for true duplicate
 		} else {
@@ -133,7 +133,7 @@ func (a *TimescaleAdapter) doCopy(ctx context.Context, batch []DataPoint) error 
 		rows = append(rows, []any{
 			p.Timestamp,
 			p.Measurement,
-			p.Tags["path"],
+			p.Tags["signal_path"],
 			primaryValue(p.Fields),
 			tagsJSON,
 		})
@@ -145,8 +145,12 @@ func (a *TimescaleAdapter) doCopy(ctx context.Context, batch []DataPoint) error 
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
-		a.errorCount.Add(1)
-		a.lastErrMsg.Store(err.Error())
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			// Real error (not a duplicate-key conflict handled by WriteBatch fallback).
+			a.errorCount.Add(1)
+			a.lastErrMsg.Store(err.Error())
+		}
 		return fmt.Errorf("timescale copy: %w", err)
 	}
 	a.writeCount.Add(n)
@@ -159,38 +163,36 @@ func (a *TimescaleAdapter) doInsertSafe(ctx context.Context, batch []DataPoint) 
 	if len(batch) == 0 {
 		return nil
 	}
-	tx, err := a.pool.Begin(ctx)
+	// Single-statement UNNEST bulk insert: one round-trip regardless of batch size,
+	// no SQL parsing per row, ON CONFLICT skips duplicates silently.
+	tss := make([]time.Time, len(batch))
+	sigs := make([]string, len(batch))
+	paths := make([]string, len(batch))
+	vals := make([]float64, len(batch))
+	tagsArr := make([][]byte, len(batch))
+	for i, p := range batch {
+		tss[i] = p.Timestamp
+		sigs[i] = p.Measurement
+		paths[i] = p.Tags["signal_path"]
+		vals[i] = primaryValue(p.Fields)
+		tagsArr[i], _ = json.Marshal(p.Tags)
+	}
+	q := fmt.Sprintf(`
+		INSERT INTO %s (ts, signal, signal_path, value, tags)
+		SELECT unnest($1::timestamptz[]), unnest($2::text[]), unnest($3::text[]),
+		       unnest($4::double precision[]), unnest($5::jsonb[])
+		ON CONFLICT (ts, signal_path) DO NOTHING`, a.cfg.Table)
+
+	ct, err := a.pool.Exec(ctx, q, tss, sigs, paths, vals, tagsArr)
 	if err != nil {
-		return fmt.Errorf("timescale tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	q := fmt.Sprintf(`INSERT INTO %s (ts,signal,signal_path,value,tags)
-		VALUES ($1,$2,$3,$4,$5)
-		ON CONFLICT (ts,signal_path) DO NOTHING`, a.cfg.Table)
-
-	b := &pgx.Batch{}
-	for _, p := range batch {
-		tagsJSON, _ := json.Marshal(p.Tags)
-		b.Queue(q, p.Timestamp, p.Measurement, p.Tags["path"], primaryValue(p.Fields), tagsJSON)
-	}
-	res := tx.SendBatch(ctx, b)
-	for range batch {
-		if _, err := res.Exec(); err != nil {
-			res.Close()
-			a.errorCount.Add(1)
-			a.lastErrMsg.Store(err.Error())
-			return fmt.Errorf("timescale insert: %w", err)
-		}
-	}
-	res.Close()
-	if err := tx.Commit(ctx); err != nil {
 		a.errorCount.Add(1)
 		a.lastErrMsg.Store(err.Error())
-		return fmt.Errorf("timescale commit: %w", err)
+		return fmt.Errorf("timescale insert: %w", err)
 	}
-	a.writeCount.Add(int64(len(batch)))
-	a.rateTracker.record(int64(len(batch)))
+	n := ct.RowsAffected()
+	a.writeCount.Add(n)
+	a.bytesEst.Add(n * 80)
+	a.rateTracker.record(n)
 	return nil
 }
 

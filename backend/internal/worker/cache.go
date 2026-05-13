@@ -6,6 +6,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"goGateway/internal/models"
+	"goGateway/internal/sparkplug"
 )
 
 // TopicMapping = resolved row for dispatch (joins topic + mapping).
@@ -86,10 +87,13 @@ func (c *MappingCache) Reload() error {
 		}
 
 		if tm.MetricName != "" {
-			// Sparkplug B: SignalPath built at dispatch time from runtime topic fields.
-			key := tm.Topic + "\x00" + tm.MetricName
+			// Sparkplug B: index by nodeBase (without message-type segment), not the
+			// raw subscription topic. LookupByMetric receives topic.NodeBase() which
+			// strips the msg-type component (NBIRTH/NDATA/…) from the live message.
+			base := spNodeBase(tm.Topic)
+			key := base + "\x00" + tm.MetricName
 			sp[key] = append(sp[key], tm)
-			spAll[tm.Topic] = append(spAll[tm.Topic], tm)
+			spAll[base] = append(spAll[base], tm)
 		} else {
 			// JSON mode: path = business/company/topic/json_key — fully deterministic.
 			tm.SignalPath = tm.Business + "/" + tm.Company + "/" + tm.Topic + "/" + tm.JSONKey
@@ -166,6 +170,22 @@ func LoadIEC104Servers(db *sqlx.DB) ([]models.IEC104Server, error) {
 	var out []models.IEC104Server
 	err := db.Select(&out, `SELECT id,name,port,asdu_addr,scada_ips,k,w,t0,t1,t2,t3,enabled FROM iec104_servers ORDER BY id`)
 	return out, err
+}
+
+// spNodeBase derives the Sparkplug B nodeBase from a raw subscription topic.
+// Raw topics in the DB can be stored as either the nodeBase itself
+// ("spBv1.0/group/node") or a typed topic ("spBv1.0/group/NDATA/node").
+// LookupByMetric and LookupByNode always receive topic.NodeBase() from live
+// messages, so we normalise here to avoid a systematic miss.
+func spNodeBase(raw string) string {
+	t, ok := sparkplug.ParseTopic(raw)
+	if !ok {
+		return raw // already a nodeBase or unknown format — use as-is
+	}
+	if t.DeviceID != "" {
+		return t.DeviceBase()
+	}
+	return t.NodeBase()
 }
 
 // LoadIEC104Gateway = singleton row. Returns the seeded default on a fresh DB.

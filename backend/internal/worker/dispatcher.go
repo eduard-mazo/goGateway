@@ -21,6 +21,8 @@ type InternalPoint struct {
 	Quality    int       `json:"quality"`
 	Timestamp  time.Time `json:"timestamp"`
 	SignalPath string    `json:"signal_path"`
+	Business   string    `json:"business"`
+	Company    string    `json:"company"`
 }
 
 // Dispatcher abstracts the destination for decoded samples.
@@ -54,6 +56,8 @@ func (d *DirectDispatcher) Dispatch(tm TopicMapping, val float64, quality int, t
 		Quality:    quality,
 		Timestamp:  ts,
 		IOA:        tm.IOA,
+		Business:   tm.Business,
+		Company:    tm.Company,
 	}) {
 		log.Printf("history buffer full, dropped %s", tm.SignalPath)
 	}
@@ -80,6 +84,8 @@ func (d *NatsDispatcher) Dispatch(tm TopicMapping, val float64, quality int, ts 
 		Quality:    quality,
 		Timestamp:  ts,
 		SignalPath: tm.SignalPath,
+		Business:   tm.Business,
+		Company:    tm.Company,
 	}
 
 	data, err := json.Marshal(pt)

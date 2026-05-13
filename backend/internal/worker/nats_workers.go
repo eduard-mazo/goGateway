@@ -10,7 +10,6 @@ import (
 
 	"goGateway/internal/iec104"
 	"goGateway/internal/nats"
-	"goGateway/internal/tsdb"
 )
 
 // SCADAWorker consumes from NATS and dispatches to IEC-104.
@@ -77,15 +76,16 @@ func (w *SCADAWorker) Run(ctx context.Context) error {
 	}
 }
 
-// TSDBWorker consumes from NATS and pushes to the TSDB pipeline.
+// TSDBWorker consumes from NATS and forwards to HistoryLogger,
+// which writes to both SQLite and the TSDB pipeline.
 type TSDBWorker struct {
 	client     *nats.Client
 	streamName string
-	tsdbPipe   *tsdb.WritePipeline
+	hist       *HistoryLogger
 }
 
-func NewTSDBWorker(client *nats.Client, streamName string, pipe *tsdb.WritePipeline) *TSDBWorker {
-	return &TSDBWorker{client: client, streamName: streamName, tsdbPipe: pipe}
+func NewTSDBWorker(client *nats.Client, streamName string, hist *HistoryLogger) *TSDBWorker {
+	return &TSDBWorker{client: client, streamName: streamName, hist: hist}
 }
 
 func (w *TSDBWorker) Run(ctx context.Context) error {
@@ -96,7 +96,7 @@ func (w *TSDBWorker) Run(ctx context.Context) error {
 
 	consumer, err := js.CreateOrUpdateConsumer(ctx, w.streamName, jetstream.ConsumerConfig{
 		Durable:       "tsdb-worker",
-		Description:   "Pushes metrics to TSDB (VictoriaMetrics/Timescale)",
+		Description:   "Pushes metrics to SQLite history and TSDB (VictoriaMetrics/Timescale)",
 		FilterSubject: w.streamName + ".metrics.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
@@ -129,26 +129,17 @@ func (w *TSDBWorker) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Push to TSDB pipeline (matches HistoryLogger logic)
-		err = w.tsdbPipe.Push(tsdb.DataPoint{
-			Measurement: lastPathSegment(pt.SignalPath),
-			Timestamp:   pt.Timestamp,
-			Tags: map[string]string{
-				"path":      pt.SignalPath,
-				"server_id": fmt.Sprintf("%d", pt.ServerID),
-			},
-			Fields: map[string]float64{
-				"value":   pt.Value,
-				"quality": float64(pt.Quality),
-			},
-		})
-
-		if err != nil {
-			// Pipeline buffer full. NATS will redeliver later if we don't ACK.
-			// But we don't want to block the loop. 
-			// In high load, we might want to wait or just log.
-			log.Printf("tsdb worker: pipeline push error: %v", err)
-			continue 
+		if !w.hist.Log(HistoryEvent{
+			MappingID:  pt.MappingID,
+			SignalPath: pt.SignalPath,
+			Value:      pt.Value,
+			Quality:    pt.Quality,
+			Timestamp:  pt.Timestamp,
+			IOA:        pt.IOA,
+			Business:   pt.Business,
+			Company:    pt.Company,
+		}) {
+			log.Printf("tsdb worker: history buffer full, dropped %s", pt.SignalPath)
 		}
 
 		msg.Ack()

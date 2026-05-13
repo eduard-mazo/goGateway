@@ -136,6 +136,31 @@ func (h *SSFVHandler) SetPipeline(p *tsdb.WritePipeline) { h.pipe = p }
 // SetAlarmManager updates the alarm manager reference.
 func (h *SSFVHandler) SetAlarmManager(a *AlarmManager) { h.alarmMgr = a }
 
+// HandleMetric processes a single decoded metric from a Sparkplug B NDATA message.
+// topic = MQTT device topic (MetricName minus last segment), code = signal code.
+// Returns true if the signal is known to the SSFV catalog.
+func (h *SSFVHandler) HandleMetric(topic, code string, value float64, ts time.Time) bool {
+	mapping, ok := h.cache.Lookup(topic, code)
+	if !ok {
+		return false
+	}
+	if mapping.EsAlarma && h.alarmMgr != nil {
+		h.alarmMgr.Process(mapping.EquisenalID, value, ts, alarmType(code))
+	}
+	if h.pipe != nil {
+		h.pipe.Push(tsdb.DataPoint{ //nolint:errcheck
+			Measurement: code,
+			Tags: map[string]string{
+				"signal_path": topic + "/" + code,
+				"equipo":      topic,
+			},
+			Fields:    map[string]float64{"value": value},
+			Timestamp: ts,
+		})
+	}
+	return true
+}
+
 // Handle processes one MQTT message. Returns true if handled as SSFV topic.
 func (h *SSFVHandler) Handle(topic string, payload []byte) bool {
 	if !h.cache.IsTopic(topic) {

@@ -143,6 +143,15 @@ func main() {
 		NotifyNATS: func() {
 			log.Printf("nats: config changed (restart required to apply)")
 		},
+		NotifySSFV: func() {
+			sa := tsdbMgr.SSFVAdapter()
+			if sa == nil {
+				return
+			}
+			if err := ssfvCache.Reload(sa.Pool()); err != nil {
+				log.Printf("ssfv: mapping cache reload: %v", err)
+			}
+		},
 		MQTT:      mqttMgr,
 		IEC104:    iecMgr,
 		TSDBMgr:   tsdbMgr,

@@ -12,7 +12,7 @@ import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
 import {
   Database, FlaskConical, CheckCircle2, XCircle,
-  ChevronDown, Save, RefreshCw, Zap, Server, Eye, EyeOff,
+  ChevronDown, Save, RefreshCw, Zap, Server, Eye, EyeOff, Trash2,
 } from 'lucide-vue-next'
 
 const {
@@ -32,6 +32,7 @@ const cfg = ref<TSDBConfig>({
 const saving = ref(false)
 const advancedOpen = ref(false)
 const showDsn = ref(false)
+const clearDsn = ref(false)   // user explicitly clicked trash to clear the DSN
 
 const backendOptions = [
   { value: 'none',             label: t.tsdb.none },
@@ -56,7 +57,11 @@ const testResultTS = ref<TSDBTestResult | null>(null)
 // ── Load / Save ───────────────────────────────────────────────────────────────
 async function load() {
   try {
-    cfg.value = (await api.get<TSDBConfig>('/tsdb-config')).data
+    // Server returns ts_dsn/vm_password as "" but has_ts_dsn/has_vm_password
+    // signal whether credentials are actually stored.
+    const data = (await api.get<TSDBConfig>('/tsdb-config')).data
+    cfg.value = data
+    clearDsn.value = false
   } catch (e: any) {
     toast.error('Load failed: ' + (e?.message ?? e))
   }
@@ -64,8 +69,17 @@ async function load() {
 
 async function save() {
   saving.value = true
+  // Capture what the user typed before the PUT — the server returns "" for
+  // credentials (masked) so we restore the local value afterwards to keep the
+  // field from going blank.
+  const localDsn  = cfg.value.ts_dsn
+  const localPass = cfg.value.vm_password
   try {
-    cfg.value = (await api.put<TSDBConfig>('/tsdb-config', cfg.value)).data
+    const payload = { ...cfg.value, clear_ts_dsn: clearDsn.value }
+    const updated = (await api.put<TSDBConfig>('/tsdb-config', payload)).data
+    // Restore typed credentials; if we just cleared the DSN the field stays blank.
+    cfg.value = { ...updated, ts_dsn: clearDsn.value ? '' : localDsn, vm_password: localPass }
+    clearDsn.value = false
     toast.success(t.nats.saved)
   } catch (e: any) {
     toast.error(t.nats.saveFailed + (e?.response?.data?.error ?? e?.message ?? e))
@@ -210,19 +224,37 @@ onMounted(load)
           </div>
           <div class="p-4 space-y-4">
             <div class="space-y-1.5">
-              <Label for="ts_dsn" class="text-[11px] uppercase tracking-[0.18em] font-bold">DSN (connection string)</Label>
+              <div class="flex items-center gap-2">
+                <Label for="ts_dsn" class="text-[11px] uppercase tracking-[0.18em] font-bold">DSN (connection string)</Label>
+                <span
+                  v-if="cfg.has_ts_dsn && !cfg.ts_dsn && !clearDsn"
+                  class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                >configurado</span>
+                <span
+                  v-if="clearDsn"
+                  class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-destructive/15 text-destructive"
+                >se eliminará al guardar</span>
+              </div>
               <div class="flex gap-2">
                 <Input
                   id="ts_dsn"
                   v-model="cfg.ts_dsn"
                   :type="showDsn ? 'text' : 'password'"
-                  placeholder="postgres://user:pass@host:5432/gateway"
+                  :placeholder="cfg.has_ts_dsn && !cfg.ts_dsn && !clearDsn ? '••••••••••••• (almacenado)' : 'postgres://user:pass@host:5432/gateway'"
                   class="rounded-sm font-mono flex-1"
                   autocomplete="new-password"
                 />
                 <Button variant="outline" size="icon" class="rounded-sm shrink-0" @click="showDsn = !showDsn">
                   <Eye v-if="!showDsn" class="h-4 w-4" />
                   <EyeOff v-else class="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="outline" size="icon" class="rounded-sm shrink-0 text-destructive hover:text-destructive"
+                  :disabled="!cfg.ts_dsn && !cfg.has_ts_dsn && !clearDsn"
+                  title="Eliminar DSN"
+                  @click="cfg.ts_dsn = ''; clearDsn = true"
+                >
+                  <Trash2 class="h-4 w-4" />
                 </Button>
               </div>
               <p class="text-[11px] text-muted-foreground">

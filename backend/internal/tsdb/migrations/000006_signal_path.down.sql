@@ -1,3 +1,24 @@
+-- Reverse of 000006: signal → measurement, signal_path → ioa.
+
+DO $$
+BEGIN
+    PERFORM remove_compression_policy('signals'::regclass);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+DO $$
+DECLARE c regclass;
+BEGIN
+    FOR c IN SELECT * FROM show_chunks('signals'::regclass) LOOP
+        BEGIN
+            PERFORM decompress_chunk(c);
+        EXCEPTION WHEN OTHERS THEN NULL;
+        END;
+    END LOOP;
+END $$;
+
+ALTER TABLE signals SET (timescaledb.compress = FALSE);
+
 DROP VIEW IF EXISTS v_active_alarms;
 DROP VIEW IF EXISTS v_current_signals;
 
@@ -38,3 +59,15 @@ CREATE OR REPLACE VIEW v_active_alarms AS
 SELECT * FROM v_current_signals
 WHERE  alarm_state NOT IN ('OK') AND invalid = FALSE
 ORDER  BY ts DESC;
+
+ALTER TABLE signals SET (
+    timescaledb.compress           = TRUE,
+    timescaledb.compress_segmentby = 'measurement, ioa',
+    timescaledb.compress_orderby   = 'ts DESC'
+);
+
+SELECT add_compression_policy(
+    'signals'::regclass,
+    compress_after => INTERVAL '7 days',
+    if_not_exists  => TRUE
+);

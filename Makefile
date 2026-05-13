@@ -17,8 +17,15 @@ HTTP ?= :$(PORT)
 # make build DEBUG=1  bakes "on" as binary default.
 # GW_IEC_DEBUG=1 at runtime overrides either way.
 DEBUG ?= 0
+
+# Build stamp: UTC timestamp + short git commit injected into the binary.
+BUILD_TIME  := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+GIT_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
 LDFLAGS := -X goGateway/internal/config.DefaultHTTPListen=$(HTTP) \
-           -X goGateway/internal/iec104.DefaultDebug=$(DEBUG)
+           -X goGateway/internal/iec104.DefaultDebug=$(DEBUG) \
+           -X goGateway/internal/config.BuildTime=$(BUILD_TIME) \
+           -X goGateway/internal/config.GitCommit=$(GIT_COMMIT)
 
 # Container builds strip debug info and symbol tables (-s -w) for a smaller
 # binary.  -trimpath removes local build-host paths from the binary.

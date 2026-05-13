@@ -9,6 +9,11 @@ import "os"
 // GW_HTTP env still wins at runtime.
 var DefaultHTTPListen = ":8080"
 
+// BuildTime and GitCommit are injected at link time via -ldflags.
+// Defaults signal a local dev build not stamped by the Makefile.
+var BuildTime = "dev"
+var GitCommit = "unknown"
+
 // Runtime config from env, with defaults.
 type Runtime struct {
 	DBPath     string
