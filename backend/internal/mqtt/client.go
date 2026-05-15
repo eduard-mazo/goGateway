@@ -41,9 +41,9 @@ type Manager struct {
 	// SSFV JSON handler — intercepts equipment topics before generic dispatch.
 	ssfvHandler *worker.SSFVHandler
 
-	// monitorHook receives (topic, kind, payloadSize) for every inbound message.
+	// monitorHook receives (topic, kind, payload) for every inbound message.
 	// nil = disabled. Set via SetMonitorHook before Start().
-	monitorHook func(topic, kind string, payloadSize int)
+	monitorHook func(topic, kind string, payload []byte)
 }
 
 // MQTTConfigSnapshot is a copy of the config values the manager needs outside
@@ -84,9 +84,9 @@ func (m *Manager) SetSSFVHandler(h *worker.SSFVHandler) {
 }
 
 // SetMonitorHook registers a callback invoked for every inbound MQTT message.
-// fn receives (topic, kind, payloadSize). kind is one of "sparkplug", "ssfv",
+// fn receives (topic, kind, payload). kind is one of "sparkplug", "ssfv",
 // "json", or "state". Safe to call at any time.
-func (m *Manager) SetMonitorHook(fn func(topic, kind string, payloadSize int)) {
+func (m *Manager) SetMonitorHook(fn func(topic, kind string, payload []byte)) {
 	m.mu.Lock()
 	m.monitorHook = fn
 	m.mu.Unlock()
@@ -302,7 +302,7 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 			if !ok {
 				kind = "state"
 			}
-			hook(topic, kind, len(payload))
+			hook(topic, kind, payload)
 		}
 		if !ok {
 			return // not a valid spBv1.0 topic (e.g., the STATE topic itself)
@@ -314,13 +314,13 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 	// JSON mode: SSFV handler intercepts equipment topics first.
 	if ssfvHandler != nil && ssfvHandler.Handle(topic, payload) {
 		if hook != nil {
-			hook(topic, "ssfv", len(payload))
+			hook(topic, "ssfv", payload)
 		}
 		return
 	}
 
 	if hook != nil {
-		hook(topic, "json", len(payload))
+		hook(topic, "json", payload)
 	}
 
 	// Generic JSON dispatch (IEC-104 + history pipeline).

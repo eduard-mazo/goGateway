@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const monitorCap = 1000
+const (
+	monitorCap     = 1000
+	maxPayloadStore = 2048 // max bytes stored per event for JSON/state payloads
+)
 
 // BrokerEvent is one captured MQTT message metadata record.
 type BrokerEvent struct {
@@ -16,7 +19,8 @@ type BrokerEvent struct {
 	At          time.Time `json:"at"`
 	Topic       string    `json:"topic"`
 	PayloadSize int       `json:"size"`
-	Kind        string    `json:"kind"` // "sparkplug", "ssfv", "json", "state"
+	Kind        string    `json:"kind"`             // "sparkplug", "ssfv", "json", "state"
+	Payload     string    `json:"payload,omitempty"` // raw text for json/ssfv/state; empty for sparkplug
 }
 
 // BrokerMonitor is a thread-safe ring buffer for recent broker events that
@@ -36,15 +40,28 @@ func NewBrokerMonitor() *BrokerMonitor {
 
 // Push records an MQTT message and fans it out to live SSE clients.
 // Never blocks: slow clients are dropped rather than back-pressuring the MQTT goroutine.
-func (b *BrokerMonitor) Push(topic, kind string, payloadSize int) {
+// For json, ssfv, and state kinds the raw payload is stored (truncated at maxPayloadStore).
+// Sparkplug payloads are binary protobuf and not stored.
+func (b *BrokerMonitor) Push(topic, kind string, payload []byte) {
+	var payloadStr string
+	switch kind {
+	case "json", "ssfv", "state":
+		if len(payload) <= maxPayloadStore {
+			payloadStr = string(payload)
+		} else {
+			payloadStr = string(payload[:maxPayloadStore]) + "\n…(truncado)"
+		}
+	}
+
 	b.mu.Lock()
 	b.total++
 	ev := BrokerEvent{
 		ID:          b.total,
 		At:          time.Now(),
 		Topic:       topic,
-		PayloadSize: payloadSize,
+		PayloadSize: len(payload),
 		Kind:        kind,
+		Payload:     payloadStr,
 	}
 	b.ring[b.head] = ev
 	b.head = (b.head + 1) % monitorCap

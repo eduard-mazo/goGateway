@@ -4,12 +4,24 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const missRingCap = 300
+
+// MissedSignal records a signal_path that had no catalog match in tbl_senales_x_equipo.
+// These are actionable: the signal is flowing from the broker but has not been
+// configured in the SSFV catalog.
+type MissedSignal struct {
+	At         time.Time `json:"at"`
+	SignalPath string    `json:"signal_path"`
+	Equipo     string    `json:"equipo"`
+}
 
 // SSFVAdapter is a TSDBWriter that persists DataPoints exclusively to
 // ssfv.tbl_valores when the signal_path resolves to a known equisenal_id.
@@ -31,6 +43,11 @@ type SSFVAdapter struct {
 	lastErrMsg   atomic.Value
 	circuitOpen  atomic.Bool
 	rateTracker  *rateTracker
+
+	missMu    sync.Mutex
+	missRing  [missRingCap]MissedSignal
+	missHead  int
+	missCount int
 }
 
 // NewSSFVAdapter opens a pgxpool to the ssfv schema on the given DSN, runs
@@ -108,6 +125,7 @@ func (a *SSFVAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 		equiID, ok := a.cache.Resolve(ctx, signalPath)
 		if !ok {
 			dropped++
+			a.recordMiss(signalPath, p.Tags["equipo"])
 			continue
 		}
 
@@ -216,4 +234,49 @@ func (a *SSFVAdapter) recordError(err error) {
 	a.errorCount.Add(1)
 	a.lastErrMsg.Store(err.Error())
 	log.Printf("ssfv: write error: %v", err)
+}
+
+// recordMiss stores a signal_path that had no catalog match into the ring buffer.
+func (a *SSFVAdapter) recordMiss(signalPath, equipo string) {
+	a.missMu.Lock()
+	a.missRing[a.missHead] = MissedSignal{At: time.Now(), SignalPath: signalPath, Equipo: equipo}
+	a.missHead = (a.missHead + 1) % missRingCap
+	if a.missCount < missRingCap {
+		a.missCount++
+	}
+	a.missMu.Unlock()
+}
+
+// RecentMisses returns signal paths that recently had no catalog match,
+// in chronological order (oldest first), deduplicated by signal_path.
+func (a *SSFVAdapter) RecentMisses() []MissedSignal {
+	a.missMu.Lock()
+	count := a.missCount
+	head := a.missHead
+	ring := a.missRing // copy under lock
+	a.missMu.Unlock()
+
+	if count == 0 {
+		return nil
+	}
+	// Reconstruct in chrono order
+	raw := make([]MissedSignal, count)
+	if count < missRingCap {
+		copy(raw, ring[:count])
+	} else {
+		n := copy(raw, ring[head:])
+		copy(raw[n:], ring[:head])
+	}
+	// Deduplicate by signal_path, keeping the most recent occurrence per path.
+	seen := make(map[string]int, len(raw)) // path → index in out
+	out := make([]MissedSignal, 0, len(raw))
+	for _, m := range raw {
+		if idx, exists := seen[m.SignalPath]; exists {
+			out[idx] = m // update to more recent
+		} else {
+			seen[m.SignalPath] = len(out)
+			out = append(out, m)
+		}
+	}
+	return out
 }

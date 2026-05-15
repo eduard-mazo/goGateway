@@ -91,6 +91,9 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 	r.Get("/vista/ultimas-lecturas", h.vistaUltimasLecturas)
 	r.Get("/vista/alarmas-activas", h.vistaAlarmasActivas)
 
+	// Señales sin mapeo (ring buffer de los últimos 300 signal_paths descartados)
+	r.Get("/missed", h.getMissedSignals)
+
 	// Invalidar cache
 	r.Post("/cache/invalidate", h.invalidateCache)
 }
@@ -1058,6 +1061,22 @@ func (h *SSFVHandler) listAlarmas(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
+
+// getMissedSignals returns the deduplicated ring buffer of signal_paths that
+// arrived from the broker but had no catalog match in tbl_senales_x_equipo.
+// These are actionable: configure the signal in the SSFV catalog to persist it.
+func (h *SSFVHandler) getMissedSignals(w http.ResponseWriter, r *http.Request) {
+	a := h.mgr.SSFVAdapter()
+	if a == nil {
+		jsonResp(w, http.StatusOK, []any{})
+		return
+	}
+	misses := a.RecentMisses()
+	if misses == nil {
+		misses = []tsdb.MissedSignal{}
+	}
+	jsonResp(w, http.StatusOK, misses)
+}
 
 func (h *SSFVHandler) invalidateCache(w http.ResponseWriter, r *http.Request) {
 	if h.mgr.SSFVAdapter() == nil {
