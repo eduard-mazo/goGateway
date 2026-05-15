@@ -90,7 +90,6 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 	r.Get("/vista/senales-contexto", h.vistaSeñalesContexto)
 	r.Get("/vista/ultimas-lecturas", h.vistaUltimasLecturas)
 	r.Get("/vista/alarmas-activas", h.vistaAlarmasActivas)
-	r.Get("/vista/raw", h.vistaRaw)
 
 	// Invalidar cache
 	r.Post("/cache/invalidate", h.invalidateCache)
@@ -119,6 +118,7 @@ func (h *SSFVHandler) getStatus(w http.ResponseWriter, r *http.Request) {
 		"error_rate":   st.ErrorRate,
 		"circuit_open": st.CircuitOpen,
 		"last_error":   st.LastError,
+		"skipped_rows": st.SkippedRows,
 	})
 }
 
@@ -134,10 +134,10 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	rows, err := pool.Query(ctx, `
-		SELECT "Planta_Id","Nombre","Ubicacion","Propietario",
-		       "Broker_Base","Capacidad_kWp","Fecha_Comisionamiento","Estado",
-		       "Fecha_Creacion","Fecha_Modif"
-		FROM ssfv."Tbl_Planta" ORDER BY "Planta_Id"`)
+		SELECT planta_id, nombre, ubicacion, propietario,
+		       broker_base, capacidad_kwp, fecha_comisionamiento, estado,
+		       fecha_creacion, fecha_modif
+		FROM ssfv.tbl_planta ORDER BY planta_id`)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -193,10 +193,10 @@ func (h *SSFVHandler) createPlanta(w http.ResponseWriter, r *http.Request) {
 
 	var id int
 	err := pool.QueryRow(ctx, `
-		INSERT INTO ssfv."Tbl_Planta"
-		    ("Nombre","Ubicacion","Propietario","Broker_Base","Capacidad_kWp","Fecha_Comisionamiento","Estado")
+		INSERT INTO ssfv.tbl_planta
+		    (nombre, ubicacion, propietario, broker_base, capacidad_kwp, fecha_comisionamiento, estado)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
-		RETURNING "Planta_Id"`,
+		RETURNING planta_id`,
 		body.Nombre, body.Ubicacion, body.Propietario, body.BrokerBase,
 		body.CapacidadKWp, body.FechaComisionamiento, body.Estado,
 	).Scan(&id)
@@ -231,10 +231,10 @@ func (h *SSFVHandler) updatePlanta(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	_, err := pool.Exec(ctx, `
-		UPDATE ssfv."Tbl_Planta"
-		SET "Nombre"=$1,"Ubicacion"=$2,"Propietario"=$3,"Broker_Base"=$4,
-		    "Capacidad_kWp"=$5,"Fecha_Comisionamiento"=$6,"Estado"=$7,"Fecha_Modif"=NOW()
-		WHERE "Planta_Id"=$8`,
+		UPDATE ssfv.tbl_planta
+		SET nombre=$1, ubicacion=$2, propietario=$3, broker_base=$4,
+		    capacidad_kwp=$5, fecha_comisionamiento=$6, estado=$7, fecha_modif=NOW()
+		WHERE planta_id=$8`,
 		body.Nombre, body.Ubicacion, body.Propietario, body.BrokerBase,
 		body.CapacidadKWp, body.FechaComisionamiento, body.Estado, id)
 	if err != nil {
@@ -245,7 +245,7 @@ func (h *SSFVHandler) updatePlanta(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, `DELETE FROM ssfv."Tbl_Planta" WHERE "Planta_Id"=$1`)
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_planta WHERE planta_id=$1`)
 }
 
 // ─── Equipos ─────────────────────────────────────────────────────────────────
@@ -261,19 +261,19 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	query := `
-		SELECT e."Equipo_Id",e."Planta_Id",e."Tipo_Id",e."Nombre_Equipo",
-		       e."Nombre_Topic",e."Fabricante",e."Modelo",e."Nro_Serie",
-		       e."Estado",e."Fecha_Creacion",e."Fecha_Modif",
-		       te."Nombre" AS tipo_nombre, p."Nombre" AS planta_nombre
-		FROM ssfv."Tbl_Equipo" e
-		JOIN ssfv."Tbl_Tipo_Equipo" te ON te."Tipo_Id" = e."Tipo_Id"
-		JOIN ssfv."Tbl_Planta" p ON p."Planta_Id" = e."Planta_Id"`
+		SELECT e.equipo_id, e.planta_id, e.tipo_id, e.nombre_equipo,
+		       e.nombre_topic, e.fabricante, e.modelo, e.nro_serie,
+		       e.estado, e.fecha_creacion, e.fecha_modif,
+		       te.nombre AS tipo_nombre, p.nombre AS planta_nombre
+		FROM ssfv.tbl_equipo e
+		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id = e.tipo_id
+		JOIN ssfv.tbl_planta p ON p.planta_id = e.planta_id`
 	args := []any{}
 	if plantaID != "" {
-		query += ` WHERE e."Planta_Id"=$1`
+		query += ` WHERE e.planta_id=$1`
 		args = append(args, plantaID)
 	}
-	query += ` ORDER BY e."Equipo_Id"`
+	query += ` ORDER BY e.equipo_id`
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
@@ -317,13 +317,13 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	rows, err := pool.Query(ctx, `
-		SELECT e."Equipo_Id",e."Planta_Id",e."Tipo_Id",e."Nombre_Equipo",
-		       e."Nombre_Topic",e."Fabricante",e."Modelo",e."Nro_Serie",
-		       e."Estado",e."Fecha_Creacion",e."Fecha_Modif",
-		       te."Nombre" AS tipo_nombre
-		FROM ssfv."Tbl_Equipo" e
-		JOIN ssfv."Tbl_Tipo_Equipo" te ON te."Tipo_Id" = e."Tipo_Id"
-		WHERE e."Planta_Id"=$1 ORDER BY e."Equipo_Id"`, plantaID)
+		SELECT e.equipo_id, e.planta_id, e.tipo_id, e.nombre_equipo,
+		       e.nombre_topic, e.fabricante, e.modelo, e.nro_serie,
+		       e.estado, e.fecha_creacion, e.fecha_modif,
+		       te.nombre AS tipo_nombre
+		FROM ssfv.tbl_equipo e
+		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id = e.tipo_id
+		WHERE e.planta_id=$1 ORDER BY e.equipo_id`, plantaID)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -363,19 +363,20 @@ func (h *SSFVHandler) listSenalesByEquipo(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	rows, err := pool.Query(ctx, `
-		SELECT sxe."EquiSenal_Id", sxe."Senal_Id", sxe."Equipo_Id",
-		       sxe."Indice_Canal", sxe."Nombre_Instancia", sxe."Activo",
-		       s."Nombre" AS senal_nombre, s."Codigo_Senal",
-		       s."Es_Alarma", s."Es_Indexada", s."Tipo_Valor",
-		       tv."Nombre" AS tipo_variable, u."Simbolo" AS unidad,
-		       e."Nombre_Topic"
-		FROM ssfv."Tbl_Senales_x_Equipo" sxe
-		JOIN ssfv."Tbl_Senales"       s   ON s."Senal_Id"    = sxe."Senal_Id"
-		JOIN ssfv."Tbl_Tipo_Variable"  tv  ON tv."TipoVar_Id" = s."TipoVar_Id"
-		JOIN ssfv."Tbl_Unidades"       u   ON u."Unidad_Id"   = s."Unidad_Id"
-		JOIN ssfv."Tbl_Equipo"         e   ON e."Equipo_Id"   = sxe."Equipo_Id"
-		WHERE sxe."Equipo_Id"=$1
-		ORDER BY sxe."EquiSenal_Id"`, equipoID)
+		SELECT sxe.equisenal_id, sxe.senal_id, sxe.equipo_id,
+		       sxe.indice_canal, sxe.nombre_instancia, sxe.activo,
+		       s.nombre AS senal_nombre, s.codigo_senal,
+		       (s.codigo_senal LIKE 'AL%' OR s.codigo_senal LIKE 'EF%' OR s.codigo_senal LIKE 'EV%') AS es_alarma,
+		       s.es_indexada, s.tipo_valor,
+		       tv.nombre AS tipo_variable, u.simbolo AS unidad,
+		       e.nombre_topic
+		FROM ssfv.tbl_senales_x_equipo sxe
+		JOIN ssfv.tbl_senales       s   ON s.senal_id    = sxe.senal_id
+		JOIN ssfv.tbl_tipo_variable tv  ON tv.tipovar_id = s.tipovar_id
+		JOIN ssfv.tbl_unidades      u   ON u.unidad_id   = s.unidad_id
+		JOIN ssfv.tbl_equipo        e   ON e.equipo_id   = sxe.equipo_id
+		WHERE sxe.equipo_id=$1
+		ORDER BY sxe.equisenal_id`, equipoID)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -442,10 +443,10 @@ func (h *SSFVHandler) createEquipo(w http.ResponseWriter, r *http.Request) {
 	// Insert equipo.
 	var id int
 	err := pool.QueryRow(ctx, `
-		INSERT INTO ssfv."Tbl_Equipo"
-		    ("Planta_Id","Tipo_Id","Nombre_Equipo","Nombre_Topic","Fabricante","Modelo","Nro_Serie","Estado")
+		INSERT INTO ssfv.tbl_equipo
+		    (planta_id, tipo_id, nombre_equipo, nombre_topic, fabricante, modelo, nro_serie, estado)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-		RETURNING "Equipo_Id"`,
+		RETURNING equipo_id`,
 		body.PlantaID, body.TipoID, body.NombreEquipo, body.NombreTopic,
 		body.Fabricante, body.Modelo, body.NroSerie, body.Estado,
 	).Scan(&id)
@@ -467,10 +468,10 @@ func (h *SSFVHandler) createEquipo(w http.ResponseWriter, r *http.Request) {
 // in the tipo_equipo catalog, handling indexed signals by expanding channels.
 func (h *SSFVHandler) autoInstanciarSenales(ctx context.Context, pool *pgxpool.Pool, equipoID, tipoID int) error {
 	rows, err := pool.Query(ctx, `
-		SELECT s."Senal_Id", s."Codigo_Senal", s."Es_Indexada", st."Num_Canales"
-		FROM ssfv."Tbl_Senales_x_Tipo_Equipo" st
-		JOIN ssfv."Tbl_Senales" s ON s."Senal_Id" = st."Senal_Id"
-		WHERE st."Tipo_Id" = $1 AND s."Activo" = TRUE`, tipoID)
+		SELECT s.senal_id, s.codigo_senal, s.es_indexada, st.num_canales
+		FROM public.tbl_senales_x_tipo_equipo st
+		JOIN ssfv.tbl_senales s ON s.senal_id = st.senal_id
+		WHERE st.tipo_id = $1 AND s.activo = TRUE`, tipoID)
 	if err != nil {
 		return fmt.Errorf("query senales x tipo: %w", err)
 	}
@@ -497,8 +498,8 @@ func (h *SSFVHandler) autoInstanciarSenales(ctx context.Context, pool *pgxpool.P
 			for i := 1; i <= s.numCanales; i++ {
 				instancia := base + "_" + strconv.Itoa(i)
 				_, err := pool.Exec(ctx, `
-					INSERT INTO ssfv."Tbl_Senales_x_Equipo"
-					    ("Senal_Id","Equipo_Id","Indice_Canal","Nombre_Instancia","Activo")
+					INSERT INTO ssfv.tbl_senales_x_equipo
+					    (senal_id, equipo_id, indice_canal, nombre_instancia, activo)
 					VALUES ($1,$2,$3,$4,TRUE)
 					ON CONFLICT DO NOTHING`,
 					s.senalID, equipoID, i, instancia)
@@ -508,8 +509,8 @@ func (h *SSFVHandler) autoInstanciarSenales(ctx context.Context, pool *pgxpool.P
 			}
 		} else {
 			_, err := pool.Exec(ctx, `
-				INSERT INTO ssfv."Tbl_Senales_x_Equipo"
-				    ("Senal_Id","Equipo_Id","Nombre_Instancia","Activo")
+				INSERT INTO ssfv.tbl_senales_x_equipo
+				    (senal_id, equipo_id, nombre_instancia, activo)
 				VALUES ($1,$2,$3,TRUE)
 				ON CONFLICT DO NOTHING`,
 				s.senalID, equipoID, s.codigoSenal)
@@ -546,10 +547,10 @@ func (h *SSFVHandler) updateEquipo(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	_, err := pool.Exec(ctx, `
-		UPDATE ssfv."Tbl_Equipo"
-		SET "Planta_Id"=$1,"Tipo_Id"=$2,"Nombre_Equipo"=$3,"Nombre_Topic"=$4,
-		    "Fabricante"=$5,"Modelo"=$6,"Nro_Serie"=$7,"Estado"=$8,"Fecha_Modif"=NOW()
-		WHERE "Equipo_Id"=$9`,
+		UPDATE ssfv.tbl_equipo
+		SET planta_id=$1, tipo_id=$2, nombre_equipo=$3, nombre_topic=$4,
+		    fabricante=$5, modelo=$6, nro_serie=$7, estado=$8, fecha_modif=NOW()
+		WHERE equipo_id=$9`,
 		body.PlantaID, body.TipoID, body.NombreEquipo, body.NombreTopic,
 		body.Fabricante, body.Modelo, body.NroSerie, body.Estado, id)
 	if err != nil {
@@ -561,7 +562,7 @@ func (h *SSFVHandler) updateEquipo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SSFVHandler) deleteEquipo(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, `DELETE FROM ssfv."Tbl_Equipo" WHERE "Equipo_Id"=$1`)
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_equipo WHERE equipo_id=$1`)
 }
 
 // ─── Señales ─────────────────────────────────────────────────────────────────
@@ -576,13 +577,13 @@ func (h *SSFVHandler) listSenales(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	rows, err := pool.Query(ctx, `
-		SELECT s."Senal_Id",s."TipoVar_Id",s."Unidad_Id",s."Nombre",s."Descripcion",
-		       s."Tipo_Valor",s."Codigo_Senal",s."Es_Indexada",s."Activo",s."Fecha_Alta",
-		       tv."Nombre" AS tipo_var_nombre, u."Simbolo" AS unidad_simbolo
-		FROM ssfv."Tbl_Senales" s
-		JOIN ssfv."Tbl_Tipo_Variable" tv ON tv."TipoVar_Id" = s."TipoVar_Id"
-		JOIN ssfv."Tbl_Unidades" u ON u."Unidad_Id" = s."Unidad_Id"
-		ORDER BY s."Senal_Id"`)
+		SELECT s.senal_id, s.tipovar_id, s.unidad_id, s.nombre, s.descripcion,
+		       s.tipo_valor, s.codigo_senal, s.es_indexada, s.activo, s.fecha_alta,
+		       tv.nombre AS tipo_var_nombre, u.simbolo AS unidad_simbolo
+		FROM ssfv.tbl_senales s
+		JOIN ssfv.tbl_tipo_variable tv ON tv.tipovar_id = s.tipovar_id
+		JOIN ssfv.tbl_unidades u ON u.unidad_id = s.unidad_id
+		ORDER BY s.senal_id`)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -640,10 +641,10 @@ func (h *SSFVHandler) createSenal(w http.ResponseWriter, r *http.Request) {
 
 	var id int
 	err := pool.QueryRow(ctx, `
-		INSERT INTO ssfv."Tbl_Senales"
-		    ("TipoVar_Id","Unidad_Id","Nombre","Descripcion","Tipo_Valor","Codigo_Senal","Es_Indexada","Activo")
+		INSERT INTO ssfv.tbl_senales
+		    (tipovar_id, unidad_id, nombre, descripcion, tipo_valor, codigo_senal, es_indexada, activo)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-		RETURNING "Senal_Id"`,
+		RETURNING senal_id`,
 		body.TipoVarID, body.UnidadID, body.Nombre, body.Descripcion,
 		body.TipoValor, body.CodigoSenal, body.EsIndexada, body.Activo,
 	).Scan(&id)
@@ -679,10 +680,10 @@ func (h *SSFVHandler) updateSenal(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	_, err := pool.Exec(ctx, `
-		UPDATE ssfv."Tbl_Senales"
-		SET "TipoVar_Id"=$1,"Unidad_Id"=$2,"Nombre"=$3,"Descripcion"=$4,
-		    "Tipo_Valor"=$5,"Codigo_Senal"=$6,"Es_Indexada"=$7,"Activo"=$8
-		WHERE "Senal_Id"=$9`,
+		UPDATE ssfv.tbl_senales
+		SET tipovar_id=$1, unidad_id=$2, nombre=$3, descripcion=$4,
+		    tipo_valor=$5, codigo_senal=$6, es_indexada=$7, activo=$8
+		WHERE senal_id=$9`,
 		body.TipoVarID, body.UnidadID, body.Nombre, body.Descripcion,
 		body.TipoValor, body.CodigoSenal, body.EsIndexada, body.Activo, id)
 	if err != nil {
@@ -693,7 +694,7 @@ func (h *SSFVHandler) updateSenal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SSFVHandler) deleteSenal(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, `DELETE FROM ssfv."Tbl_Senales" WHERE "Senal_Id"=$1`)
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_senales WHERE senal_id=$1`)
 }
 
 // ─── Asignaciones (Señales x Equipo) ─────────────────────────────────────────
@@ -709,19 +710,19 @@ func (h *SSFVHandler) listAsignaciones(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	query := `
-		SELECT sxe."EquiSenal_Id",sxe."Senal_Id",sxe."Equipo_Id",
-		       sxe."Indice_Canal",sxe."Nombre_Instancia",sxe."Activo",sxe."Fecha_Alta",
-		       s."Nombre" AS senal_nombre, s."Codigo_Senal",
-		       e."Nombre_Equipo", e."Nombre_Topic"
-		FROM ssfv."Tbl_Senales_x_Equipo" sxe
-		JOIN ssfv."Tbl_Senales" s ON s."Senal_Id" = sxe."Senal_Id"
-		JOIN ssfv."Tbl_Equipo" e ON e."Equipo_Id" = sxe."Equipo_Id"`
+		SELECT sxe.equisenal_id, sxe.senal_id, sxe.equipo_id,
+		       sxe.indice_canal, sxe.nombre_instancia, sxe.activo, sxe.fecha_alta,
+		       s.nombre AS senal_nombre, s.codigo_senal,
+		       e.nombre_equipo, e.nombre_topic
+		FROM ssfv.tbl_senales_x_equipo sxe
+		JOIN ssfv.tbl_senales s ON s.senal_id = sxe.senal_id
+		JOIN ssfv.tbl_equipo e ON e.equipo_id = sxe.equipo_id`
 	args := []any{}
 	if equipoID != "" {
-		query += ` WHERE sxe."Equipo_Id"=$1`
+		query += ` WHERE sxe.equipo_id=$1`
 		args = append(args, equipoID)
 	}
-	query += ` ORDER BY sxe."EquiSenal_Id"`
+	query += ` ORDER BY sxe.equisenal_id`
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
@@ -779,10 +780,10 @@ func (h *SSFVHandler) createAsignacion(w http.ResponseWriter, r *http.Request) {
 
 	var id int
 	err := pool.QueryRow(ctx, `
-		INSERT INTO ssfv."Tbl_Senales_x_Equipo"
-		    ("Senal_Id","Equipo_Id","Indice_Canal","Nombre_Instancia","Activo")
+		INSERT INTO ssfv.tbl_senales_x_equipo
+		    (senal_id, equipo_id, indice_canal, nombre_instancia, activo)
 		VALUES ($1,$2,$3,$4,$5)
-		RETURNING "EquiSenal_Id"`,
+		RETURNING equisenal_id`,
 		body.SenalID, body.EquipoID, body.IndiceCanal,
 		body.NombreInstancia, body.Activo,
 	).Scan(&id)
@@ -816,10 +817,10 @@ func (h *SSFVHandler) updateAsignacion(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	_, err := pool.Exec(ctx, `
-		UPDATE ssfv."Tbl_Senales_x_Equipo"
-		SET "Senal_Id"=$1,"Equipo_Id"=$2,"Indice_Canal"=$3,
-		    "Nombre_Instancia"=$4,"Activo"=$5
-		WHERE "EquiSenal_Id"=$6`,
+		UPDATE ssfv.tbl_senales_x_equipo
+		SET senal_id=$1, equipo_id=$2, indice_canal=$3,
+		    nombre_instancia=$4, activo=$5
+		WHERE equisenal_id=$6`,
 		body.SenalID, body.EquipoID, body.IndiceCanal,
 		body.NombreInstancia, body.Activo, id)
 	if err != nil {
@@ -832,7 +833,7 @@ func (h *SSFVHandler) updateAsignacion(w http.ResponseWriter, r *http.Request) {
 
 func (h *SSFVHandler) deleteAsignacion(w http.ResponseWriter, r *http.Request) {
 	h.triggerReload()
-	h.deleteRow(w, r, `DELETE FROM ssfv."Tbl_Senales_x_Equipo" WHERE "EquiSenal_Id"=$1`)
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_senales_x_equipo WHERE equisenal_id=$1`)
 }
 
 // ─── Fronteras Comerciales ────────────────────────────────────────────────────
@@ -847,12 +848,12 @@ func (h *SSFVHandler) listFronteras(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	rows, err := pool.Query(ctx, `
-		SELECT f."Frontera_Id",f."Planta_Id",f."Codigo_NIE",f."Nombre",
-		       f."Tipo_Conexion",f."Activo",f."Fecha_Creacion",
-		       p."Nombre" AS planta_nombre
-		FROM ssfv."Tbl_Frontera_Comercial" f
-		JOIN ssfv."Tbl_Planta" p ON p."Planta_Id" = f."Planta_Id"
-		ORDER BY f."Frontera_Id"`)
+		SELECT f.frontera_id, f.planta_id, f.codigo_nie, f.nombre,
+		       f.tipo_conexion, f.activo, f.fecha_creacion,
+		       p.nombre AS planta_nombre
+		FROM ssfv.tbl_frontera_comercial f
+		JOIN ssfv.tbl_planta p ON p.planta_id = f.planta_id
+		ORDER BY f.frontera_id`)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -905,10 +906,10 @@ func (h *SSFVHandler) createFrontera(w http.ResponseWriter, r *http.Request) {
 
 	var id int
 	err := pool.QueryRow(ctx, `
-		INSERT INTO ssfv."Tbl_Frontera_Comercial"
-		    ("Planta_Id","Codigo_NIE","Nombre","Tipo_Conexion","Activo")
+		INSERT INTO ssfv.tbl_frontera_comercial
+		    (planta_id, codigo_nie, nombre, tipo_conexion, activo)
 		VALUES ($1,$2,$3,$4,$5)
-		RETURNING "Frontera_Id"`,
+		RETURNING frontera_id`,
 		body.PlantaID, body.CodigoNIE, body.Nombre, body.TipoConexion, body.Activo,
 	).Scan(&id)
 	if err != nil {
@@ -940,10 +941,10 @@ func (h *SSFVHandler) updateFrontera(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	_, err := pool.Exec(ctx, `
-		UPDATE ssfv."Tbl_Frontera_Comercial"
-		SET "Planta_Id"=$1,"Codigo_NIE"=$2,"Nombre"=$3,
-		    "Tipo_Conexion"=$4,"Activo"=$5,"Fecha_Modif"=NOW()
-		WHERE "Frontera_Id"=$6`,
+		UPDATE ssfv.tbl_frontera_comercial
+		SET planta_id=$1, codigo_nie=$2, nombre=$3,
+		    tipo_conexion=$4, activo=$5, fecha_modif=NOW()
+		WHERE frontera_id=$6`,
 		body.PlantaID, body.CodigoNIE, body.Nombre, body.TipoConexion, body.Activo, id)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
@@ -953,43 +954,35 @@ func (h *SSFVHandler) updateFrontera(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SSFVHandler) deleteFrontera(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, `DELETE FROM ssfv."Tbl_Frontera_Comercial" WHERE "Frontera_Id"=$1`)
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_frontera_comercial WHERE frontera_id=$1`)
 }
 
 // ─── Catálogos de soporte ─────────────────────────────────────────────────────
 
 func (h *SSFVHandler) listTipoEquipo(w http.ResponseWriter, r *http.Request) {
-	h.queryJSON(w, r, `SELECT "Tipo_Id","Nombre","Descripcion","Activo" FROM ssfv."Tbl_Tipo_Equipo" ORDER BY "Tipo_Id"`)
+	h.queryJSON(w, r, `SELECT tipo_id, nombre, descripcion, activo FROM ssfv.tbl_tipo_equipo ORDER BY tipo_id`)
 }
 
 func (h *SSFVHandler) listTipoVariable(w http.ResponseWriter, r *http.Request) {
-	h.queryJSON(w, r, `SELECT "TipoVar_Id","Nombre","Descripcion","Activo" FROM ssfv."Tbl_Tipo_Variable" ORDER BY "TipoVar_Id"`)
+	h.queryJSON(w, r, `SELECT tipovar_id, nombre, descripcion, activo FROM ssfv.tbl_tipo_variable ORDER BY tipovar_id`)
 }
 
 func (h *SSFVHandler) listUnidades(w http.ResponseWriter, r *http.Request) {
-	h.queryJSON(w, r, `SELECT "Unidad_Id","Simbolo","Nombre","Magnitud","Activo" FROM ssfv."Tbl_Unidades" ORDER BY "Unidad_Id"`)
+	h.queryJSON(w, r, `SELECT unidad_id, simbolo, nombre, magnitud, activo FROM ssfv.tbl_unidades ORDER BY unidad_id`)
 }
 
 // ─── Vistas ───────────────────────────────────────────────────────────────────
 
 func (h *SSFVHandler) vistaSeñalesContexto(w http.ResponseWriter, r *http.Request) {
-	h.queryJSON(w, r, `SELECT * FROM ssfv.v_Senales_Contexto ORDER BY "EquiSenal_Id"`)
+	h.queryJSON(w, r, `SELECT * FROM ssfv.v_senales_contexto ORDER BY equisenal_id`)
 }
 
 func (h *SSFVHandler) vistaUltimasLecturas(w http.ResponseWriter, r *http.Request) {
-	h.queryJSON(w, r, `SELECT * FROM ssfv.v_Ultimas_Lecturas ORDER BY "EquiSenal_Id"`)
+	h.queryJSON(w, r, `SELECT * FROM ssfv.v_ultimas_lecturas ORDER BY equisenal_id`)
 }
 
 func (h *SSFVHandler) vistaAlarmasActivas(w http.ResponseWriter, r *http.Request) {
-	h.queryJSON(w, r, `SELECT * FROM ssfv.v_Alarmas_Activas`)
-}
-
-func (h *SSFVHandler) vistaRaw(w http.ResponseWriter, r *http.Request) {
-	limit := r.URL.Query().Get("limit")
-	if limit == "" {
-		limit = "100"
-	}
-	h.queryJSON(w, r, `SELECT ts,signal_path,signal,value,quality,tags FROM ssfv.signals_raw ORDER BY ts DESC LIMIT `+limit)
+	h.queryJSON(w, r, `SELECT * FROM ssfv.v_alarmas_activas`)
 }
 
 // ─── Alarmas ─────────────────────────────────────────────────────────────────
@@ -1005,23 +998,23 @@ func (h *SSFVHandler) listAlarmas(w http.ResponseWriter, r *http.Request) {
 
 	equipoID := r.URL.Query().Get("equipo_id")
 	query := `
-		SELECT a."Alarma_Id", a."EquiSenal_Id", a."Ts_Inicio", a."Ts_Fin",
-		       a."Tipo_Alarma", a."Severidad", a."Descripcion", a."Activa",
-		       e."Nombre_Equipo", e."Nombre_Topic",
-		       p."Nombre" AS planta_nombre,
-		       sxe."Nombre_Instancia"
-		FROM ssfv."Tbl_Alarmas" a
-		JOIN ssfv."Tbl_Senales_x_Equipo" sxe ON sxe."EquiSenal_Id" = a."EquiSenal_Id"
-		JOIN ssfv."Tbl_Equipo"           e   ON e."Equipo_Id"       = sxe."Equipo_Id"
-		JOIN ssfv."Tbl_Planta"           p   ON p."Planta_Id"       = e."Planta_Id"`
+		SELECT a.alarma_id, a.equisenal_id, a.ts_inicio, a.ts_fin,
+		       a.tipo_alarma, a.severidad, a.descripcion, a.activa,
+		       e.nombre_equipo, e.nombre_topic,
+		       p.nombre AS planta_nombre,
+		       sxe.nombre_instancia
+		FROM ssfv.tbl_alarmas a
+		JOIN ssfv.tbl_senales_x_equipo sxe ON sxe.equisenal_id = a.equisenal_id
+		JOIN ssfv.tbl_equipo           e   ON e.equipo_id      = sxe.equipo_id
+		JOIN ssfv.tbl_planta           p   ON p.planta_id      = e.planta_id`
 	args := []any{}
 	if equipoID != "" {
-		query += ` WHERE e."Equipo_Id"=$1`
+		query += ` WHERE e.equipo_id=$1`
 		args = append(args, equipoID)
 	} else {
-		query += ` WHERE a."Activa" = TRUE`
+		query += ` WHERE a.activa = TRUE`
 	}
-	query += ` ORDER BY a."Ts_Inicio" DESC LIMIT 200`
+	query += ` ORDER BY a.ts_inicio DESC LIMIT 200`
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {

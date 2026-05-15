@@ -1,5 +1,5 @@
 -- Migration 009 rollback: remove EPM Sede 30 plant and all its data.
--- Order: Tbl_Valores → Tbl_Alarmas → Tbl_Senales_x_Equipo → Tbl_Equipo → Tbl_Planta → new signals.
+-- Order: tbl_valores → tbl_alarmas → tbl_senales_x_equipo → tbl_equipo → tbl_planta → new signals.
 
 DO $$
 DECLARE
@@ -7,8 +7,8 @@ DECLARE
     sx_ids INT[];
 BEGIN
     SELECT ARRAY(
-        SELECT "Equipo_Id" FROM ssfv."Tbl_Equipo"
-        WHERE "Nombre_Topic" IN (
+        SELECT equipo_id FROM ssfv.tbl_equipo
+        WHERE nombre_topic IN (
             'EPM/SSFV/EPM/Sede30/INV_1',
             'EPM/SSFV/EPM/Sede30/MED_1',
             'EPM/SSFV/EPM/Sede30/EST_1',
@@ -17,16 +17,16 @@ BEGIN
     ) INTO eq_ids;
 
     SELECT ARRAY(
-        SELECT "EquiSenal_Id" FROM ssfv."Tbl_Senales_x_Equipo"
-        WHERE "Equipo_Id" = ANY(eq_ids)
+        SELECT equisenal_id FROM ssfv.tbl_senales_x_equipo
+        WHERE equipo_id = ANY(eq_ids)
     ) INTO sx_ids;
 
-    DELETE FROM ssfv."Tbl_Valores"  WHERE "EquiSenal_Id" = ANY(sx_ids);
-    DELETE FROM ssfv."Tbl_Alarmas"  WHERE "EquiSenal_Id" = ANY(sx_ids);
-    DELETE FROM ssfv."Tbl_Senales_x_Equipo" WHERE "EquiSenal_Id" = ANY(sx_ids);
-    DELETE FROM ssfv."Tbl_Equipo"   WHERE "Equipo_Id"    = ANY(eq_ids);
-    DELETE FROM ssfv."Tbl_Planta"   WHERE "Broker_Base"  = 'EPM/SSFV/EPM/Sede30';
+    DELETE FROM ssfv.tbl_valores          WHERE equisenal_id = ANY(sx_ids);
+    DELETE FROM ssfv.tbl_alarmas          WHERE equisenal_id = ANY(sx_ids);
+    DELETE FROM ssfv.tbl_senales_x_equipo WHERE equisenal_id = ANY(sx_ids);
+    DELETE FROM ssfv.tbl_equipo           WHERE equipo_id    = ANY(eq_ids);
+    DELETE FROM ssfv.tbl_planta           WHERE broker_base  = 'EPM/SSFV/EPM/Sede30';
 
-    DELETE FROM ssfv."Tbl_Senales"
-    WHERE "Codigo_Senal" IN ('UB','UC','AP_A','AP_B','AP_C','RP_A','RP_B','RP_C');
+    DELETE FROM ssfv.tbl_senales
+    WHERE codigo_senal IN ('UB','UC','AP_A','AP_B','AP_C','RP_A','RP_B','RP_C');
 END $$;

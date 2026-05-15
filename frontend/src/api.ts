@@ -97,6 +97,7 @@ export interface TSDBBackendStatus {
   bytesSent: number
   circuitOpen: boolean
   lastError?: string
+  skippedRows?: number // unmapped signals dropped (ssfv only)
 }
 
 export interface TSDBStatus {
@@ -165,6 +166,7 @@ export interface SSFVStatus {
   error_rate?: number
   circuit_open?: boolean
   last_error?: string
+  skipped_rows?: number
 }
 
 export interface SSFVPlanta {

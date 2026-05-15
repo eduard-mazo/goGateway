@@ -13,7 +13,7 @@ func TestDedupBatch(t *testing.T) {
 	pt := func(path string, ts time.Time, v float64) DataPoint {
 		return DataPoint{
 			Measurement: "test",
-			Tags:        map[string]string{"path": path},
+			Tags:        map[string]string{"signal_path": path},
 			Fields:      map[string]float64{"value": v},
 			Timestamp:   ts,
 		}

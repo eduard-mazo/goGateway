@@ -1,6 +1,6 @@
 -- Migration 009: Seed EPM Sede 30 plant catalog from uns_signals.json
 -- Covers: Planta, 4 Equipos (INV_1, MED_1, EST_1, FRONTERA_20949722),
--- and all Tbl_Senales_x_Equipo instances.
+-- and all tbl_senales_x_equipo instances.
 -- Idempotent: ON CONFLICT DO NOTHING + WHERE NOT EXISTS guards throughout.
 
 DO $$
@@ -36,133 +36,129 @@ DECLARE
 BEGIN
 
     -- ── Lookup tipo_equipo ────────────────────────────────────────────────────
-    SELECT "Tipo_Id" INTO t_inv FROM ssfv."Tbl_Tipo_Equipo" WHERE "Nombre" = 'Inversor';
-    SELECT "Tipo_Id" INTO t_med FROM ssfv."Tbl_Tipo_Equipo" WHERE "Nombre" = 'Medidor';
-    SELECT "Tipo_Id" INTO t_est FROM ssfv."Tbl_Tipo_Equipo" WHERE "Nombre" = 'Estación Meteorológica';
-    SELECT "Tipo_Id" INTO t_fro FROM ssfv."Tbl_Tipo_Equipo" WHERE "Nombre" = 'Frontera Comercial';
+    SELECT tipo_id INTO t_inv FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Inversor';
+    SELECT tipo_id INTO t_med FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Medidor';
+    SELECT tipo_id INTO t_est FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Estación Meteorológica';
+    SELECT tipo_id INTO t_fro FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Frontera Comercial';
 
     -- ── Lookup tipo_variable ──────────────────────────────────────────────────
-    SELECT "TipoVar_Id" INTO v_cac FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Corriente AC';
-    SELECT "TipoVar_Id" INTO v_vac FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Voltage AC';
-    SELECT "TipoVar_Id" INTO v_pot FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Potencia';
-    SELECT "TipoVar_Id" INTO v_pro FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Proceso';
-    SELECT "TipoVar_Id" INTO v_ene FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Energía';
-    SELECT "TipoVar_Id" INTO v_tem FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Temperatura';
-    SELECT "TipoVar_Id" INTO v_est FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Estado';
-    SELECT "TipoVar_Id" INTO v_cdc FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Corriente DC';
-    SELECT "TipoVar_Id" INTO v_vdc FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Voltage DC';
-    SELECT "TipoVar_Id" INTO v_ala FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Alarma';
-    SELECT "TipoVar_Id" INTO v_irr FROM ssfv."Tbl_Tipo_Variable" WHERE "Nombre" = 'Irradiancia';
+    SELECT tipovar_id INTO v_cac FROM ssfv.tbl_tipo_variable WHERE nombre = 'Corriente AC';
+    SELECT tipovar_id INTO v_vac FROM ssfv.tbl_tipo_variable WHERE nombre = 'Voltage AC';
+    SELECT tipovar_id INTO v_pot FROM ssfv.tbl_tipo_variable WHERE nombre = 'Potencia';
+    SELECT tipovar_id INTO v_pro FROM ssfv.tbl_tipo_variable WHERE nombre = 'Proceso';
+    SELECT tipovar_id INTO v_ene FROM ssfv.tbl_tipo_variable WHERE nombre = 'Energía';
+    SELECT tipovar_id INTO v_tem FROM ssfv.tbl_tipo_variable WHERE nombre = 'Temperatura';
+    SELECT tipovar_id INTO v_est FROM ssfv.tbl_tipo_variable WHERE nombre = 'Estado';
+    SELECT tipovar_id INTO v_cdc FROM ssfv.tbl_tipo_variable WHERE nombre = 'Corriente DC';
+    SELECT tipovar_id INTO v_vdc FROM ssfv.tbl_tipo_variable WHERE nombre = 'Voltage DC';
+    SELECT tipovar_id INTO v_ala FROM ssfv.tbl_tipo_variable WHERE nombre = 'Alarma';
+    SELECT tipovar_id INTO v_irr FROM ssfv.tbl_tipo_variable WHERE nombre = 'Irradiancia';
 
     -- ── Lookup unidades ───────────────────────────────────────────────────────
-    SELECT "Unidad_Id" INTO u_A     FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'A';
-    SELECT "Unidad_Id" INTO u_V     FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'V';
-    SELECT "Unidad_Id" INTO u_kW    FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'kW';
-    SELECT "Unidad_Id" INTO u_kVar  FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'kVar';
-    SELECT "Unidad_Id" INTO u_kVA   FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'kVA';
-    SELECT "Unidad_Id" INTO u_pct   FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = '%';
-    SELECT "Unidad_Id" INTO u_Hz    FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'Hz';
-    SELECT "Unidad_Id" INTO u_kWh   FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'kWh';
-    SELECT "Unidad_Id" INTO u_kVarh FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'kVarh';
-    SELECT "Unidad_Id" INTO u_C     FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = '°C';
-    SELECT "Unidad_Id" INTO u_MOhm  FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'MΩ';
-    SELECT "Unidad_Id" INTO u_adim  FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'Adimensional';
-    SELECT "Unidad_Id" INTO u_Wm2   FROM ssfv."Tbl_Unidades" WHERE "Simbolo" = 'W/m2';
+    SELECT unidad_id INTO u_A     FROM ssfv.tbl_unidades WHERE simbolo = 'A';
+    SELECT unidad_id INTO u_V     FROM ssfv.tbl_unidades WHERE simbolo = 'V';
+    SELECT unidad_id INTO u_kW    FROM ssfv.tbl_unidades WHERE simbolo = 'kW';
+    SELECT unidad_id INTO u_kVar  FROM ssfv.tbl_unidades WHERE simbolo = 'kVar';
+    SELECT unidad_id INTO u_kVA   FROM ssfv.tbl_unidades WHERE simbolo = 'kVA';
+    SELECT unidad_id INTO u_pct   FROM ssfv.tbl_unidades WHERE simbolo = '%';
+    SELECT unidad_id INTO u_Hz    FROM ssfv.tbl_unidades WHERE simbolo = 'Hz';
+    SELECT unidad_id INTO u_kWh   FROM ssfv.tbl_unidades WHERE simbolo = 'kWh';
+    SELECT unidad_id INTO u_kVarh FROM ssfv.tbl_unidades WHERE simbolo = 'kVarh';
+    SELECT unidad_id INTO u_C     FROM ssfv.tbl_unidades WHERE simbolo = '°C';
+    SELECT unidad_id INTO u_MOhm  FROM ssfv.tbl_unidades WHERE simbolo = 'MΩ';
+    SELECT unidad_id INTO u_adim  FROM ssfv.tbl_unidades WHERE simbolo = 'Adimensional';
+    SELECT unidad_id INTO u_Wm2   FROM ssfv.tbl_unidades WHERE simbolo = 'W/m2';
 
-    -- ── Señales nuevas (UB, UC not in 007/008; per-phase powers for MED_1) ───
-    INSERT INTO ssfv."Tbl_Senales"
-        ("TipoVar_Id","Unidad_Id","Nombre","Tipo_Valor","Codigo_Senal","Es_Indexada","Es_Alarma","Activo")
+    -- ── Señales nuevas (UB, UC, per-phase powers) ─────────────────────────────
+    INSERT INTO ssfv.tbl_senales
+        (tipovar_id, unidad_id, nombre, tipo_valor, codigo_senal, es_indexada, activo)
     VALUES
-        (v_vac, u_V,    'Voltaje Fase B',           'Instantaneo', 'UB',   false, false, true),
-        (v_vac, u_V,    'Voltaje Fase C',           'Instantaneo', 'UC',   false, false, true),
-        (v_pot, u_kW,   'Potencia Activa Fase A',   'Instantaneo', 'AP_A', false, false, true),
-        (v_pot, u_kW,   'Potencia Activa Fase B',   'Instantaneo', 'AP_B', false, false, true),
-        (v_pot, u_kW,   'Potencia Activa Fase C',   'Instantaneo', 'AP_C', false, false, true),
-        (v_pot, u_kVar, 'Potencia Reactiva Fase A', 'Instantaneo', 'RP_A', false, false, true),
-        (v_pot, u_kVar, 'Potencia Reactiva Fase B', 'Instantaneo', 'RP_B', false, false, true),
-        (v_pot, u_kVar, 'Potencia Reactiva Fase C', 'Instantaneo', 'RP_C', false, false, true)
-    ON CONFLICT ("Codigo_Senal", "TipoVar_Id") DO NOTHING;
+        (v_vac, u_V,    'Voltaje Fase B',           'Instantaneo', 'UB',   false, true),
+        (v_vac, u_V,    'Voltaje Fase C',           'Instantaneo', 'UC',   false, true),
+        (v_pot, u_kW,   'Potencia Activa Fase A',   'Instantaneo', 'AP_A', false, true),
+        (v_pot, u_kW,   'Potencia Activa Fase B',   'Instantaneo', 'AP_B', false, true),
+        (v_pot, u_kW,   'Potencia Activa Fase C',   'Instantaneo', 'AP_C', false, true),
+        (v_pot, u_kVar, 'Potencia Reactiva Fase A', 'Instantaneo', 'RP_A', false, true),
+        (v_pot, u_kVar, 'Potencia Reactiva Fase B', 'Instantaneo', 'RP_B', false, true),
+        (v_pot, u_kVar, 'Potencia Reactiva Fase C', 'Instantaneo', 'RP_C', false, true)
+    ON CONFLICT (codigo_senal, tipovar_id) DO NOTHING;
 
-    -- ── Lookup señal IDs (existing catalog + newly inserted above) ────────────
-    SELECT "Senal_Id" INTO s_IA    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='IA'    AND "TipoVar_Id"=v_cac;
-    SELECT "Senal_Id" INTO s_IB    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='IB'    AND "TipoVar_Id"=v_cac;
-    SELECT "Senal_Id" INTO s_IC    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='IC'    AND "TipoVar_Id"=v_cac;
-    SELECT "Senal_Id" INTO s_UAB   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='UAB'   AND "TipoVar_Id"=v_vac;
-    SELECT "Senal_Id" INTO s_UBC   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='UBC'   AND "TipoVar_Id"=v_vac;
-    SELECT "Senal_Id" INTO s_UCA   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='UCA'   AND "TipoVar_Id"=v_vac;
-    SELECT "Senal_Id" INTO s_UA    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='UA'    AND "TipoVar_Id"=v_vac;
-    SELECT "Senal_Id" INTO s_UB    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='UB'    AND "TipoVar_Id"=v_vac;
-    SELECT "Senal_Id" INTO s_UC    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='UC'    AND "TipoVar_Id"=v_vac;
-    SELECT "Senal_Id" INTO s_AP    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='AP'    AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_RP    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='RP'    AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_SP    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='SP'    AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_FP    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='FP'    AND "TipoVar_Id"=v_pro;
-    SELECT "Senal_Id" INTO s_EF    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='EF'    AND "TipoVar_Id"=v_pro;
-    SELECT "Senal_Id" INTO s_FR    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='FR'    AND "TipoVar_Id"=v_pro;
-    SELECT "Senal_Id" INTO s_ET    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='ET'    AND "TipoVar_Id"=v_ene;
-    SELECT "Senal_Id" INTO s_IP    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='IP'    AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_T     FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='T'     AND "TipoVar_Id"=v_tem;
-    SELECT "Senal_Id" INTO s_IR    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='IR'    AND "TipoVar_Id"=v_pro;
-    SELECT "Senal_Id" INTO s_OS    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='OS'    AND "TipoVar_Id"=v_est;
-    SELECT "Senal_Id" INTO s_OSV   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='OSV'   AND "TipoVar_Id"=v_est;
-    SELECT "Senal_Id" INTO s_IDCx  FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='IDC_x' AND "TipoVar_Id"=v_cdc;
-    SELECT "Senal_Id" INTO s_VDCx  FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='VDC_x' AND "TipoVar_Id"=v_vdc;
-    SELECT "Senal_Id" INTO s_EFx   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='EF_x'  AND "TipoVar_Id"=v_est;
-    SELECT "Senal_Id" INTO s_EVx   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='EV_x'  AND "TipoVar_Id"=v_est;
-    SELECT "Senal_Id" INTO s_ALx   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='AL_x'  AND "TipoVar_Id"=v_ala;
-    SELECT "Senal_Id" INTO s_ALCOM FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='AL_COM' AND "TipoVar_Id"=v_ala;
-    SELECT "Senal_Id" INTO s_RD    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='RD'    AND "TipoVar_Id"=v_irr;
-    SELECT "Senal_Id" INTO s_TA    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='TA'    AND "TipoVar_Id"=v_tem;
-    SELECT "Senal_Id" INTO s_TP    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='TP'    AND "TipoVar_Id"=v_tem;
-    SELECT "Senal_Id" INTO s_API   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='API'   AND "TipoVar_Id"=v_ene;
-    SELECT "Senal_Id" INTO s_AN    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='AN'    AND "TipoVar_Id"=v_ene;
-    SELECT "Senal_Id" INTO s_QPZ   FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='QPZ'   AND "TipoVar_Id"=v_ene;
-    SELECT "Senal_Id" INTO s_QN    FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='QN'    AND "TipoVar_Id"=v_ene;
-    SELECT "Senal_Id" INTO s_AP_A  FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='AP_A'  AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_AP_B  FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='AP_B'  AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_AP_C  FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='AP_C'  AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_RP_A  FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='RP_A'  AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_RP_B  FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='RP_B'  AND "TipoVar_Id"=v_pot;
-    SELECT "Senal_Id" INTO s_RP_C  FROM ssfv."Tbl_Senales" WHERE "Codigo_Senal"='RP_C'  AND "TipoVar_Id"=v_pot;
+    -- ── Lookup señal IDs ──────────────────────────────────────────────────────
+    SELECT senal_id INTO s_IA    FROM ssfv.tbl_senales WHERE codigo_senal='IA'    AND tipovar_id=v_cac;
+    SELECT senal_id INTO s_IB    FROM ssfv.tbl_senales WHERE codigo_senal='IB'    AND tipovar_id=v_cac;
+    SELECT senal_id INTO s_IC    FROM ssfv.tbl_senales WHERE codigo_senal='IC'    AND tipovar_id=v_cac;
+    SELECT senal_id INTO s_UAB   FROM ssfv.tbl_senales WHERE codigo_senal='UAB'   AND tipovar_id=v_vac;
+    SELECT senal_id INTO s_UBC   FROM ssfv.tbl_senales WHERE codigo_senal='UBC'   AND tipovar_id=v_vac;
+    SELECT senal_id INTO s_UCA   FROM ssfv.tbl_senales WHERE codigo_senal='UCA'   AND tipovar_id=v_vac;
+    SELECT senal_id INTO s_UA    FROM ssfv.tbl_senales WHERE codigo_senal='UA'    AND tipovar_id=v_vac;
+    SELECT senal_id INTO s_UB    FROM ssfv.tbl_senales WHERE codigo_senal='UB'    AND tipovar_id=v_vac;
+    SELECT senal_id INTO s_UC    FROM ssfv.tbl_senales WHERE codigo_senal='UC'    AND tipovar_id=v_vac;
+    SELECT senal_id INTO s_AP    FROM ssfv.tbl_senales WHERE codigo_senal='AP'    AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_RP    FROM ssfv.tbl_senales WHERE codigo_senal='RP'    AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_SP    FROM ssfv.tbl_senales WHERE codigo_senal='SP'    AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_FP    FROM ssfv.tbl_senales WHERE codigo_senal='FP'    AND tipovar_id=v_pro;
+    SELECT senal_id INTO s_EF    FROM ssfv.tbl_senales WHERE codigo_senal='EF'    AND tipovar_id=v_pro;
+    SELECT senal_id INTO s_FR    FROM ssfv.tbl_senales WHERE codigo_senal='FR'    AND tipovar_id=v_pro;
+    SELECT senal_id INTO s_ET    FROM ssfv.tbl_senales WHERE codigo_senal='ET'    AND tipovar_id=v_ene;
+    SELECT senal_id INTO s_IP    FROM ssfv.tbl_senales WHERE codigo_senal='IP'    AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_T     FROM ssfv.tbl_senales WHERE codigo_senal='T'     AND tipovar_id=v_tem;
+    SELECT senal_id INTO s_IR    FROM ssfv.tbl_senales WHERE codigo_senal='IR'    AND tipovar_id=v_pro;
+    SELECT senal_id INTO s_OS    FROM ssfv.tbl_senales WHERE codigo_senal='OS'    AND tipovar_id=v_est;
+    SELECT senal_id INTO s_OSV   FROM ssfv.tbl_senales WHERE codigo_senal='OSV'   AND tipovar_id=v_est;
+    SELECT senal_id INTO s_IDCx  FROM ssfv.tbl_senales WHERE codigo_senal='IDC_x' AND tipovar_id=v_cdc;
+    SELECT senal_id INTO s_VDCx  FROM ssfv.tbl_senales WHERE codigo_senal='VDC_x' AND tipovar_id=v_vdc;
+    SELECT senal_id INTO s_EFx   FROM ssfv.tbl_senales WHERE codigo_senal='EF_x'  AND tipovar_id=v_est;
+    SELECT senal_id INTO s_EVx   FROM ssfv.tbl_senales WHERE codigo_senal='EV_x'  AND tipovar_id=v_est;
+    SELECT senal_id INTO s_ALx   FROM ssfv.tbl_senales WHERE codigo_senal='AL_x'  AND tipovar_id=v_ala;
+    SELECT senal_id INTO s_ALCOM FROM ssfv.tbl_senales WHERE codigo_senal='AL_COM' AND tipovar_id=v_ala;
+    SELECT senal_id INTO s_RD    FROM ssfv.tbl_senales WHERE codigo_senal='RD'    AND tipovar_id=v_irr;
+    SELECT senal_id INTO s_TA    FROM ssfv.tbl_senales WHERE codigo_senal='TA'    AND tipovar_id=v_tem;
+    SELECT senal_id INTO s_TP    FROM ssfv.tbl_senales WHERE codigo_senal='TP'    AND tipovar_id=v_tem;
+    SELECT senal_id INTO s_API   FROM ssfv.tbl_senales WHERE codigo_senal='API'   AND tipovar_id=v_ene;
+    SELECT senal_id INTO s_AN    FROM ssfv.tbl_senales WHERE codigo_senal='AN'    AND tipovar_id=v_ene;
+    SELECT senal_id INTO s_QPZ   FROM ssfv.tbl_senales WHERE codigo_senal='QPZ'   AND tipovar_id=v_ene;
+    SELECT senal_id INTO s_QN    FROM ssfv.tbl_senales WHERE codigo_senal='QN'    AND tipovar_id=v_ene;
+    SELECT senal_id INTO s_AP_A  FROM ssfv.tbl_senales WHERE codigo_senal='AP_A'  AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_AP_B  FROM ssfv.tbl_senales WHERE codigo_senal='AP_B'  AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_AP_C  FROM ssfv.tbl_senales WHERE codigo_senal='AP_C'  AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_RP_A  FROM ssfv.tbl_senales WHERE codigo_senal='RP_A'  AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_RP_B  FROM ssfv.tbl_senales WHERE codigo_senal='RP_B'  AND tipovar_id=v_pot;
+    SELECT senal_id INTO s_RP_C  FROM ssfv.tbl_senales WHERE codigo_senal='RP_C'  AND tipovar_id=v_pot;
 
     -- ── Planta: EPM Sede 30 ───────────────────────────────────────────────────
-    INSERT INTO ssfv."Tbl_Planta" ("Nombre","Ubicacion","Propietario","Broker_Base","Estado")
-    VALUES ('EPM Sede 30','Medellín, Colombia','EPM','EPM/SSFV/EPM/Sede30',1)
-    ON CONFLICT ("Broker_Base") DO NOTHING;
-    SELECT "Planta_Id" INTO p_sede30
-    FROM ssfv."Tbl_Planta" WHERE "Broker_Base"='EPM/SSFV/EPM/Sede30';
+    INSERT INTO ssfv.tbl_planta (nombre, ubicacion, propietario, broker_base, estado)
+    VALUES ('EPM Sede 30', 'Medellín, Colombia', 'EPM', 'EPM/SSFV/EPM/Sede30', 1)
+    ON CONFLICT (broker_base) DO NOTHING;
+    SELECT planta_id INTO p_sede30
+    FROM ssfv.tbl_planta WHERE broker_base = 'EPM/SSFV/EPM/Sede30';
 
     -- ── Equipos ───────────────────────────────────────────────────────────────
-    INSERT INTO ssfv."Tbl_Equipo" ("Planta_Id","Tipo_Id","Nombre_Equipo","Nombre_Topic","Estado")
-    VALUES (p_sede30,t_inv,'Inversor 1','EPM/SSFV/EPM/Sede30/INV_1',1)
-    ON CONFLICT ("Nombre_Topic") DO NOTHING;
-    SELECT "Equipo_Id" INTO e_inv1
-    FROM ssfv."Tbl_Equipo" WHERE "Nombre_Topic"='EPM/SSFV/EPM/Sede30/INV_1';
+    INSERT INTO ssfv.tbl_equipo (planta_id, tipo_id, nombre_equipo, nombre_topic, estado)
+    VALUES (p_sede30, t_inv, 'Inversor 1', 'EPM/SSFV/EPM/Sede30/INV_1', 1)
+    ON CONFLICT (nombre_topic) DO NOTHING;
+    SELECT equipo_id INTO e_inv1
+    FROM ssfv.tbl_equipo WHERE nombre_topic = 'EPM/SSFV/EPM/Sede30/INV_1';
 
-    INSERT INTO ssfv."Tbl_Equipo" ("Planta_Id","Tipo_Id","Nombre_Equipo","Nombre_Topic","Estado")
-    VALUES (p_sede30,t_med,'Medidor 1','EPM/SSFV/EPM/Sede30/MED_1',1)
-    ON CONFLICT ("Nombre_Topic") DO NOTHING;
-    SELECT "Equipo_Id" INTO e_med1
-    FROM ssfv."Tbl_Equipo" WHERE "Nombre_Topic"='EPM/SSFV/EPM/Sede30/MED_1';
+    INSERT INTO ssfv.tbl_equipo (planta_id, tipo_id, nombre_equipo, nombre_topic, estado)
+    VALUES (p_sede30, t_med, 'Medidor 1', 'EPM/SSFV/EPM/Sede30/MED_1', 1)
+    ON CONFLICT (nombre_topic) DO NOTHING;
+    SELECT equipo_id INTO e_med1
+    FROM ssfv.tbl_equipo WHERE nombre_topic = 'EPM/SSFV/EPM/Sede30/MED_1';
 
-    INSERT INTO ssfv."Tbl_Equipo" ("Planta_Id","Tipo_Id","Nombre_Equipo","Nombre_Topic","Estado")
-    VALUES (p_sede30,t_est,'Estación Met 1','EPM/SSFV/EPM/Sede30/EST_1',1)
-    ON CONFLICT ("Nombre_Topic") DO NOTHING;
-    SELECT "Equipo_Id" INTO e_est1
-    FROM ssfv."Tbl_Equipo" WHERE "Nombre_Topic"='EPM/SSFV/EPM/Sede30/EST_1';
+    INSERT INTO ssfv.tbl_equipo (planta_id, tipo_id, nombre_equipo, nombre_topic, estado)
+    VALUES (p_sede30, t_est, 'Estación Met 1', 'EPM/SSFV/EPM/Sede30/EST_1', 1)
+    ON CONFLICT (nombre_topic) DO NOTHING;
+    SELECT equipo_id INTO e_est1
+    FROM ssfv.tbl_equipo WHERE nombre_topic = 'EPM/SSFV/EPM/Sede30/EST_1';
 
-    INSERT INTO ssfv."Tbl_Equipo" ("Planta_Id","Tipo_Id","Nombre_Equipo","Nombre_Topic","Estado")
-    VALUES (p_sede30,t_fro,'Frontera 20949722','EPM/SSFV/EPM/Sede30/FRONTERA_20949722',1)
-    ON CONFLICT ("Nombre_Topic") DO NOTHING;
-    SELECT "Equipo_Id" INTO e_fro
-    FROM ssfv."Tbl_Equipo" WHERE "Nombre_Topic"='EPM/SSFV/EPM/Sede30/FRONTERA_20949722';
+    INSERT INTO ssfv.tbl_equipo (planta_id, tipo_id, nombre_equipo, nombre_topic, estado)
+    VALUES (p_sede30, t_fro, 'Frontera 20949722', 'EPM/SSFV/EPM/Sede30/FRONTERA_20949722', 1)
+    ON CONFLICT (nombre_topic) DO NOTHING;
+    SELECT equipo_id INTO e_fro
+    FROM ssfv.tbl_equipo WHERE nombre_topic = 'EPM/SSFV/EPM/Sede30/FRONTERA_20949722';
 
-    -- ── Señales x Equipo: INV_1 ───────────────────────────────────────────────
-    -- Non-indexed signals (Indice_Canal = NULL).
-    -- UNIQUE("Senal_Id","Equipo_Id","Indice_Canal") does not prevent NULL
-    -- duplicates, so guard each row with WHERE NOT EXISTS.
-    INSERT INTO ssfv."Tbl_Senales_x_Equipo"
-        ("Senal_Id","Equipo_Id","Nombre_Instancia","Activo")
+    -- ── Señales x Equipo: INV_1 (non-indexed) ────────────────────────────────
+    INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
     SELECT v.sid, e_inv1, v.inst, TRUE
     FROM (VALUES
         (s_IA,'IA'),(s_IB,'IB'),(s_IC,'IC'),
@@ -174,13 +170,12 @@ BEGIN
         (s_OS,'OS'),(s_OSV,'OSV'),(s_ALCOM,'AL_COM')
     ) AS v(sid, inst)
     WHERE NOT EXISTS (
-        SELECT 1 FROM ssfv."Tbl_Senales_x_Equipo" x
-        WHERE x."Senal_Id"=v.sid AND x."Equipo_Id"=e_inv1 AND x."Indice_Canal" IS NULL
+        SELECT 1 FROM ssfv.tbl_senales_x_equipo x
+        WHERE x.senal_id=v.sid AND x.equipo_id=e_inv1 AND x.indice_canal IS NULL
     );
 
-    -- Indexed signals: IDC, VDC, EF_x, EV_x, AL_x — 3 channels (num_strings=3)
-    INSERT INTO ssfv."Tbl_Senales_x_Equipo"
-        ("Senal_Id","Equipo_Id","Indice_Canal","Nombre_Instancia","Activo")
+    -- INV_1 indexed: IDC, VDC, EF_x, EV_x, AL_x — 3 strings
+    INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, indice_canal, nombre_instancia, activo)
     VALUES
         (s_IDCx, e_inv1, 1, 'IDC_1', TRUE),
         (s_IDCx, e_inv1, 2, 'IDC_2', TRUE),
@@ -200,8 +195,7 @@ BEGIN
     ON CONFLICT ON CONSTRAINT uq_senal_equipo_canal DO NOTHING;
 
     -- ── Señales x Equipo: MED_1 ───────────────────────────────────────────────
-    INSERT INTO ssfv."Tbl_Senales_x_Equipo"
-        ("Senal_Id","Equipo_Id","Nombre_Instancia","Activo")
+    INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
     SELECT v.sid, e_med1, v.inst, TRUE
     FROM (VALUES
         (s_UA,'UA'),(s_UB,'UB'),(s_UC,'UC'),
@@ -213,25 +207,23 @@ BEGIN
         (s_EF,'EF'),(s_ALCOM,'AL_COM')
     ) AS v(sid, inst)
     WHERE NOT EXISTS (
-        SELECT 1 FROM ssfv."Tbl_Senales_x_Equipo" x
-        WHERE x."Senal_Id"=v.sid AND x."Equipo_Id"=e_med1 AND x."Indice_Canal" IS NULL
+        SELECT 1 FROM ssfv.tbl_senales_x_equipo x
+        WHERE x.senal_id=v.sid AND x.equipo_id=e_med1 AND x.indice_canal IS NULL
     );
 
     -- ── Señales x Equipo: EST_1 ───────────────────────────────────────────────
-    INSERT INTO ssfv."Tbl_Senales_x_Equipo"
-        ("Senal_Id","Equipo_Id","Nombre_Instancia","Activo")
+    INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
     SELECT v.sid, e_est1, v.inst, TRUE
     FROM (VALUES
         (s_RD,'RD'),(s_TA,'TA'),(s_TP,'TP'),(s_ALCOM,'AL_COM')
     ) AS v(sid, inst)
     WHERE NOT EXISTS (
-        SELECT 1 FROM ssfv."Tbl_Senales_x_Equipo" x
-        WHERE x."Senal_Id"=v.sid AND x."Equipo_Id"=e_est1 AND x."Indice_Canal" IS NULL
+        SELECT 1 FROM ssfv.tbl_senales_x_equipo x
+        WHERE x.senal_id=v.sid AND x.equipo_id=e_est1 AND x.indice_canal IS NULL
     );
 
     -- ── Señales x Equipo: FRONTERA_20949722 ───────────────────────────────────
-    INSERT INTO ssfv."Tbl_Senales_x_Equipo"
-        ("Senal_Id","Equipo_Id","Nombre_Instancia","Activo")
+    INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
     SELECT v.sid, e_fro, v.inst, TRUE
     FROM (VALUES
         (s_API,'API'),(s_AN,'AN'),(s_QN,'QN'),(s_QPZ,'QPZ'),
@@ -239,8 +231,8 @@ BEGIN
         (s_UA,'UA'),(s_UB,'UB'),(s_UC,'UC')
     ) AS v(sid, inst)
     WHERE NOT EXISTS (
-        SELECT 1 FROM ssfv."Tbl_Senales_x_Equipo" x
-        WHERE x."Senal_Id"=v.sid AND x."Equipo_Id"=e_fro AND x."Indice_Canal" IS NULL
+        SELECT 1 FROM ssfv.tbl_senales_x_equipo x
+        WHERE x.senal_id=v.sid AND x.equipo_id=e_fro AND x.indice_canal IS NULL
     );
 
 END $$;

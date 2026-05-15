@@ -26,11 +26,16 @@ type BackendStatus struct {
 	BytesSent   int64   `json:"bytesSent"`
 	CircuitOpen bool    `json:"circuitOpen"`
 	LastError   string  `json:"lastError,omitempty"`
+	SkippedRows int64   `json:"skippedRows,omitempty"` // unmapped points dropped (ssfv only)
 }
 
 // TSDBWriter is the backend adapter interface.
 type TSDBWriter interface {
 	WriteBatch(ctx context.Context, batch []DataPoint) error
+	// WriteBatchSafe is the idempotent variant used during WAL replay.
+	// Implementations must use ON CONFLICT DO NOTHING (or equivalent) so that
+	// rows written before a crash are silently skipped on replay.
+	WriteBatchSafe(ctx context.Context, batch []DataPoint) error
 	HealthCheck(ctx context.Context) error
 	Status() BackendStatus
 	Name() string

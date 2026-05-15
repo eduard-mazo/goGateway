@@ -27,19 +27,19 @@ func (c *PipelineConfig) applyDefaults() {
 		c.WorkerCount = runtime.NumCPU() * 2
 	}
 	if c.InputBufSize == 0 {
-		c.InputBufSize = 100_000
+		c.InputBufSize = 50_000
 	}
 	if c.BatchSize == 0 {
-		c.BatchSize = 2000
+		c.BatchSize = 500
 	}
 	if c.FlushInterval == 0 {
-		c.FlushInterval = 100 * time.Millisecond
+		c.FlushInterval = 500 * time.Millisecond
 	}
 	if c.MaxRetries == 0 {
-		c.MaxRetries = 5
+		c.MaxRetries = 3
 	}
 	if c.RetryBufSize == 0 {
-		c.RetryBufSize = 20_000
+		c.RetryBufSize = 10_000
 	}
 	if c.WALPath == "" {
 		c.WALPath = "data/wal.bolt"
@@ -249,13 +249,10 @@ func (p *WritePipeline) accumulator() {
 }
 
 // writeToBackend calls WriteBatchSafe during WAL replay (idempotent) or
-// WriteBatch for normal writes. Centralises the replay branch that was
-// duplicated in fanOut and retryWorker.
+// WriteBatch for normal writes.
 func writeToBackend(ctx context.Context, backend TSDBWriter, batch []DataPoint, isReplay bool) error {
 	if isReplay {
-		if ts, ok := backend.(*TimescaleAdapter); ok {
-			return ts.WriteBatchSafe(ctx, batch)
-		}
+		return backend.WriteBatchSafe(ctx, batch)
 	}
 	return backend.WriteBatch(ctx, batch)
 }
@@ -411,9 +408,19 @@ func (p *WritePipeline) healthChecker() {
 }
 
 // replayWAL re-feeds unacked WAL batches on startup after a crash.
+// Collects all entries before sending so the BoltDB write lock is released
+// before the blocking fan-out send — avoids deadlock on large backlogs.
 func (p *WritePipeline) replayWAL() {
-	replayed := 0
+	var entries []WALEntry
 	p.wal.Replay(func(e WALEntry) bool { //nolint:errcheck
+		entries = append(entries, e)
+		return false // ackTracker will ack after successful write
+	})
+	if len(entries) == 0 {
+		return
+	}
+	log.Printf("tsdb: WAL replay %d batches", len(entries))
+	for _, e := range entries {
 		tracker := newAckTracker(p.wal)
 		tracker.Register(e.ID, len(p.backends))
 		select {
@@ -423,13 +430,9 @@ func (p *WritePipeline) replayWAL() {
 			ackTracker: tracker,
 			isReplay:   true,
 		}:
-			replayed++
-		default:
+		case <-p.ctx.Done():
+			return
 		}
-		return false // fan-out will ack
-	})
-	if replayed > 0 {
-		fmt.Printf("tsdb: WAL replay %d batches\n", replayed)
 	}
 }
 

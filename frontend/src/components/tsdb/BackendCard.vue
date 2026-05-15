@@ -39,8 +39,10 @@ function fmtBytes(b: number) {
         class="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
         :class="backend.type === 'victoriametrics'
           ? 'bg-blue-700 text-white'
-          : 'bg-emerald-700 text-white'"
-      >{{ backend.type }}</span>
+          : backend.type === 'ssfv_timescaledb'
+            ? 'bg-amber-600 text-white'
+            : 'bg-emerald-700 text-white'"
+      >{{ backend.type === 'ssfv_timescaledb' ? 'SSFV' : backend.type }}</span>
       <span
         class="shrink-0 h-2 w-2 rounded-full"
         :class="backend.healthy ? 'bg-green-500' : 'bg-red-500'"
@@ -75,6 +77,13 @@ function fmtBytes(b: number) {
       <div class="flex justify-between">
         <dt class="text-muted-foreground">Sent</dt>
         <dd class="font-mono tabular-nums">{{ fmtBytes(backend.bytesSent) }}</dd>
+      </div>
+      <div v-if="backend.skippedRows !== undefined" class="flex justify-between col-span-2">
+        <dt class="text-muted-foreground">Descartados (sin mapeo)</dt>
+        <dd
+          class="font-mono tabular-nums"
+          :class="(backend.skippedRows ?? 0) > 0 ? 'text-orange-400' : ''"
+        >{{ backend.skippedRows ?? 0 }}</dd>
       </div>
     </dl>
 

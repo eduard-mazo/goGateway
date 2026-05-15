@@ -246,17 +246,17 @@ func (h *SparkplugHandler) dispatchMetric(
 	m *sparkplug.Metric,
 	ts time.Time,
 ) {
-	// SSFV intercept: metric names are full UNS paths (e.g. "EPM/SSFV/.../INV_1/AP").
-	// Route to TimescaleDB and skip IEC-104 when the path matches a known SSFV topic.
+	// SSFV intercept: always write to TimescaleDB when the metric matches a known
+	// SSFV topic. Execution continues so an IEC-104 mapping can also be served
+	// (dual routing). Only signals that have a signal_mappings entry reach IEC-104.
+	ssfvHandled := false
 	if h.ssfvHandler != nil {
 		parts := strings.Split(metricName, "/")
 		if len(parts) >= 2 {
 			mqttTopic := strings.Join(parts[:len(parts)-1], "/")
 			code := parts[len(parts)-1]
 			val, _ := m.Float64()
-			if h.ssfvHandler.HandleMetric(mqttTopic, code, val, ts) {
-				return
-			}
+			ssfvHandled = h.ssfvHandler.HandleMetric(mqttTopic, code, val, ts)
 		}
 	}
 
@@ -269,7 +269,10 @@ func (h *SparkplugHandler) dispatchMetric(
 
 	maps := h.cache.LookupByMetric(nodeBase, metricName)
 	if len(maps) == 0 {
-		log.Printf("sparkplug: no mapping for %q in %s", metricName, nodeBase)
+		if !ssfvHandled {
+			// Only log "no mapping" for non-SSFV signals to avoid spam.
+			log.Printf("sparkplug: no mapping for %q in %s", metricName, nodeBase)
+		}
 		return
 	}
 

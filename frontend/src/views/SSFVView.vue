@@ -332,21 +332,18 @@ async function deleteAsign(a: SSFVAsignacion) {
 // ─── Monitoreo ────────────────────────────────────────────────────────────────
 const ultimasLecturas = ref<any[]>([])
 const alarmasActivas  = ref<any[]>([])
-const rawRows         = ref<any[]>([])
-const monTab = ref<'lecturas' | 'alarmas' | 'raw'>('lecturas')
+const monTab = ref<'lecturas' | 'alarmas'>('lecturas')
 const refreshing = ref(false)
 
 async function fetchMonitoreo() {
   refreshing.value = true
   try {
-    const [ul, aa, rr] = await Promise.all([
+    const [ul, aa] = await Promise.all([
       api.get('/ssfv/vista/ultimas-lecturas'),
       api.get('/ssfv/vista/alarmas-activas'),
-      api.get('/ssfv/vista/raw', { params: { limit: 50 } }),
     ])
     ultimasLecturas.value = ul.data
     alarmasActivas.value  = aa.data
-    rawRows.value         = rr.data
   } catch (e: any) {
     toast.error('Error cargando monitoreo: ' + (e.response?.data?.error ?? e.message))
   } finally {
@@ -453,6 +450,13 @@ watch(tab, async (t) => {
           <div class="text-xs text-muted-foreground uppercase tracking-wider">Errores</div>
           <div class="font-mono text-sm" :class="(status?.error_rate ?? 0) > 0 ? 'text-red-400' : ''">
             {{ status?.error_rate ?? '—' }}
+          </div>
+        </div>
+        <div class="rounded-sm border border-border bg-card p-4 space-y-1">
+          <div class="text-xs text-muted-foreground uppercase tracking-wider">Sin mapeo</div>
+          <div class="font-mono text-sm"
+            :class="(status?.skipped_rows ?? 0) > 0 ? 'text-orange-400' : 'text-muted-foreground'">
+            {{ status?.skipped_rows ?? 0 }}
           </div>
         </div>
       </div>
@@ -816,7 +820,6 @@ watch(tab, async (t) => {
           <button v-for="mt in ([
             { id: 'lecturas', label: 'Últimas Lecturas' },
             { id: 'alarmas',  label: 'Alarmas Activas' },
-            { id: 'raw',      label: 'Raw (sin mapear)' },
           ] as const)"
             :key="mt.id"
             class="px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px"
@@ -909,30 +912,6 @@ watch(tab, async (t) => {
         </table>
       </div>
 
-      <!-- Raw rows -->
-      <div v-if="monTab === 'raw'" class="overflow-x-auto rounded-sm border border-border">
-        <table class="w-full text-xs">
-          <thead class="bg-muted/50">
-            <tr>
-              <th class="px-3 py-2 text-left font-medium text-muted-foreground">ts</th>
-              <th class="px-3 py-2 text-left font-medium text-muted-foreground">signal_path</th>
-              <th class="px-3 py-2 text-right font-medium text-muted-foreground">value</th>
-              <th class="px-3 py-2 text-left font-medium text-muted-foreground">quality</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-border">
-            <tr v-for="(row, i) in rawRows" :key="i" class="hover:bg-muted/20">
-              <td class="px-3 py-1.5 font-mono text-muted-foreground">{{ row.ts }}</td>
-              <td class="px-3 py-1.5 font-mono text-xs max-w-xs truncate">{{ row.signal_path }}</td>
-              <td class="px-3 py-1.5 font-mono text-right">{{ row.value }}</td>
-              <td class="px-3 py-1.5">{{ row.quality }}</td>
-            </tr>
-            <tr v-if="!rawRows.length">
-              <td colspan="4" class="px-3 py-6 text-center text-muted-foreground">Sin datos raw</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
     </div>
   </div>
 </template>

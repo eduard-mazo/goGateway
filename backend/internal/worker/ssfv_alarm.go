@@ -14,7 +14,7 @@ type activeAlarm struct {
 	start time.Time
 }
 
-// AlarmManager tracks open SSFV alarms in ssfv.Tbl_Alarmas.
+// AlarmManager tracks open SSFV alarms in ssfv.tbl_alarmas.
 // It keeps an in-memory map of open alarm IDs to avoid duplicate inserts.
 type AlarmManager struct {
 	pool   *pgxpool.Pool
@@ -72,10 +72,10 @@ func (m *AlarmManager) insertAlarma(equisenalID int64, ts time.Time, tipoAlarma,
 	defer cancel()
 	var id int64
 	err := m.pool.QueryRow(ctx, `
-		INSERT INTO ssfv."Tbl_Alarmas"
-		    ("EquiSenal_Id","Ts_Inicio","Tipo_Alarma","Severidad","Activa")
+		INSERT INTO ssfv.tbl_alarmas
+		    (equisenal_id, ts_inicio, tipo_alarma, severidad, activa)
 		VALUES ($1,$2,$3,$4,TRUE)
-		RETURNING "Alarma_Id"`,
+		RETURNING alarma_id`,
 		equisenalID, ts, tipoAlarma, severidad).Scan(&id)
 	if err != nil {
 		log.Printf("alarm: insert equisenal=%d: %v", equisenalID, err)
@@ -88,9 +88,9 @@ func (m *AlarmManager) closeAlarma(alarmaID int64, ts time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := m.pool.Exec(ctx, `
-		UPDATE ssfv."Tbl_Alarmas"
-		SET "Ts_Fin"=$1, "Activa"=FALSE
-		WHERE "Alarma_Id"=$2`,
+		UPDATE ssfv.tbl_alarmas
+		SET ts_fin=$1, activa=FALSE
+		WHERE alarma_id=$2`,
 		ts, alarmaID)
 	if err != nil {
 		log.Printf("alarm: close id=%d: %v", alarmaID, err)

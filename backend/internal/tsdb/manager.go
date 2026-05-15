@@ -72,31 +72,18 @@ func (m *Manager) Reload(cfg models.TSDBConfig) {
 	}
 	if cfg.Backend == "timescaledb" || cfg.Backend == "both" {
 		if cfg.TsDSN != "" {
-			table := cfg.TsTable
-			if table == "" {
-				table = "signals"
-			}
-			initCtx, initCancel := context.WithTimeout(m.parentCtx, 30*time.Second)
-			defer initCancel()
-			a, err := NewTimescaleAdapter(initCtx, TimescaleConfig{DSN: cfg.TsDSN, Table: table})
-			if err != nil {
-				log.Printf("tsdb: timescale init: %v", err)
-			} else {
-				backends = append(backends, a)
-				log.Printf("tsdb: TimescaleDB connected (table=%s)", table)
-			}
-
-			// SSFV adapter — writes to ssfv.Tbl_Valores / Tbl_Alarmas / signals_raw
-			// alongside the generic signals table.
+			// Only the SSFV adapter writes to TimescaleDB. The generic TimescaleAdapter
+			// (public.signals table) is not created: all data goes to ssfv.tbl_valores
+			// via ON CONFLICT DO NOTHING. This eliminates the dual-write path.
 			ssfvCtx, ssfvCancel := context.WithTimeout(m.parentCtx, 30*time.Second)
 			defer ssfvCancel()
 			sa, ssfvErr := NewSSFVAdapter(ssfvCtx, cfg.TsDSN)
 			if ssfvErr != nil {
-				log.Printf("tsdb: ssfv adapter init: %v (schema may not exist yet — apply migration 007)", ssfvErr)
+				log.Printf("tsdb: ssfv adapter init: %v (apply migration 007 to create ssfv schema)", ssfvErr)
 			} else {
 				backends = append(backends, sa)
 				m.ssfvAdapter = sa
-				log.Printf("tsdb: SSFV adapter connected (ssfv schema)")
+				log.Printf("tsdb: SSFV adapter connected → ssfv.tbl_valores (ON CONFLICT DO NOTHING)")
 			}
 		}
 	}

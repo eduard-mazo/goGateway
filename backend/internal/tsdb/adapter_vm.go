@@ -130,6 +130,13 @@ func (v *VMAdapter) Status() BackendStatus {
 	}
 }
 
+// WriteBatchSafe is identical to WriteBatch for VictoriaMetrics: the
+// line-protocol /write endpoint is naturally idempotent (last-write-wins
+// on the same timestamp+label set), so no special handling is needed.
+func (v *VMAdapter) WriteBatchSafe(ctx context.Context, batch []DataPoint) error {
+	return v.WriteBatch(ctx, batch)
+}
+
 func (v *VMAdapter) Close() error {
 	v.client.CloseIdleConnections()
 	return nil

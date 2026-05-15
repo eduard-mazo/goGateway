@@ -51,20 +51,20 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 
 	rows, err := pool.Query(ctx, `
 		SELECT
-		    sxe."EquiSenal_Id",
-		    sxe."Nombre_Instancia",
-		    e."Nombre_Topic",
-		    split_part(p."Broker_Base", '/', 2) AS group_id,
-		    split_part(p."Broker_Base", '/', 4) AS node_id,
-		    reverse(split_part(reverse(e."Nombre_Topic"), '/', 1)) AS device_id,
-		    COALESCE(s."Es_Alarma", FALSE)       AS es_alarma
-		FROM ssfv."Tbl_Senales_x_Equipo" sxe
-		JOIN ssfv."Tbl_Senales"           s   ON s."Senal_Id"   = sxe."Senal_Id"
-		JOIN ssfv."Tbl_Equipo"            e   ON e."Equipo_Id"  = sxe."Equipo_Id"
-		JOIN ssfv."Tbl_Planta"            p   ON p."Planta_Id"  = e."Planta_Id"
-		WHERE sxe."Activo" = TRUE
-		  AND e."Estado"   = 1
-		  AND p."Estado"   = 1`)
+		    sxe.equisenal_id,
+		    sxe.nombre_instancia,
+		    e.nombre_topic,
+		    split_part(p.broker_base, '/', 2) AS group_id,
+		    split_part(p.broker_base, '/', 4) AS node_id,
+		    reverse(split_part(reverse(e.nombre_topic), '/', 1)) AS device_id,
+		    (s.codigo_senal LIKE 'AL%' OR s.codigo_senal LIKE 'EF%' OR s.codigo_senal LIKE 'EV%') AS es_alarma
+		FROM ssfv.tbl_senales_x_equipo sxe
+		JOIN ssfv.tbl_senales           s   ON s.senal_id   = sxe.senal_id
+		JOIN ssfv.tbl_equipo            e   ON e.equipo_id  = sxe.equipo_id
+		JOIN ssfv.tbl_planta            p   ON p.planta_id  = e.planta_id
+		WHERE sxe.activo = TRUE
+		  AND e.estado   = 1
+		  AND p.estado   = 1`)
 	if err != nil {
 		return fmt.Errorf("ssfv mapping reload: %w", err)
 	}
