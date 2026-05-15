@@ -12,5 +12,6 @@ export const router = createRouter({
     { path: '/history', component: () => import('./views/History.vue'), meta: { title: 'Histórico' } },
     { path: '/tsdb', component: () => import('./views/TSDBView.vue'), meta: { title: 'Pipeline TSDB' } },
     { path: '/ssfv', component: () => import('./views/SSFVView.vue'), meta: { title: 'SSFV – Plantas Solares' } },
+    { path: '/broker-monitor', component: () => import('./views/BrokerMonitorView.vue'), meta: { title: 'Monitor Broker' } },
   ],
 })

@@ -117,6 +117,10 @@ func main() {
 	}
 	mqttMgr.SetSSFVHandler(ssfvHandler)
 
+	// Broker monitor — ring buffer + SSE fan-out for the UI monitor view.
+	brokerMon := api.NewBrokerMonitor()
+	mqttMgr.SetMonitorHook(brokerMon.Push)
+
 	if err := mqttMgr.Start(ctx); err != nil {
 		log.Printf("mqtt start: %v", err)
 	}
@@ -155,6 +159,7 @@ func main() {
 		MQTT:      mqttMgr,
 		IEC104:    iecMgr,
 		TSDBMgr:   tsdbMgr,
+		BrokerMon: brokerMon,
 		StartedAt: startedAt,
 	})
 

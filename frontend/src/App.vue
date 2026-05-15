@@ -4,7 +4,7 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Toaster } from '@/components/ui/sonner'
 import {
   Gauge, Radio, Server, Table2, History as HistoryIcon, Cpu,
-  Database, Sun as SunIcon,
+  Database, Sun as SunIcon, Activity,
   PanelLeftClose, PanelLeftOpen, Moon, Sun, Menu, X, WifiOff,
 } from 'lucide-vue-next'
 import { useStatus } from '@/composables/useStatus'
@@ -24,6 +24,7 @@ const nav = [
   { to: '/history', label: t.nav.history, icon: HistoryIcon },
   { to: '/tsdb', label: t.nav.tsdb, icon: Database },
   { to: '/ssfv', label: 'Plantas Solares', icon: SunIcon },
+  { to: '/broker-monitor', label: 'Monitor Broker', icon: Activity },
 ]
 
 const collapsed = ref(false)
