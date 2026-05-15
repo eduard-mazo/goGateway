@@ -6,6 +6,7 @@ import (
 	"log"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -82,6 +83,7 @@ type WritePipeline struct {
 	dlq         *DLQ
 	store       *PointStore
 	inputRate   *rateTracker
+	stopped     atomic.Bool // set before inputCh is closed; guards Push against panic
 	wg          sync.WaitGroup
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -125,8 +127,19 @@ func NewWritePipeline(cfg PipelineConfig) (*WritePipeline, error) {
 	}, nil
 }
 
-// Push enqueues one DataPoint. Non-blocking; returns error if input buffer is full.
-func (p *WritePipeline) Push(pt DataPoint) error {
+// Push enqueues one DataPoint. Non-blocking; returns error if the pipeline is
+// stopped or the input buffer is full.
+func (p *WritePipeline) Push(pt DataPoint) (err error) {
+	if p.stopped.Load() {
+		return fmt.Errorf("tsdb pipeline stopped")
+	}
+	// Recover from a send-on-closed-channel panic that can occur in the narrow
+	// window between the stopped flag being set and inputCh being closed.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("tsdb pipeline stopped")
+		}
+	}()
 	select {
 	case p.inputCh <- pt:
 		p.inputRate.record(1)
@@ -438,6 +451,7 @@ func (p *WritePipeline) replayWAL() {
 
 // Shutdown drains the pipeline and closes all resources.
 func (p *WritePipeline) Shutdown() {
+	p.stopped.Store(true) // must precede close(inputCh) — guards Push against panic
 	p.cancel()
 	close(p.inputCh)
 	p.wg.Wait()

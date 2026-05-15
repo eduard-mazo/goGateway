@@ -143,6 +143,16 @@ func main() {
 				return
 			}
 			tsdbMgr.Reload(reloadCfg)
+			// Update SSFVHandler with the new pipeline — the old one is closed.
+			ssfvHandler.SetPipeline(tsdbMgr.Pipeline())
+			if sa := tsdbMgr.SSFVAdapter(); sa != nil {
+				ssfvHandler.SetAlarmManager(worker.NewAlarmManager(sa.Pool()))
+				if err := ssfvCache.Reload(sa.Pool()); err != nil {
+					log.Printf("ssfv: mapping cache reload after tsdb reload: %v", err)
+				}
+			} else {
+				ssfvHandler.SetAlarmManager(nil)
+			}
 		},
 		NotifyNATS: func() {
 			log.Printf("nats: config changed (restart required to apply)")

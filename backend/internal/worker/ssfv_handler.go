@@ -121,20 +121,34 @@ func (c *SSFVMappingCache) TopicCount() int {
 // SSFVHandler processes JSON-MQTT messages from SSFV equipment and routes them
 // to the TSDB pipeline and alarm manager.
 type SSFVHandler struct {
-	cache    *SSFVMappingCache
-	pipe     *tsdb.WritePipeline // may be nil until TSDB connects
-	alarmMgr *AlarmManager       // may be nil until TSDB connects
+	cache *SSFVMappingCache
+
+	mu       sync.RWMutex
+	pipe     *tsdb.WritePipeline // guarded by mu; nil until TSDB connects
+	alarmMgr *AlarmManager       // guarded by mu; nil until TSDB connects
 }
 
 func NewSSFVHandler(cache *SSFVMappingCache, pipe *tsdb.WritePipeline, alarms *AlarmManager) *SSFVHandler {
-	return &SSFVHandler{cache: cache, pipe: pipe, alarmMgr: alarms}
+	h := &SSFVHandler{cache: cache}
+	h.pipe = pipe
+	h.alarmMgr = alarms
+	return h
 }
 
-// SetPipeline updates the pipeline reference after a TSDB reload.
-func (h *SSFVHandler) SetPipeline(p *tsdb.WritePipeline) { h.pipe = p }
+// SetPipeline swaps the pipeline reference. Safe to call from any goroutine,
+// including concurrently with MQTT message dispatch.
+func (h *SSFVHandler) SetPipeline(p *tsdb.WritePipeline) {
+	h.mu.Lock()
+	h.pipe = p
+	h.mu.Unlock()
+}
 
-// SetAlarmManager updates the alarm manager reference.
-func (h *SSFVHandler) SetAlarmManager(a *AlarmManager) { h.alarmMgr = a }
+// SetAlarmManager swaps the alarm manager reference. Safe to call from any goroutine.
+func (h *SSFVHandler) SetAlarmManager(a *AlarmManager) {
+	h.mu.Lock()
+	h.alarmMgr = a
+	h.mu.Unlock()
+}
 
 // HandleMetric processes a single decoded metric from a Sparkplug B NDATA message.
 // topic = MQTT device topic (MetricName minus last segment), code = signal code.
@@ -144,11 +158,17 @@ func (h *SSFVHandler) HandleMetric(topic, code string, value float64, ts time.Ti
 	if !ok {
 		return false
 	}
-	if mapping.EsAlarma && h.alarmMgr != nil {
-		h.alarmMgr.Process(mapping.EquisenalID, value, ts, alarmType(code))
+
+	h.mu.RLock()
+	pipe := h.pipe
+	alarmMgr := h.alarmMgr
+	h.mu.RUnlock()
+
+	if mapping.EsAlarma && alarmMgr != nil {
+		alarmMgr.Process(mapping.EquisenalID, value, ts, alarmType(code))
 	}
-	if h.pipe != nil {
-		h.pipe.Push(tsdb.DataPoint{ //nolint:errcheck
+	if pipe != nil {
+		pipe.Push(tsdb.DataPoint{ //nolint:errcheck
 			Measurement: code,
 			Tags: map[string]string{
 				"signal_path": topic + "/" + code,
@@ -172,6 +192,12 @@ func (h *SSFVHandler) Handle(topic string, payload []byte) bool {
 		log.Printf("ssfv: parse %s: %v", topic, err)
 		return true // topic matched → claim the message even on parse error
 	}
+
+	// Snapshot pipeline + alarm manager once under a single read lock.
+	h.mu.RLock()
+	pipe := h.pipe
+	alarmMgr := h.alarmMgr
+	h.mu.RUnlock()
 
 	// Extract timestamp from "date" field; fall back to now.
 	ts := time.Now().UTC()
@@ -203,12 +229,12 @@ func (h *SSFVHandler) Handle(topic string, payload []byte) bool {
 			continue
 		}
 
-		if mapping.EsAlarma && h.alarmMgr != nil {
-			h.alarmMgr.Process(mapping.EquisenalID, value, ts, alarmType(key))
+		if mapping.EsAlarma && alarmMgr != nil {
+			alarmMgr.Process(mapping.EquisenalID, value, ts, alarmType(key))
 		}
 
-		if h.pipe != nil {
-			h.pipe.Push(tsdb.DataPoint{ //nolint:errcheck
+		if pipe != nil {
+			pipe.Push(tsdb.DataPoint{ //nolint:errcheck
 				Measurement: key,
 				Tags: map[string]string{
 					"signal_path": topic + "/" + key,
