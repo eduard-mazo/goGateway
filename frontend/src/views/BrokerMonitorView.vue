@@ -11,6 +11,7 @@ interface BrokerEvent {
   size: number
   kind: 'sparkplug' | 'ssfv' | 'json' | 'state'
   payload?: string
+  ssfvHits?: number
 }
 
 interface MissedSignal {
@@ -30,7 +31,7 @@ const KIND_INFO: Record<string, { label: string; color: string; desc: string }> 
   sparkplug: {
     label: 'Sparkplug',
     color: 'bg-blue-700 text-white',
-    desc: 'Trama binaria Sparkplug B (protobuf). Contiene métricas de inversores y nodos de la red. El payload es binario — no se muestra el contenido crudo.',
+    desc: 'Trama binaria Sparkplug B (protobuf). Contiene métricas de inversores y nodos de la red. El payload es binario — no se muestra el contenido crudo. La etiqueta ámbar →N indica cuántas métricas de este mensaje se enviaron al pipeline SSFV.',
   },
   ssfv: {
     label: 'SSFV',
@@ -339,10 +340,17 @@ onUnmounted(disconnect)
                   {{ fmtTime(ev.at) }}
                 </td>
                 <td class="px-3 py-1.5">
-                  <span class="inline-flex rounded px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide"
-                    :class="KIND_INFO[ev.kind]?.color ?? 'bg-muted text-foreground'">
-                    {{ ev.kind }}
-                  </span>
+                  <div class="flex items-center gap-1.5">
+                    <span class="inline-flex rounded px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide"
+                      :class="KIND_INFO[ev.kind]?.color ?? 'bg-muted text-foreground'">
+                      {{ ev.kind }}
+                    </span>
+                    <span v-if="ev.ssfvHits && ev.ssfvHits > 0"
+                      class="inline-flex rounded px-1 py-0.5 text-[9px] font-bold bg-amber-600/90 text-white"
+                      :title="`${ev.ssfvHits} métrica(s) enviadas a SSFV`">
+                      →{{ ev.ssfvHits }}
+                    </span>
+                  </div>
                 </td>
                 <td class="px-3 py-1.5 max-w-0 truncate" :title="ev.topic">{{ ev.topic }}</td>
                 <td class="px-3 py-1.5 text-right tabular-nums text-muted-foreground">{{ fmtSize(ev.size) }}</td>
@@ -469,7 +477,16 @@ onUnmounted(disconnect)
                   </div>
                 </template>
               </dl>
-              <p class="text-[11px] text-muted-foreground mt-2">
+              <div v-if="selectedEvent.ssfvHits && selectedEvent.ssfvHits > 0"
+                class="flex items-center gap-2 mt-2 rounded-sm bg-amber-600/15 border border-amber-600/30 px-2.5 py-1.5">
+                <span class="inline-flex rounded px-1.5 py-0.5 text-[9px] font-bold bg-amber-600 text-white">
+                  →{{ selectedEvent.ssfvHits }}
+                </span>
+                <span class="text-[11px] text-amber-300">
+                  {{ selectedEvent.ssfvHits === 1 ? '1 métrica enviada' : `${selectedEvent.ssfvHits} métricas enviadas` }} a pipeline SSFV → tbl_valores
+                </span>
+              </div>
+              <p v-else class="text-[11px] text-muted-foreground mt-2">
                 El payload es binario protobuf (spBv1.0) — no se muestra contenido crudo.
                 Los valores se decodifican y persisten vía SparkplugHandler.
               </p>

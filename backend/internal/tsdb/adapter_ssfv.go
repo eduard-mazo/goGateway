@@ -112,10 +112,9 @@ func (a *SSFVAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 	dropped := int64(0)
 
 	for _, p := range batch {
-		// IEC-104 history DataPoints (from HistoryLogger) have no "equipo" tag.
-		// They will never match the ssfv catalog — skip before hitting the cache.
+		// IEC-104 history DataPoints (from HistoryLogger) carry no "equipo" tag.
+		// These are expected noise — skip silently, do NOT count as SSFV misses.
 		if p.Tags["equipo"] == "" {
-			dropped++
 			continue
 		}
 		signalPath := p.Tags["signal_path"]
@@ -124,6 +123,7 @@ func (a *SSFVAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 		}
 		equiID, ok := a.cache.Resolve(ctx, signalPath)
 		if !ok {
+			// Genuine SSFV signal with no catalog match: actionable miss.
 			dropped++
 			a.recordMiss(signalPath, p.Tags["equipo"])
 			continue

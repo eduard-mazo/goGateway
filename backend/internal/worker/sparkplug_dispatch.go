@@ -52,22 +52,24 @@ func (h *SparkplugHandler) SetRebirthFn(fn func(groupID, nodeID string)) {
 func (h *SparkplugHandler) SetSSFVHandler(s *SSFVHandler) { h.ssfvHandler = s }
 
 // Dispatch routes a decoded Sparkplug B topic to the appropriate handler.
-func (h *SparkplugHandler) Dispatch(topic sparkplug.Topic, raw []byte) {
+// Returns the number of metrics forwarded to the SSFV pipeline in this message.
+func (h *SparkplugHandler) Dispatch(topic sparkplug.Topic, raw []byte) int {
 	switch topic.MsgType {
 	case sparkplug.MsgNBIRTH:
-		h.handleNBIRTH(topic, raw)
+		return h.handleNBIRTH(topic, raw)
 	case sparkplug.MsgNDEATH:
 		h.handleNDEATH(topic, raw)
 	case sparkplug.MsgNDATA:
-		h.handleNDATA(topic, raw)
+		return h.handleNDATA(topic, raw)
 	case sparkplug.MsgDBIRTH:
-		h.handleDBIRTH(topic, raw)
+		return h.handleDBIRTH(topic, raw)
 	case sparkplug.MsgDDEATH:
 		h.handleDDEATH(topic, raw)
 	case sparkplug.MsgDDATA:
-		h.handleDDATA(topic, raw)
+		return h.handleDDATA(topic, raw)
 	// STATE, NCMD, DCMD are not consumed by the gateway in this direction.
 	}
+	return 0
 }
 
 // MarkNodeStale dispatches QualityNotTopical to every IEC-104 point mapped to
@@ -85,16 +87,16 @@ func (h *SparkplugHandler) MarkNodeStale(nodeBase string) {
 
 // ─── Node-level handlers ─────────────────────────────────────────────────────
 
-func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) {
+func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) int {
 	p, err := sparkplug.DecodePayload(raw)
 	if err != nil {
 		log.Printf("sparkplug: NBIRTH decode error (%s/%s): %v", topic.GroupID, topic.EdgeNodeID, err)
-		return
+		return 0
 	}
 	if p.Seq != 0 {
 		log.Printf("sparkplug: NBIRTH seq=%d (expected 0) from %s/%s — ignoring",
 			p.Seq, topic.GroupID, topic.EdgeNodeID)
-		return
+		return 0
 	}
 
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
@@ -102,6 +104,7 @@ func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) {
 	session.SetBirth(p)
 
 	ts := msToTime(p.Timestamp)
+	ssfvHits := 0
 
 	for i := range p.Metrics {
 		m := &p.Metrics[i]
@@ -109,10 +112,13 @@ func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) {
 		if name == "" || m.IsTransient {
 			continue
 		}
-		h.dispatchMetric(topic, false, name, m, ts)
+		if h.dispatchMetric(topic, false, name, m, ts) {
+			ssfvHits++
+		}
 	}
 
 	log.Printf("sparkplug: NBIRTH %s/%s — %d metric(s)", topic.GroupID, topic.EdgeNodeID, len(p.Metrics))
+	return ssfvHits
 }
 
 func (h *SparkplugHandler) handleNDEATH(topic sparkplug.Topic, raw []byte) {
@@ -127,11 +133,11 @@ func (h *SparkplugHandler) handleNDEATH(topic sparkplug.Topic, raw []byte) {
 	log.Printf("sparkplug: NDEATH %s/%s — all points marked stale", topic.GroupID, topic.EdgeNodeID)
 }
 
-func (h *SparkplugHandler) handleNDATA(topic sparkplug.Topic, raw []byte) {
+func (h *SparkplugHandler) handleNDATA(topic sparkplug.Topic, raw []byte) int {
 	p, err := sparkplug.DecodePayload(raw)
 	if err != nil {
 		log.Printf("sparkplug: NDATA decode error (%s/%s): %v", topic.GroupID, topic.EdgeNodeID, err)
-		return
+		return 0
 	}
 
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
@@ -143,13 +149,14 @@ func (h *SparkplugHandler) handleNDATA(topic sparkplug.Topic, raw []byte) {
 		if h.rebirthFn != nil {
 			h.rebirthFn(topic.GroupID, topic.EdgeNodeID)
 		}
-		return
+		return 0
 	}
 
 	ts := msToTime(p.Timestamp)
 	log.Printf("sparkplug: NDATA %s/%s seq=%d — %d metric(s)",
 		topic.GroupID, topic.EdgeNodeID, p.Seq, len(p.Metrics))
 
+	ssfvHits := 0
 	for i := range p.Metrics {
 		m := &p.Metrics[i]
 		name := session.ResolveName(m)
@@ -158,18 +165,21 @@ func (h *SparkplugHandler) handleNDATA(topic sparkplug.Topic, raw []byte) {
 				m.Alias, m.Name, m.IsTransient)
 			continue
 		}
-		h.dispatchMetric(topic, false, name, m, ts)
+		if h.dispatchMetric(topic, false, name, m, ts) {
+			ssfvHits++
+		}
 	}
+	return ssfvHits
 }
 
 // ─── Device-level handlers ───────────────────────────────────────────────────
 
-func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) {
+func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) int {
 	p, err := sparkplug.DecodePayload(raw)
 	if err != nil {
 		log.Printf("sparkplug: DBIRTH decode error (%s/%s/%s): %v",
 			topic.GroupID, topic.EdgeNodeID, topic.DeviceID, err)
-		return
+		return 0
 	}
 
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
@@ -177,6 +187,7 @@ func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) {
 	session.SetBirth(p)
 
 	ts := msToTime(p.Timestamp)
+	ssfvHits := 0
 
 	for i := range p.Metrics {
 		m := &p.Metrics[i]
@@ -184,11 +195,14 @@ func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) {
 		if name == "" || m.IsTransient {
 			continue
 		}
-		h.dispatchMetric(topic, true, name, m, ts)
+		if h.dispatchMetric(topic, true, name, m, ts) {
+			ssfvHits++
+		}
 	}
 
 	log.Printf("sparkplug: DBIRTH %s/%s/%s — %d metric(s)",
 		topic.GroupID, topic.EdgeNodeID, topic.DeviceID, len(p.Metrics))
+	return ssfvHits
 }
 
 func (h *SparkplugHandler) handleDDEATH(topic sparkplug.Topic, raw []byte) {
@@ -202,12 +216,12 @@ func (h *SparkplugHandler) handleDDEATH(topic sparkplug.Topic, raw []byte) {
 		topic.GroupID, topic.EdgeNodeID, topic.DeviceID)
 }
 
-func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) {
+func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) int {
 	p, err := sparkplug.DecodePayload(raw)
 	if err != nil {
 		log.Printf("sparkplug: DDATA decode error (%s/%s/%s): %v",
 			topic.GroupID, topic.EdgeNodeID, topic.DeviceID, err)
-		return
+		return 0
 	}
 
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
@@ -219,10 +233,11 @@ func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) {
 		if h.rebirthFn != nil {
 			h.rebirthFn(topic.GroupID, topic.EdgeNodeID)
 		}
-		return
+		return 0
 	}
 
 	ts := msToTime(p.Timestamp)
+	ssfvHits := 0
 
 	for i := range p.Metrics {
 		m := &p.Metrics[i]
@@ -230,8 +245,11 @@ func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) {
 		if name == "" || m.IsTransient {
 			continue
 		}
-		h.dispatchMetric(topic, true, name, m, ts)
+		if h.dispatchMetric(topic, true, name, m, ts) {
+			ssfvHits++
+		}
 	}
+	return ssfvHits
 }
 
 // ─── Core dispatch ───────────────────────────────────────────────────────────
@@ -239,13 +257,14 @@ func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) {
 // dispatchMetric resolves the metric to signal mappings and forwards values to
 // every mapped IEC-104 slave. isDevice=true uses DeviceBase for the cache
 // lookup and includes topic.DeviceID in the signal path.
+// Returns true when the metric was forwarded to the SSFV pipeline.
 func (h *SparkplugHandler) dispatchMetric(
 	topic sparkplug.Topic,
 	isDevice bool,
 	metricName string,
 	m *sparkplug.Metric,
 	ts time.Time,
-) {
+) bool {
 	// SSFV intercept: always write to TimescaleDB when the metric matches a known
 	// SSFV topic. Execution continues so an IEC-104 mapping can also be served
 	// (dual routing). Only signals that have a signal_mappings entry reach IEC-104.
@@ -273,7 +292,7 @@ func (h *SparkplugHandler) dispatchMetric(
 			// Only log "no mapping" for non-SSFV signals to avoid spam.
 			log.Printf("sparkplug: no mapping for %q in %s", metricName, nodeBase)
 		}
-		return
+		return ssfvHandled
 	}
 
 	val, hasVal := m.Float64()
@@ -290,6 +309,7 @@ func (h *SparkplugHandler) dispatchMetric(
 			h.d.Dispatch(tm, 0, iec104.QualityInvalid, ts)
 		}
 	}
+	return ssfvHandled
 }
 
 // spSignalPath builds the full signal path for a Sparkplug B metric.

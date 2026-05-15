@@ -19,8 +19,9 @@ type BrokerEvent struct {
 	At          time.Time `json:"at"`
 	Topic       string    `json:"topic"`
 	PayloadSize int       `json:"size"`
-	Kind        string    `json:"kind"`             // "sparkplug", "ssfv", "json", "state"
+	Kind        string    `json:"kind"`              // "sparkplug", "ssfv", "json", "state"
 	Payload     string    `json:"payload,omitempty"` // raw text for json/ssfv/state; empty for sparkplug
+	SsfvHits    int       `json:"ssfvHits,omitempty"` // metrics forwarded to SSFV pipeline (sparkplug only)
 }
 
 // BrokerMonitor is a thread-safe ring buffer for recent broker events that
@@ -42,7 +43,8 @@ func NewBrokerMonitor() *BrokerMonitor {
 // Never blocks: slow clients are dropped rather than back-pressuring the MQTT goroutine.
 // For json, ssfv, and state kinds the raw payload is stored (truncated at maxPayloadStore).
 // Sparkplug payloads are binary protobuf and not stored.
-func (b *BrokerMonitor) Push(topic, kind string, payload []byte) {
+// ssfvHits is the number of metrics forwarded to the SSFV pipeline (sparkplug messages only).
+func (b *BrokerMonitor) Push(topic, kind string, payload []byte, ssfvHits int) {
 	var payloadStr string
 	switch kind {
 	case "json", "ssfv", "state":
@@ -62,6 +64,7 @@ func (b *BrokerMonitor) Push(topic, kind string, payload []byte) {
 		PayloadSize: len(payload),
 		Kind:        kind,
 		Payload:     payloadStr,
+		SsfvHits:    ssfvHits,
 	}
 	b.ring[b.head] = ev
 	b.head = (b.head + 1) % monitorCap

@@ -41,9 +41,10 @@ type Manager struct {
 	// SSFV JSON handler — intercepts equipment topics before generic dispatch.
 	ssfvHandler *worker.SSFVHandler
 
-	// monitorHook receives (topic, kind, payload) for every inbound message.
+	// monitorHook receives (topic, kind, payload, ssfvHits) for every inbound message.
+	// ssfvHits is the count of metrics forwarded to SSFV (sparkplug messages only).
 	// nil = disabled. Set via SetMonitorHook before Start().
-	monitorHook func(topic, kind string, payload []byte)
+	monitorHook func(topic, kind string, payload []byte, ssfvHits int)
 }
 
 // MQTTConfigSnapshot is a copy of the config values the manager needs outside
@@ -84,9 +85,10 @@ func (m *Manager) SetSSFVHandler(h *worker.SSFVHandler) {
 }
 
 // SetMonitorHook registers a callback invoked for every inbound MQTT message.
-// fn receives (topic, kind, payload). kind is one of "sparkplug", "ssfv",
-// "json", or "state". Safe to call at any time.
-func (m *Manager) SetMonitorHook(fn func(topic, kind string, payload []byte)) {
+// fn receives (topic, kind, payload, ssfvHits). kind is one of "sparkplug",
+// "ssfv", "json", or "state". ssfvHits is the number of metrics forwarded to
+// the SSFV pipeline (non-zero only for sparkplug messages). Safe to call at any time.
+func (m *Manager) SetMonitorHook(fn func(topic, kind string, payload []byte, ssfvHits int)) {
 	m.mu.Lock()
 	m.monitorHook = fn
 	m.mu.Unlock()
@@ -297,30 +299,30 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 
 	if spHandler != nil {
 		t, ok := sparkplug.ParseTopic(topic)
-		if hook != nil {
-			kind := "sparkplug"
-			if !ok {
-				kind = "state"
-			}
-			hook(topic, kind, payload)
-		}
 		if !ok {
-			return // not a valid spBv1.0 topic (e.g., the STATE topic itself)
+			// STATE topic or other non-spBv1.0 — fire hook immediately, no dispatch.
+			if hook != nil {
+				hook(topic, "state", payload, 0)
+			}
+			return
 		}
-		spHandler.Dispatch(t, payload)
+		ssfvHits := spHandler.Dispatch(t, payload)
+		if hook != nil {
+			hook(topic, "sparkplug", payload, ssfvHits)
+		}
 		return
 	}
 
 	// JSON mode: SSFV handler intercepts equipment topics first.
 	if ssfvHandler != nil && ssfvHandler.Handle(topic, payload) {
 		if hook != nil {
-			hook(topic, "ssfv", payload)
+			hook(topic, "ssfv", payload, 0)
 		}
 		return
 	}
 
 	if hook != nil {
-		hook(topic, "json", payload)
+		hook(topic, "json", payload, 0)
 	}
 
 	// Generic JSON dispatch (IEC-104 + history pipeline).
