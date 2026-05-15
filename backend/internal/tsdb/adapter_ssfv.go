@@ -236,7 +236,12 @@ func (a *SSFVAdapter) recordError(err error) {
 	log.Printf("ssfv: write error: %v", err)
 }
 
-// recordMiss stores a signal_path that had no catalog match into the ring buffer.
+// RecordMiss stores a signal_path that had no catalog match into the ring buffer.
+// Public so it can be wired as a callback from the worker layer.
+func (a *SSFVAdapter) RecordMiss(signalPath, equipo string) {
+	a.recordMiss(signalPath, equipo)
+}
+
 func (a *SSFVAdapter) recordMiss(signalPath, equipo string) {
 	a.missMu.Lock()
 	a.missRing[a.missHead] = MissedSignal{At: time.Now(), SignalPath: signalPath, Equipo: equipo}

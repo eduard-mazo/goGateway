@@ -269,14 +269,26 @@ func (h *SparkplugHandler) dispatchMetric(
 	// SSFV topic. Execution continues so an IEC-104 mapping can also be served
 	// (dual routing). Only signals that have a signal_mappings entry reach IEC-104.
 	ssfvHandled := false
+	var ssfvTopic string // the SSFV equipment topic attempted (for log suppression)
 	if h.ssfvHandler != nil {
 		parts := strings.Split(metricName, "/")
+		var mqttTopic, code string
 		if len(parts) >= 2 {
-			mqttTopic := strings.Join(parts[:len(parts)-1], "/")
-			code := parts[len(parts)-1]
-			val, _ := m.Float64()
-			ssfvHandled = h.ssfvHandler.HandleMetric(mqttTopic, code, val, ts)
+			// Full UNS path embedded in metric name: "EPM_SSFV/Sede30/INV_1/OSV"
+			mqttTopic = strings.Join(parts[:len(parts)-1], "/")
+			code = parts[len(parts)-1]
+		} else {
+			// Simple metric name ("cycle"): use the Sparkplug node/device topic.
+			if isDevice && topic.DeviceID != "" {
+				mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID + "/" + topic.DeviceID
+			} else {
+				mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
+			}
+			code = metricName
 		}
+		ssfvTopic = mqttTopic
+		val, _ := m.Float64()
+		ssfvHandled = h.ssfvHandler.HandleMetric(mqttTopic, code, val, ts)
 	}
 
 	var nodeBase string
@@ -289,8 +301,12 @@ func (h *SparkplugHandler) dispatchMetric(
 	maps := h.cache.LookupByMetric(nodeBase, metricName)
 	if len(maps) == 0 {
 		if !ssfvHandled {
-			// Only log "no mapping" for non-SSFV signals to avoid spam.
-			log.Printf("sparkplug: no mapping for %q in %s", metricName, nodeBase)
+			// Suppress "no mapping" for signals from known SSFV equipment topics:
+			// they are recorded in the Descartados ring via HandleMetric's missFn.
+			isSsfvEquip := ssfvTopic != "" && h.ssfvHandler.IsKnownTopic(ssfvTopic)
+			if !isSsfvEquip {
+				log.Printf("sparkplug: no mapping for %q in %s", metricName, nodeBase)
+			}
 		}
 		return ssfvHandled
 	}

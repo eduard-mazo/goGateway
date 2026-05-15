@@ -107,10 +107,11 @@ func main() {
 	// SSFV subsystem: JSON handler routes solar equipment topics into TimescaleDB.
 	ssfvCache := worker.NewSSFVMappingCache()
 	ssfvHandler := worker.NewSSFVHandler(ssfvCache, tsdbMgr.Pipeline(), nil)
-	// Wire pool + alarm manager if SSFV adapter is already connected.
+	// Wire pool, alarm manager, and miss callback if SSFV adapter is already connected.
 	if sa := tsdbMgr.SSFVAdapter(); sa != nil {
 		alarmMgr := worker.NewAlarmManager(sa.Pool())
 		ssfvHandler.SetAlarmManager(alarmMgr)
+		ssfvHandler.SetMissFn(sa.RecordMiss)
 		if err := ssfvCache.Reload(sa.Pool()); err != nil {
 			log.Printf("ssfv cache reload: %v", err)
 		}
@@ -147,11 +148,13 @@ func main() {
 			ssfvHandler.SetPipeline(tsdbMgr.Pipeline())
 			if sa := tsdbMgr.SSFVAdapter(); sa != nil {
 				ssfvHandler.SetAlarmManager(worker.NewAlarmManager(sa.Pool()))
+				ssfvHandler.SetMissFn(sa.RecordMiss)
 				if err := ssfvCache.Reload(sa.Pool()); err != nil {
 					log.Printf("ssfv: mapping cache reload after tsdb reload: %v", err)
 				}
 			} else {
 				ssfvHandler.SetAlarmManager(nil)
+				ssfvHandler.SetMissFn(nil)
 			}
 		},
 		NotifyNATS: func() {

@@ -124,8 +124,9 @@ type SSFVHandler struct {
 	cache *SSFVMappingCache
 
 	mu       sync.RWMutex
-	pipe     *tsdb.WritePipeline // guarded by mu; nil until TSDB connects
-	alarmMgr *AlarmManager       // guarded by mu; nil until TSDB connects
+	pipe     *tsdb.WritePipeline       // guarded by mu; nil until TSDB connects
+	alarmMgr *AlarmManager             // guarded by mu; nil until TSDB connects
+	missFn   func(signalPath, equipo string) // guarded by mu; optional miss callback
 }
 
 func NewSSFVHandler(cache *SSFVMappingCache, pipe *tsdb.WritePipeline, alarms *AlarmManager) *SSFVHandler {
@@ -150,12 +151,36 @@ func (h *SSFVHandler) SetAlarmManager(a *AlarmManager) {
 	h.mu.Unlock()
 }
 
+// SetMissFn registers a callback invoked when a metric's topic is a known SSFV
+// equipment but the signal code has no catalog entry. Called from HandleMetric.
+// Wire this to SSFVAdapter.RecordMiss after the adapter is created.
+func (h *SSFVHandler) SetMissFn(fn func(signalPath, equipo string)) {
+	h.mu.Lock()
+	h.missFn = fn
+	h.mu.Unlock()
+}
+
+// IsKnownTopic reports whether topic matches a configured SSFV equipment topic.
+func (h *SSFVHandler) IsKnownTopic(topic string) bool {
+	return h.cache.IsTopic(topic)
+}
+
 // HandleMetric processes a single decoded metric from a Sparkplug B NDATA message.
-// topic = MQTT device topic (MetricName minus last segment), code = signal code.
+// topic = MQTT equipment topic (e.g. "EPM_SSFV/Sede30/INV_1"), code = signal code.
 // Returns true if the signal is known to the SSFV catalog.
 func (h *SSFVHandler) HandleMetric(topic, code string, value float64, ts time.Time) bool {
 	mapping, ok := h.cache.Lookup(topic, code)
 	if !ok {
+		// If the equipment topic IS configured but this specific signal is not,
+		// record it as an actionable miss (appears in Descartados tab).
+		if h.cache.IsTopic(topic) {
+			h.mu.RLock()
+			fn := h.missFn
+			h.mu.RUnlock()
+			if fn != nil {
+				fn(topic+"/"+code, topic)
+			}
+		}
 		return false
 	}
 
