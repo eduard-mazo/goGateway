@@ -11,7 +11,7 @@ import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
 import {
   Radio, RefreshCw, Save, Shield, Wifi, KeyRound, User, Zap,
-  Plus, X, Hash,
+  Plus, X, Layers,
 } from 'lucide-vue-next'
 
 const { status } = useStatus()
@@ -24,47 +24,47 @@ const cfg = ref<MQTTConfig>({
 })
 const saving = ref(false)
 
-// ── Topic list state ──────────────────────────────────────────────────────────
-const topicList   = ref<string[]>([])
-const topicInputs = ref<HTMLInputElement[]>([])
+// ── Sparkplug Group ID list ───────────────────────────────────────────────────
+const groupList   = ref<string[]>([])
+const groupInputs = ref<HTMLInputElement[]>([])
 
-function parseTopics(raw: string): string[] {
+function parseGroups(raw: string): string[] {
   return raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean)
 }
 
-function syncTopics() {
-  cfg.value.sp_topics = topicList.value.filter(s => s.trim()).join('\n')
+function syncGroups() {
+  cfg.value.sp_group_id = groupList.value.filter(s => s.trim()).join('\n')
 }
 
-function addTopic() {
-  topicList.value.push('')
+function addGroup() {
+  groupList.value.push('')
   nextTick(() => {
-    const last = topicInputs.value[topicList.value.length - 1]
+    const last = groupInputs.value[groupList.value.length - 1]
     last?.focus()
   })
 }
 
-function removeTopic(i: number) {
-  topicList.value.splice(i, 1)
-  syncTopics()
+function removeGroup(i: number) {
+  groupList.value.splice(i, 1)
+  if (groupList.value.length === 0) groupList.value = ['']
+  syncGroups()
 }
 
-function updateTopic(i: number, val: string) {
-  topicList.value[i] = val
-  syncTopics()
+function updateGroup(i: number, val: string) {
+  groupList.value[i] = val
+  syncGroups()
 }
 
-// Handle Enter key → add next row; Backspace on empty row → remove it
-function onTopicKey(e: KeyboardEvent, i: number) {
+function onGroupKey(e: KeyboardEvent, i: number) {
   if (e.key === 'Enter') {
     e.preventDefault()
-    topicList.value.splice(i + 1, 0, '')
-    nextTick(() => topicInputs.value[i + 1]?.focus())
-  } else if (e.key === 'Backspace' && topicList.value[i] === '' && topicList.value.length > 1) {
+    groupList.value.splice(i + 1, 0, '')
+    nextTick(() => groupInputs.value[i + 1]?.focus())
+  } else if (e.key === 'Backspace' && groupList.value[i] === '' && groupList.value.length > 1) {
     e.preventDefault()
-    topicList.value.splice(i, 1)
-    syncTopics()
-    nextTick(() => topicInputs.value[Math.max(0, i - 1)]?.focus())
+    groupList.value.splice(i, 1)
+    syncGroups()
+    nextTick(() => groupInputs.value[Math.max(0, i - 1)]?.focus())
   }
 }
 
@@ -72,18 +72,20 @@ function onTopicKey(e: KeyboardEvent, i: number) {
 async function load() {
   try {
     cfg.value = (await api.get<MQTTConfig>('/mqtt-config')).data
-    topicList.value = parseTopics(cfg.value.sp_topics || '')
+    const groups = parseGroups(cfg.value.sp_group_id || '')
+    groupList.value = groups.length > 0 ? groups : ['goGateway']
   } catch (e: any) {
     toast.error('Load failed: ' + (e?.message ?? e))
   }
 }
 
 async function save() {
-  syncTopics()
+  syncGroups()
   saving.value = true
   try {
     cfg.value = (await api.put<MQTTConfig>('/mqtt-config', cfg.value)).data
-    topicList.value = parseTopics(cfg.value.sp_topics || '')
+    const groups = parseGroups(cfg.value.sp_group_id || '')
+    groupList.value = groups.length > 0 ? groups : ['goGateway']
     toast.success(t.mqtt.saved)
   } catch (e: any) {
     toast.error(t.mqtt.saveFailed + (e?.response?.data?.error ?? e?.message ?? e))
@@ -222,14 +224,11 @@ function fmtAgo(ts?: number | null) {
               <div class="text-xs text-muted-foreground mt-0.5">{{ t.mqtt.sparkplugDesc }}</div>
             </div>
           </div>
-          <div v-if="cfg.sparkplug_enabled" class="grid grid-cols-2 gap-4 px-4 pb-4 pt-3 border-t border-[color:color-mix(in_srgb,var(--epm-bosque)_12%,transparent)]">
-            <div class="space-y-1.5">
-              <Label for="sp_group" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.groupId }}</Label>
-              <Input id="sp_group" v-model="cfg.sp_group_id" placeholder="goGateway" class="rounded-sm font-mono" />
-              <p class="text-[11px] text-muted-foreground">
-                Subscribes to <span class="font-mono">spBv1.0/{{ cfg.sp_group_id || '…' }}/#</span>
-              </p>
-            </div>
+
+          <div v-if="cfg.sparkplug_enabled"
+               class="px-4 pb-4 pt-3 border-t border-[color:color-mix(in_srgb,var(--epm-bosque)_12%,transparent)] space-y-4">
+
+            <!-- Host ID -->
             <div class="space-y-1.5">
               <Label for="sp_host" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.hostId }}</Label>
               <Input id="sp_host" v-model="cfg.sp_host_id" placeholder="goGateway-host" class="rounded-sm font-mono" />
@@ -237,104 +236,101 @@ function fmtAgo(ts?: number | null) {
                 STATE topic: <span class="font-mono">STATE/{{ cfg.sp_host_id || '…' }}</span>
               </p>
             </div>
-          </div>
-        </div>
 
-        <!-- ── Additional subscriptions ──────────────────────────────────────── -->
-        <div class="space-y-2">
-          <div class="flex items-center justify-between">
-            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold inline-flex items-center gap-1.5">
-              <Hash class="h-3 w-3 text-[color:var(--epm-citrico)]" />
-              Suscripciones adicionales
-            </Label>
-            <span class="text-[10px] font-mono text-muted-foreground">
-              {{ topicList.length }} patrón{{ topicList.length !== 1 ? 'es' : '' }}
-            </span>
-          </div>
+            <!-- Group ID list -->
+            <div class="space-y-2">
+              <div class="flex items-center justify-between">
+                <Label class="text-[11px] uppercase tracking-[0.18em] font-bold inline-flex items-center gap-1.5">
+                  <Layers class="h-3 w-3 text-[color:var(--epm-citrico)]" />
+                  {{ t.mqtt.groupId }}
+                </Label>
+                <span class="text-[10px] font-mono text-muted-foreground">
+                  {{ groupList.filter(g => g.trim()).length }} grupo{{ groupList.filter(g => g.trim()).length !== 1 ? 's' : '' }}
+                </span>
+              </div>
 
-          <!-- Topic list -->
-          <div class="rounded-sm border border-border overflow-hidden bg-card">
+              <!-- Group rows -->
+              <div class="rounded-sm border border-border overflow-hidden bg-card">
+                <div class="flex items-center gap-0 px-0 py-1.5 border-b border-border bg-muted/40">
+                  <span class="w-8 shrink-0" />
+                  <span class="flex-1 text-[9px] uppercase tracking-[0.22em] font-bold text-muted-foreground px-2">
+                    ID de grupo Sparkplug B
+                  </span>
+                  <span class="flex-[1.4] text-[9px] uppercase tracking-[0.22em] font-bold text-muted-foreground px-2">
+                    Suscripción resultante
+                  </span>
+                  <span class="w-8 shrink-0" />
+                </div>
 
-            <!-- Column header -->
-            <div class="flex items-center gap-0 px-0 py-1.5 border-b border-border bg-muted/40">
-              <span class="w-8 shrink-0" />
-              <span class="flex-1 text-[9px] uppercase tracking-[0.22em] font-bold text-muted-foreground px-2">
-                Patrón MQTT
-              </span>
-              <span class="w-8 shrink-0" />
-            </div>
+                <div
+                  v-for="(gid, i) in groupList"
+                  :key="i"
+                  class="group-row group flex items-center border-b border-border/50 last:border-b-0
+                         focus-within:bg-[color:color-mix(in_srgb,var(--epm-bosque)_4%,transparent)]
+                         hover:bg-muted/20 transition-colors"
+                >
+                  <!-- Row index -->
+                  <span class="w-8 shrink-0 text-center text-[10px] font-mono tabular-nums
+                               text-[color:var(--epm-citrico)] opacity-60 select-none">
+                    {{ i + 1 }}
+                  </span>
 
-            <!-- Empty state -->
-            <div v-if="topicList.length === 0"
-              class="flex items-center justify-center gap-2 py-5 text-xs text-muted-foreground select-none">
-              <Plus class="h-3 w-3 opacity-40" />
-              Sin suscripciones adicionales — usa el botón de abajo para agregar
-            </div>
+                  <!-- Editable group ID -->
+                  <input
+                    :ref="(el) => { if (el) groupInputs[i] = el as HTMLInputElement }"
+                    :value="gid"
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="goGateway"
+                    class="flex-1 min-w-0 bg-transparent py-2.5 pr-2 text-xs font-mono
+                           text-foreground placeholder:text-muted-foreground/35
+                           focus:outline-none"
+                    @input="updateGroup(i, ($event.target as HTMLInputElement).value)"
+                    @keydown="onGroupKey($event, i)"
+                  />
 
-            <!-- Rows -->
-            <div
-              v-for="(topic, i) in topicList"
-              :key="i"
-              class="topic-row group flex items-center border-b border-border/50 last:border-b-0
-                     focus-within:bg-[color:color-mix(in_srgb,var(--epm-bosque)_4%,transparent)]
-                     hover:bg-muted/20 transition-colors"
-            >
-              <!-- Row index -->
-              <span class="w-8 shrink-0 text-center text-[10px] font-mono tabular-nums
-                           text-[color:var(--epm-citrico)] opacity-60 select-none">
-                {{ i + 1 }}
-              </span>
+                  <!-- Wildcard preview -->
+                  <span class="flex-[1.4] min-w-0 py-2.5 px-2 text-[11px] font-mono
+                               text-[color:var(--epm-bosque)] opacity-60 truncate select-none">
+                    spBv1.0/{{ gid.trim() || '…' }}/#
+                  </span>
 
-              <!-- Editable pattern -->
-              <input
-                :ref="(el) => { if (el) topicInputs[i] = el as HTMLInputElement }"
-                :value="topic"
-                spellcheck="false"
-                autocomplete="off"
-                placeholder="spBv1.0/Group/#  ·  plant/+/data  ·  sensors/#"
-                class="flex-1 min-w-0 bg-transparent py-2.5 pr-2 text-xs font-mono
-                       text-foreground placeholder:text-muted-foreground/35
-                       focus:outline-none"
-                @input="updateTopic(i, ($event.target as HTMLInputElement).value)"
-                @keydown="onTopicKey($event, i)"
-              />
+                  <!-- Delete button -->
+                  <button
+                    class="w-8 shrink-0 flex items-center justify-center py-2.5
+                           opacity-0 group-hover:opacity-100 focus-visible:opacity-100
+                           text-muted-foreground/50 hover:text-destructive transition-all"
+                    :title="`Eliminar grupo ${i + 1}`"
+                    :disabled="groupList.length === 1"
+                    @click="removeGroup(i)"
+                  >
+                    <X class="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
 
-              <!-- Delete button -->
+              <!-- Add group button -->
               <button
-                class="w-8 shrink-0 flex items-center justify-center py-2.5
-                       opacity-0 group-hover:opacity-100 focus-visible:opacity-100
-                       text-muted-foreground/50 hover:text-destructive transition-all"
-                :title="`Eliminar suscripción ${i + 1}`"
-                @click="removeTopic(i)"
+                class="add-btn flex items-center gap-1.5 text-xs font-medium
+                       text-[color:var(--epm-bosque)] hover:text-[color:var(--epm-bosque-deep)]
+                       transition-colors mt-1 px-0.5"
+                @click="addGroup"
               >
-                <X class="h-3 w-3" />
+                <span class="grid place-items-center w-4 h-4 rounded-sm
+                             bg-[color:color-mix(in_srgb,var(--epm-bosque)_15%,transparent)]
+                             border border-[color:color-mix(in_srgb,var(--epm-bosque)_30%,transparent)]">
+                  <Plus class="h-2.5 w-2.5" />
+                </span>
+                Agregar grupo
               </button>
+
+              <p class="text-[11px] text-muted-foreground leading-relaxed">
+                Cada grupo se suscribe como <span class="font-mono text-[color:var(--epm-bosque)]">spBv1.0/{groupID}/#</span>.
+                <span class="text-[color:var(--epm-citrico)] font-mono text-[10px]">Enter</span> = nuevo grupo ·
+                <span class="text-[color:var(--epm-citrico)] font-mono text-[10px]">Backspace</span> = elimina si vacío.
+              </p>
             </div>
           </div>
-
-          <!-- Add button -->
-          <button
-            class="add-btn flex items-center gap-1.5 text-xs font-medium
-                   text-[color:var(--epm-bosque)] hover:text-[color:var(--epm-bosque-deep)]
-                   transition-colors mt-1 px-0.5"
-            @click="addTopic"
-          >
-            <span class="grid place-items-center w-4 h-4 rounded-sm
-                         bg-[color:color-mix(in_srgb,var(--epm-bosque)_15%,transparent)]
-                         border border-[color:color-mix(in_srgb,var(--epm-bosque)_30%,transparent)]">
-              <Plus class="h-2.5 w-2.5" />
-            </span>
-            Agregar suscripción
-          </button>
-
-          <p class="text-[11px] text-muted-foreground leading-relaxed">
-            Suscripciones MQTT adicionales activas en cualquier modo, además de la principal.
-            Sparkplug extra: <span class="font-mono text-[color:var(--epm-bosque)]">spBv1.0/OtherGroup/#</span> ·
-            JSON wildcard: <span class="font-mono text-[color:var(--epm-bosque)]">plant/+/data</span>.
-            Los tópicos aquí configurados pueden usarse en el mapeo de señales.
-            <span class="text-[color:var(--epm-citrico)] font-mono text-[10px]">Enter</span> = nueva línea ·
-            <span class="text-[color:var(--epm-citrico)] font-mono text-[10px]">Backspace</span> = elimina si vacío.
-          </p>
         </div>
 
         <!-- URI preview -->
@@ -361,8 +357,8 @@ function fmtAgo(ts?: number | null) {
 </template>
 
 <style scoped>
-/* Left accent bar on focused row */
-.topic-row:focus-within {
+/* Left accent bar on focused group row */
+.group-row:focus-within {
   box-shadow: inset 2px 0 0 0 var(--epm-bosque);
 }
 

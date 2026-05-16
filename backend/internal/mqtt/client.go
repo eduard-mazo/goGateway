@@ -218,7 +218,7 @@ func (m *Manager) onConnect(c paho.Client) {
 
 // onConnectSparkplug handles Sparkplug B session establishment:
 //  1. Publishes STATE = "ONLINE" (retained, QoS 1) — the Primary Application birth.
-//  2. Subscribes to the configured group wildcard.
+//  2. Subscribes to each configured Sparkplug B group wildcard.
 func (m *Manager) onConnectSparkplug(c paho.Client, cfg worker.MQTTConfigSnapshot) {
 	// Publish Primary Application STATE birth certificate.
 	stateTopic := sparkplug.StateTopicFor(cfg.SpHostID)
@@ -230,23 +230,28 @@ func (m *Manager) onConnectSparkplug(c paho.Client, cfg worker.MQTTConfigSnapsho
 		}
 	}()
 
-	// Subscribe to all messages in the configured Sparkplug B group.
-	wildcard := sparkplug.WildcardFor(cfg.SpGroupID)
-	log.Printf("mqtt sparkplug connected, subscribing %s", wildcard)
-
-	subTok := c.Subscribe(wildcard, 0, func(_ paho.Client, msg paho.Message) {
-		m.onMessage(msg.Topic(), msg.Payload())
-	})
-	go func() {
-		subTok.Wait()
-		if err := subTok.Error(); err != nil {
-			log.Printf("mqtt sparkplug subscribe %s: %v", wildcard, err)
-		}
-	}()
-
-	m.mu.Lock()
-	m.subs[wildcard] = struct{}{}
-	m.mu.Unlock()
+	// SpGroupID is newline/comma-separated; subscribe spBv1.0/{groupID}/# for each.
+	groupIDs := parseTopicList(cfg.SpGroupID)
+	if len(groupIDs) == 0 {
+		groupIDs = []string{"#"} // fallback: subscribe all groups
+	}
+	for _, gid := range groupIDs {
+		wildcard := sparkplug.WildcardFor(gid)
+		log.Printf("mqtt sparkplug connected, subscribing %s", wildcard)
+		wc := wildcard
+		subTok := c.Subscribe(wc, 0, func(_ paho.Client, msg paho.Message) {
+			m.onMessage(msg.Topic(), msg.Payload())
+		})
+		go func() {
+			subTok.Wait()
+			if err := subTok.Error(); err != nil {
+				log.Printf("mqtt sparkplug subscribe %s: %v", wc, err)
+			}
+		}()
+		m.mu.Lock()
+		m.subs[wc] = struct{}{}
+		m.mu.Unlock()
+	}
 
 	m.subscribeExtra(c, cfg)
 }
