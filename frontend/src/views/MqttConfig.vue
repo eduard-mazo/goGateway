@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, nextTick } from 'vue'
 import { toast } from 'vue-sonner'
 import { api, type MQTTConfig } from '@/api'
 import { t } from '@/i18n'
@@ -9,7 +9,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { Radio, RefreshCw, Save, Shield, Wifi, KeyRound, User, Zap } from 'lucide-vue-next'
+import {
+  Radio, RefreshCw, Save, Shield, Wifi, KeyRound, User, Zap,
+  Plus, X, Hash,
+} from 'lucide-vue-next'
 
 const { status } = useStatus()
 
@@ -21,15 +24,66 @@ const cfg = ref<MQTTConfig>({
 })
 const saving = ref(false)
 
+// ── Topic list state ──────────────────────────────────────────────────────────
+const topicList   = ref<string[]>([])
+const topicInputs = ref<HTMLInputElement[]>([])
+
+function parseTopics(raw: string): string[] {
+  return raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean)
+}
+
+function syncTopics() {
+  cfg.value.sp_topics = topicList.value.filter(s => s.trim()).join('\n')
+}
+
+function addTopic() {
+  topicList.value.push('')
+  nextTick(() => {
+    const last = topicInputs.value[topicList.value.length - 1]
+    last?.focus()
+  })
+}
+
+function removeTopic(i: number) {
+  topicList.value.splice(i, 1)
+  syncTopics()
+}
+
+function updateTopic(i: number, val: string) {
+  topicList.value[i] = val
+  syncTopics()
+}
+
+// Handle Enter key → add next row; Backspace on empty row → remove it
+function onTopicKey(e: KeyboardEvent, i: number) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    topicList.value.splice(i + 1, 0, '')
+    nextTick(() => topicInputs.value[i + 1]?.focus())
+  } else if (e.key === 'Backspace' && topicList.value[i] === '' && topicList.value.length > 1) {
+    e.preventDefault()
+    topicList.value.splice(i, 1)
+    syncTopics()
+    nextTick(() => topicInputs.value[Math.max(0, i - 1)]?.focus())
+  }
+}
+
+// ── Load / save ───────────────────────────────────────────────────────────────
 async function load() {
-  try { cfg.value = (await api.get<MQTTConfig>('/mqtt-config')).data }
-  catch (e: any) { toast.error('Load failed: ' + (e?.message ?? e)) }
+  try {
+    cfg.value = (await api.get<MQTTConfig>('/mqtt-config')).data
+    topicList.value = parseTopics(cfg.value.sp_topics || '')
+  } catch (e: any) {
+    toast.error('Load failed: ' + (e?.message ?? e))
+  }
 }
 
 async function save() {
+  syncTopics()
   saving.value = true
   try {
     cfg.value = (await api.put<MQTTConfig>('/mqtt-config', cfg.value)).data
+    topicList.value = parseTopics(cfg.value.sp_topics || '')
     toast.success(t.mqtt.saved)
   } catch (e: any) {
     toast.error(t.mqtt.saveFailed + (e?.response?.data?.error ?? e?.message ?? e))
@@ -60,6 +114,7 @@ function fmtAgo(ts?: number | null) {
 
 <template>
   <div class="p-4 sm:p-6 lg:p-8 space-y-6 sm:space-y-8 max-w-5xl">
+
     <!-- Hero / live broker status -->
     <section class="card-soft overflow-hidden">
       <div class="grid grid-cols-12 gap-6 p-8">
@@ -110,6 +165,8 @@ function fmtAgo(ts?: number | null) {
       </div>
 
       <div class="p-6 space-y-5">
+
+        <!-- Host + Port -->
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div class="sm:col-span-2 space-y-1.5">
             <Label for="host" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.host }}</Label>
@@ -121,6 +178,7 @@ function fmtAgo(ts?: number | null) {
           </div>
         </div>
 
+        <!-- Credentials -->
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="space-y-1.5">
             <Label for="user" class="text-[11px] uppercase tracking-[0.18em] font-bold inline-flex items-center gap-1.5">
@@ -136,20 +194,20 @@ function fmtAgo(ts?: number | null) {
           </div>
         </div>
 
+        <!-- Client ID -->
         <div class="space-y-1.5">
           <Label for="cid" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.clientId }}</Label>
           <Input id="cid" v-model="cfg.client_id" class="rounded-sm font-mono" />
         </div>
 
+        <!-- TLS -->
         <div class="flex items-center gap-3 pt-2 p-4 rounded-lg bg-[color:color-mix(in_srgb,var(--epm-citrico)_10%,transparent)] border border-[color:color-mix(in_srgb,var(--epm-bosque)_15%,transparent)]">
           <Switch id="tls" v-model="cfg.use_tls" />
           <div class="flex-1">
             <Label for="tls" class="font-bold inline-flex items-center gap-1.5">
               <Shield class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" /> {{ t.mqtt.tls }}
             </Label>
-            <div class="text-xs text-muted-foreground mt-0.5">
-              {{ t.mqtt.tlsDesc }}
-            </div>
+            <div class="text-xs text-muted-foreground mt-0.5">{{ t.mqtt.tlsDesc }}</div>
           </div>
         </div>
 
@@ -161,9 +219,7 @@ function fmtAgo(ts?: number | null) {
               <Label for="sp" class="font-bold inline-flex items-center gap-1.5">
                 <Zap class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" /> {{ t.mqtt.sparkplug }}
               </Label>
-              <div class="text-xs text-muted-foreground mt-0.5">
-                {{ t.mqtt.sparkplugDesc }}
-              </div>
+              <div class="text-xs text-muted-foreground mt-0.5">{{ t.mqtt.sparkplugDesc }}</div>
             </div>
           </div>
           <div v-if="cfg.sparkplug_enabled" class="grid grid-cols-2 gap-4 px-4 pb-4 pt-3 border-t border-[color:color-mix(in_srgb,var(--epm-bosque)_12%,transparent)]">
@@ -184,32 +240,110 @@ function fmtAgo(ts?: number | null) {
           </div>
         </div>
 
-        <!-- Additional subscriptions — applies in both Sparkplug and JSON modes -->
-        <div class="space-y-1.5">
-          <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Suscripciones adicionales</Label>
-          <textarea
-            v-model="cfg.sp_topics"
-            rows="4"
-            placeholder="spBv1.0/OtherGroup/#
-plant/+/data
-sensors/#"
-            class="w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono
-                   placeholder:text-muted-foreground focus-visible:outline-none
-                   focus-visible:ring-1 focus-visible:ring-ring resize-y"
-          />
-          <p class="text-[11px] text-muted-foreground">
-            Un patrón MQTT por línea (o separados por comas). Se suscriben además de la suscripción
-            principal, en cualquier modo. Útil para múltiples grupos Sparkplug
-            (<span class="font-mono">spBv1.0/OtherGroup/#</span>), tópicos JSON adicionales o
-            cualquier wildcard de monitoreo.
+        <!-- ── Additional subscriptions ──────────────────────────────────────── -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold inline-flex items-center gap-1.5">
+              <Hash class="h-3 w-3 text-[color:var(--epm-citrico)]" />
+              Suscripciones adicionales
+            </Label>
+            <span class="text-[10px] font-mono text-muted-foreground">
+              {{ topicList.length }} patrón{{ topicList.length !== 1 ? 'es' : '' }}
+            </span>
+          </div>
+
+          <!-- Topic list -->
+          <div class="rounded-sm border border-border overflow-hidden bg-card">
+
+            <!-- Column header -->
+            <div class="flex items-center gap-0 px-0 py-1.5 border-b border-border bg-muted/40">
+              <span class="w-8 shrink-0" />
+              <span class="flex-1 text-[9px] uppercase tracking-[0.22em] font-bold text-muted-foreground px-2">
+                Patrón MQTT
+              </span>
+              <span class="w-8 shrink-0" />
+            </div>
+
+            <!-- Empty state -->
+            <div v-if="topicList.length === 0"
+              class="flex items-center justify-center gap-2 py-5 text-xs text-muted-foreground select-none">
+              <Plus class="h-3 w-3 opacity-40" />
+              Sin suscripciones adicionales — usa el botón de abajo para agregar
+            </div>
+
+            <!-- Rows -->
+            <div
+              v-for="(topic, i) in topicList"
+              :key="i"
+              class="topic-row group flex items-center border-b border-border/50 last:border-b-0
+                     focus-within:bg-[color:color-mix(in_srgb,var(--epm-bosque)_4%,transparent)]
+                     hover:bg-muted/20 transition-colors"
+            >
+              <!-- Row index -->
+              <span class="w-8 shrink-0 text-center text-[10px] font-mono tabular-nums
+                           text-[color:var(--epm-citrico)] opacity-60 select-none">
+                {{ i + 1 }}
+              </span>
+
+              <!-- Editable pattern -->
+              <input
+                :ref="(el) => { if (el) topicInputs[i] = el as HTMLInputElement }"
+                :value="topic"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="spBv1.0/Group/#  ·  plant/+/data  ·  sensors/#"
+                class="flex-1 min-w-0 bg-transparent py-2.5 pr-2 text-xs font-mono
+                       text-foreground placeholder:text-muted-foreground/35
+                       focus:outline-none"
+                @input="updateTopic(i, ($event.target as HTMLInputElement).value)"
+                @keydown="onTopicKey($event, i)"
+              />
+
+              <!-- Delete button -->
+              <button
+                class="w-8 shrink-0 flex items-center justify-center py-2.5
+                       opacity-0 group-hover:opacity-100 focus-visible:opacity-100
+                       text-muted-foreground/50 hover:text-destructive transition-all"
+                :title="`Eliminar suscripción ${i + 1}`"
+                @click="removeTopic(i)"
+              >
+                <X class="h-3 w-3" />
+              </button>
+            </div>
+          </div>
+
+          <!-- Add button -->
+          <button
+            class="add-btn flex items-center gap-1.5 text-xs font-medium
+                   text-[color:var(--epm-bosque)] hover:text-[color:var(--epm-bosque-deep)]
+                   transition-colors mt-1 px-0.5"
+            @click="addTopic"
+          >
+            <span class="grid place-items-center w-4 h-4 rounded-sm
+                         bg-[color:color-mix(in_srgb,var(--epm-bosque)_15%,transparent)]
+                         border border-[color:color-mix(in_srgb,var(--epm-bosque)_30%,transparent)]">
+              <Plus class="h-2.5 w-2.5" />
+            </span>
+            Agregar suscripción
+          </button>
+
+          <p class="text-[11px] text-muted-foreground leading-relaxed">
+            Suscripciones MQTT adicionales activas en cualquier modo, además de la principal.
+            Sparkplug extra: <span class="font-mono text-[color:var(--epm-bosque)]">spBv1.0/OtherGroup/#</span> ·
+            JSON wildcard: <span class="font-mono text-[color:var(--epm-bosque)]">plant/+/data</span>.
+            Los tópicos aquí configurados pueden usarse en el mapeo de señales.
+            <span class="text-[color:var(--epm-citrico)] font-mono text-[10px]">Enter</span> = nueva línea ·
+            <span class="text-[color:var(--epm-citrico)] font-mono text-[10px]">Backspace</span> = elimina si vacío.
           </p>
         </div>
 
+        <!-- URI preview -->
         <div class="font-mono text-[11px] text-muted-foreground border-t border-border pt-4">
           {{ t.mqtt.uriPreview }} · <span class="text-[color:var(--epm-bosque)] font-bold">{{ brokerUri }}</span>
         </div>
       </div>
 
+      <!-- Footer actions -->
       <div class="px-6 py-4 border-t border-border flex gap-2 bg-[color:color-mix(in_srgb,var(--epm-citrico)_5%,transparent)]">
         <Button
           :disabled="saving"
@@ -225,3 +359,16 @@ sensors/#"
     </section>
   </div>
 </template>
+
+<style scoped>
+/* Left accent bar on focused row */
+.topic-row:focus-within {
+  box-shadow: inset 2px 0 0 0 var(--epm-bosque);
+}
+
+/* Add button hover: icon background pulses to citric */
+.add-btn:hover span:first-child {
+  background-color: color-mix(in srgb, var(--epm-citrico) 20%, transparent);
+  border-color: color-mix(in srgb, var(--epm-citrico) 40%, transparent);
+}
+</style>
