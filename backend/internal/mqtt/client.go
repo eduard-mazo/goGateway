@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,10 +147,12 @@ func (m *Manager) reload() error {
 		m.cfg = worker.MQTTConfigSnapshot{
 			SpGroupID: cfg.SpGroupID,
 			SpHostID:  cfg.SpHostID,
+			SpTopics:  cfg.SpTopics,
 		}
 	} else {
 		m.registry = nil
 		m.spHandler = nil
+		m.cfg = worker.MQTTConfigSnapshot{SpTopics: cfg.SpTopics}
 	}
 
 	scheme := "tcp"
@@ -209,7 +212,7 @@ func (m *Manager) onConnect(c paho.Client) {
 	if isSparkplug {
 		m.onConnectSparkplug(c, cfg)
 	} else {
-		m.onConnectJSON(c)
+		m.onConnectJSON(c, cfg)
 	}
 }
 
@@ -244,10 +247,12 @@ func (m *Manager) onConnectSparkplug(c paho.Client, cfg worker.MQTTConfigSnapsho
 	m.mu.Lock()
 	m.subs[wildcard] = struct{}{}
 	m.mu.Unlock()
+
+	m.subscribeExtra(c, cfg)
 }
 
 // onConnectJSON handles plain-JSON session establishment (original behaviour).
-func (m *Manager) onConnectJSON(c paho.Client) {
+func (m *Manager) onConnectJSON(c paho.Client, cfg worker.MQTTConfigSnapshot) {
 	tqos := m.cache.TopicsQoS()
 	log.Printf("mqtt connected, subscribing %d topic(s)", len(tqos))
 	for topic, qos := range tqos {
@@ -265,6 +270,7 @@ func (m *Manager) onConnectJSON(c paho.Client) {
 		m.subs[t] = struct{}{}
 		m.mu.Unlock()
 	}
+	m.subscribeExtra(c, cfg)
 }
 
 // onConnectionLost is called by paho whenever the TCP connection drops.
@@ -351,4 +357,45 @@ func (m *Manager) publishRebirth(groupID, nodeID string) {
 		}
 	}()
 	log.Printf("sparkplug: sent NCMD rebirth to %s/%s", groupID, nodeID)
+}
+
+// subscribeExtra subscribes to all additional MQTT topic patterns stored in
+// cfg.SpTopics (newline/comma-separated). Each pattern is subscribed at QoS 0
+// and routes through onMessage — appearing in the broker monitor and triggering
+// signal dispatch if a matching mapping exists.
+func (m *Manager) subscribeExtra(c paho.Client, cfg worker.MQTTConfigSnapshot) {
+	patterns := parseTopicList(cfg.SpTopics)
+	if len(patterns) == 0 {
+		return
+	}
+	log.Printf("mqtt: subscribing %d extra topic(s)", len(patterns))
+	for _, pat := range patterns {
+		p := pat
+		tok := c.Subscribe(p, 0, func(_ paho.Client, msg paho.Message) {
+			m.onMessage(msg.Topic(), msg.Payload())
+		})
+		go func() {
+			tok.Wait()
+			if err := tok.Error(); err != nil {
+				log.Printf("mqtt extra subscribe %s: %v", p, err)
+			}
+		}()
+		m.mu.Lock()
+		m.subs[p] = struct{}{}
+		m.mu.Unlock()
+	}
+}
+
+// parseTopicList splits a newline/comma-separated topic pattern string,
+// trims whitespace from each token, and discards blank entries.
+func parseTopicList(raw string) []string {
+	var out []string
+	for _, tok := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ','
+	}) {
+		if t := strings.TrimSpace(tok); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

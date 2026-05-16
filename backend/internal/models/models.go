@@ -31,6 +31,7 @@ type MQTTConfig struct {
 	SparkplugEnabled bool   `db:"sparkplug_enabled" json:"sparkplug_enabled"`
 	SpGroupID        string `db:"sp_group_id"       json:"sp_group_id"`
 	SpHostID         string `db:"sp_host_id"        json:"sp_host_id"`
+	SpTopics         string `db:"sp_topics"          json:"sp_topics"`
 }
 
 // Topic = MQTT subscription bound to a device.

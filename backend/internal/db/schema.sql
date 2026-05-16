@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS mqtt_config (
     use_tls           INTEGER NOT NULL DEFAULT 0,
     sparkplug_enabled INTEGER NOT NULL DEFAULT 0,
     sp_group_id       TEXT    NOT NULL DEFAULT 'goGateway',
-    sp_host_id        TEXT    NOT NULL DEFAULT 'goGateway-host'
+    sp_host_id        TEXT    NOT NULL DEFAULT 'goGateway-host',
+    sp_topics         TEXT    NOT NULL DEFAULT ''
 );
 INSERT OR IGNORE INTO mqtt_config (id) VALUES (1);
 

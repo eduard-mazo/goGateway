@@ -32,6 +32,7 @@ export interface MQTTConfig {
   sparkplug_enabled: boolean
   sp_group_id: string
   sp_host_id: string
+  sp_topics: string
 }
 
 // IEC104Gateway = host-wide IEC-104 settings. Singleton.

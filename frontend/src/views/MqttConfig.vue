@@ -17,6 +17,7 @@ const cfg = ref<MQTTConfig>({
   id: 1, host: 'localhost', port: 1883, username: '', password: '',
   client_id: 'goGateway', use_tls: false,
   sparkplug_enabled: false, sp_group_id: 'goGateway', sp_host_id: 'goGateway-host',
+  sp_topics: '',
 })
 const saving = ref(false)
 
@@ -181,6 +182,27 @@ function fmtAgo(ts?: number | null) {
               </p>
             </div>
           </div>
+        </div>
+
+        <!-- Additional subscriptions — applies in both Sparkplug and JSON modes -->
+        <div class="space-y-1.5">
+          <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Suscripciones adicionales</Label>
+          <textarea
+            v-model="cfg.sp_topics"
+            rows="4"
+            placeholder="spBv1.0/OtherGroup/#
+plant/+/data
+sensors/#"
+            class="w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono
+                   placeholder:text-muted-foreground focus-visible:outline-none
+                   focus-visible:ring-1 focus-visible:ring-ring resize-y"
+          />
+          <p class="text-[11px] text-muted-foreground">
+            Un patrón MQTT por línea (o separados por comas). Se suscriben además de la suscripción
+            principal, en cualquier modo. Útil para múltiples grupos Sparkplug
+            (<span class="font-mono">spBv1.0/OtherGroup/#</span>), tópicos JSON adicionales o
+            cualquier wildcard de monitoreo.
+          </p>
         </div>
 
         <div class="font-mono text-[11px] text-muted-foreground border-t border-border pt-4">

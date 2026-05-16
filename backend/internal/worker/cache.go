@@ -154,13 +154,14 @@ func (c *MappingCache) TopicsQoS() map[string]byte {
 type MQTTConfigSnapshot struct {
 	SpGroupID string
 	SpHostID  string
+	SpTopics  string // newline/comma-separated extra MQTT topic patterns
 }
 
 // LoadMQTTConfig = helper to read singleton config (all columns).
 func LoadMQTTConfig(db *sqlx.DB) (models.MQTTConfig, error) {
 	var c models.MQTTConfig
 	err := db.Get(&c, `SELECT id,host,port,username,password,client_id,use_tls,
-	                          sparkplug_enabled,sp_group_id,sp_host_id
+	                          sparkplug_enabled,sp_group_id,sp_host_id,sp_topics
 	                     FROM mqtt_config WHERE id=1`)
 	return c, err
 }

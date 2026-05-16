@@ -164,6 +164,7 @@ func migrate(db *sqlx.DB) error {
 			{"sparkplug_enabled", "INTEGER NOT NULL DEFAULT 0"},
 			{"sp_group_id", "TEXT NOT NULL DEFAULT 'goGateway'"},
 			{"sp_host_id", "TEXT NOT NULL DEFAULT 'goGateway-host'"},
+			{"sp_topics", "TEXT NOT NULL DEFAULT ''"},
 		} {
 			var has int
 			if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('mqtt_config') WHERE name=?`, col.name); err != nil {
