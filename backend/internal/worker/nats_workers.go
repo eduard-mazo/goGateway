@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 
@@ -50,7 +51,7 @@ func (w *SCADAWorker) Run(ctx context.Context) error {
 	for {
 		msg, err := iter.Next()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, jetstream.ErrMsgIteratorClosed) {
 				return nil
 			}
 			log.Printf("scada worker: message error: %v", err)
@@ -115,7 +116,7 @@ func (w *TSDBWorker) Run(ctx context.Context) error {
 	for {
 		msg, err := iter.Next()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, jetstream.ErrMsgIteratorClosed) {
 				return nil
 			}
 			log.Printf("tsdb worker: message error: %v", err)

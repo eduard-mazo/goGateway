@@ -195,6 +195,7 @@ func main() {
 	log.Println("shutdown...")
 
 	// Orderly shutdown. Sequence matters:
+	//   0. close SSE connections → unblocks http.Shutdown (SSE are long-lived)
 	//   1. stop accepting HTTP   → no new writes from the API
 	//   2. stop MQTT             → no new samples from the bus
 	//   3. stop IEC-104 fleet    → disconnect SCADA masters
@@ -202,6 +203,7 @@ func main() {
 	//   5. cancel ctx            → history drains its buffer via ctx.Done
 	//   6. wait for drain        → all rows flushed
 	//   7. checkpoint + close DB → WAL merged, no truncated tail
+	brokerMon.Close() // terminate SSE streams so Shutdown doesn't time out
 	shCtx, shCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shCancel()
 	if err := srv.Shutdown(shCtx); err != nil {

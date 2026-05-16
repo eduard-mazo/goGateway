@@ -7,6 +7,7 @@ package sparkplug
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -115,6 +116,63 @@ func DecodePayload(data []byte) (*Payload, error) {
 		return nil, err
 	}
 	return p, nil
+}
+
+// ─── Monitor JSON serialisation ──────────────────────────────────────────────
+
+// metricView is a JSON-serialisable snapshot of one Metric for monitor display.
+type metricView struct {
+	Name  string      `json:"name"`
+	Alias uint64      `json:"alias,omitempty"`
+	Dt    uint32      `json:"dt"`
+	Ts    uint64      `json:"ts,omitempty"`
+	Null  bool        `json:"null,omitempty"`
+	Hist  bool        `json:"hist,omitempty"`
+	V     interface{} `json:"v"`
+}
+
+// payloadView is a JSON-serialisable snapshot of a Payload for monitor display.
+type payloadView struct {
+	Ts      uint64       `json:"ts"`
+	Seq     uint64       `json:"seq"`
+	Metrics []metricView `json:"metrics"`
+}
+
+// ToJSON returns a compact JSON encoding of the decoded payload for human-
+// readable display in the broker monitor. Returns (nil, err) on failure.
+func (p *Payload) ToJSON() ([]byte, error) {
+	pv := payloadView{
+		Ts:      p.Timestamp,
+		Seq:     p.Seq,
+		Metrics: make([]metricView, len(p.Metrics)),
+	}
+	for i := range p.Metrics {
+		m := &p.Metrics[i]
+		mv := metricView{
+			Name: m.Name,
+			Dt:   m.Datatype,
+			Ts:   m.Timestamp,
+			Null: m.IsNull,
+			Hist: m.IsHistorical,
+		}
+		if m.HasAlias {
+			mv.Alias = m.Alias
+		}
+		switch {
+		case m.hasDbl:
+			mv.V = m.dblVal
+		case m.hasFlt:
+			mv.V = m.fltVal
+		case m.hasUint:
+			mv.V = m.uintVal
+		case m.hasBool:
+			mv.V = m.boolVal
+		case m.hasStr:
+			mv.V = m.StringValue
+		}
+		pv.Metrics[i] = mv
+	}
+	return json.Marshal(pv)
 }
 
 // ─── Encoder (outgoing messages) ─────────────────────────────────────────────

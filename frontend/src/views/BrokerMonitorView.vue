@@ -63,6 +63,7 @@ const missedSignals = ref<MissedSignal[]>([])
 const missedLoading = ref(false)
 
 let es: EventSource | null = null
+let wasConnected = false
 let rateWindow: number[] = []
 const eventsPerMin = ref(0)
 
@@ -127,7 +128,11 @@ async function loadMissed() {
 function connect() {
   if (es) { es.close(); es = null }
   es = new EventSource('/api/broker/stream')
-  es.onopen = () => { connected.value = true }
+  es.onopen = () => {
+    if (wasConnected) loadSnapshot() // reconnect after server restart — refresh buffer
+    wasConnected = true
+    connected.value = true
+  }
   es.onerror = () => { connected.value = false }
   es.onmessage = (e: MessageEvent) => {
     if (paused.value) return
@@ -486,9 +491,16 @@ onUnmounted(disconnect)
                   {{ selectedEvent.ssfvHits === 1 ? '1 métrica enviada' : `${selectedEvent.ssfvHits} métricas enviadas` }} a pipeline SSFV → tbl_valores
                 </span>
               </div>
+
+              <!-- Decoded payload JSON (populated by the server-side protobuf decoder) -->
+              <div v-if="selectedEvent.payload" class="space-y-1.5 mt-2">
+                <p class="text-[10px] uppercase tracking-wide font-semibold text-blue-400">Payload decodificado</p>
+                <pre
+                  class="text-[11px] font-mono bg-muted/50 rounded-sm p-3 overflow-auto max-h-[400px] whitespace-pre-wrap break-all leading-relaxed"
+                >{{ prettyJson(selectedEvent.payload) }}</pre>
+              </div>
               <p v-else class="text-[11px] text-muted-foreground mt-2">
-                El payload es binario protobuf (spBv1.0) — no se muestra contenido crudo.
-                Los valores se decodifican y persisten vía SparkplugHandler.
+                El payload es protobuf binario (spBv1.0) — decodificación no disponible.
               </p>
             </div>
           </template>

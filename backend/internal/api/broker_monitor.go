@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"goGateway/internal/sparkplug"
 )
 
 const (
-	monitorCap     = 1000
-	maxPayloadStore = 2048 // max bytes stored per event for JSON/state payloads
+	monitorCap      = 1000
+	maxPayloadStore = 2048 // max bytes stored per event
 )
 
 // BrokerEvent is one captured MQTT message metadata record.
@@ -19,9 +21,9 @@ type BrokerEvent struct {
 	At          time.Time `json:"at"`
 	Topic       string    `json:"topic"`
 	PayloadSize int       `json:"size"`
-	Kind        string    `json:"kind"`              // "sparkplug", "ssfv", "json", "state"
-	Payload     string    `json:"payload,omitempty"` // raw text for json/ssfv/state; empty for sparkplug
-	SsfvHits    int       `json:"ssfvHits,omitempty"` // metrics forwarded to SSFV pipeline (sparkplug only)
+	Kind        string    `json:"kind"`               // "sparkplug", "ssfv", "json", "state"
+	Payload     string    `json:"payload,omitempty"`  // decoded text; JSON for sparkplug, raw for others
+	SsfvHits    int       `json:"ssfvHits,omitempty"` // metrics forwarded to SSFV (sparkplug only)
 }
 
 // BrokerMonitor is a thread-safe ring buffer for recent broker events that
@@ -33,17 +35,29 @@ type BrokerMonitor struct {
 	count int   // fill level 0..monitorCap
 	total int64 // monotonic ID counter
 	subs  map[chan BrokerEvent]struct{}
+
+	once sync.Once
+	done chan struct{} // closed by Close() to unblock all ServeStream goroutines
 }
 
 func NewBrokerMonitor() *BrokerMonitor {
-	return &BrokerMonitor{subs: make(map[chan BrokerEvent]struct{})}
+	return &BrokerMonitor{
+		subs: make(map[chan BrokerEvent]struct{}),
+		done: make(chan struct{}),
+	}
+}
+
+// Close terminates all active SSE connections so http.Server.Shutdown can
+// complete without timing out waiting for long-lived SSE clients to disconnect.
+// Safe to call multiple times.
+func (b *BrokerMonitor) Close() {
+	b.once.Do(func() { close(b.done) })
 }
 
 // Push records an MQTT message and fans it out to live SSE clients.
 // Never blocks: slow clients are dropped rather than back-pressuring the MQTT goroutine.
-// For json, ssfv, and state kinds the raw payload is stored (truncated at maxPayloadStore).
-// Sparkplug payloads are binary protobuf and not stored.
-// ssfvHits is the number of metrics forwarded to the SSFV pipeline (sparkplug messages only).
+// For sparkplug messages the binary protobuf is decoded to JSON for display.
+// ssfvHits is the number of metrics forwarded to the SSFV pipeline (sparkplug only).
 func (b *BrokerMonitor) Push(topic, kind string, payload []byte, ssfvHits int) {
 	var payloadStr string
 	switch kind {
@@ -53,6 +67,18 @@ func (b *BrokerMonitor) Push(topic, kind string, payload []byte, ssfvHits int) {
 		} else {
 			payloadStr = string(payload[:maxPayloadStore]) + "\n…(truncado)"
 		}
+	case "sparkplug":
+		// Decode binary protobuf to human-readable JSON for the monitor UI.
+		// The original binary length is still used for PayloadSize below.
+		if p, err := sparkplug.DecodePayload(payload); err == nil {
+			if js, err := p.ToJSON(); err == nil {
+				if len(js) <= maxPayloadStore {
+					payloadStr = string(js)
+				} else {
+					payloadStr = string(js[:maxPayloadStore]) + "\n…(truncado)"
+				}
+			}
+		}
 	}
 
 	b.mu.Lock()
@@ -61,7 +87,7 @@ func (b *BrokerMonitor) Push(topic, kind string, payload []byte, ssfvHits int) {
 		ID:          b.total,
 		At:          time.Now(),
 		Topic:       topic,
-		PayloadSize: len(payload),
+		PayloadSize: len(payload), // always the original wire size
 		Kind:        kind,
 		Payload:     payloadStr,
 		SsfvHits:    ssfvHits,
@@ -130,6 +156,7 @@ func (b *BrokerMonitor) ServeSnapshot(w http.ResponseWriter, r *http.Request) {
 // ServeStream is an SSE endpoint that pushes BrokerEvents in real-time.
 // It does not replay history — use ServeSnapshot for initial page load.
 // This handler must be registered outside any timeout middleware.
+// It returns as soon as the client disconnects OR Close() is called.
 func (b *BrokerMonitor) ServeStream(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -151,6 +178,8 @@ func (b *BrokerMonitor) ServeStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-b.done: // server shutting down — terminate this SSE connection
 			return
 		case ev := <-ch:
 			data, _ := json.Marshal(ev)
