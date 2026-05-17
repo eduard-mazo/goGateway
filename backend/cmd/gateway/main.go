@@ -32,6 +32,7 @@ func main() {
 		log.Fatalf("db open: %v", err)
 	}
 	log.Printf("sqlite ready: %s", cfg.DBPath)
+	seedDefaultAdmin(database)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -243,6 +244,33 @@ func main() {
 	}
 
 	closeDatabase(database)
+}
+
+// seedDefaultAdmin creates an admin/admin superadmin account if the users table
+// is empty. The operator should change this password immediately after first
+// login — the warning log makes that hard to miss.
+func seedDefaultAdmin(database *sqlx.DB) {
+	var count int
+	if err := database.Get(&count, `SELECT COUNT(*) FROM users`); err != nil {
+		log.Printf("seed: check users: %v", err)
+		return
+	}
+	if count > 0 {
+		return
+	}
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		log.Printf("seed: hash password: %v", err)
+		return
+	}
+	if _, err := database.Exec(
+		`INSERT INTO users (username, password_hash, full_name, role, enabled)
+		 VALUES ('admin', ?, 'Administrador', 'superadmin', 1)`, hash,
+	); err != nil {
+		log.Printf("seed: insert admin: %v", err)
+		return
+	}
+	log.Println("AUTH: default user created — username: admin, password: admin — CHANGE IMMEDIATELY")
 }
 
 // loadIEC104 reloads the manager from DB: gateway-wide listen IP + every

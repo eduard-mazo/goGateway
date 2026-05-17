@@ -288,3 +288,16 @@ export interface SSFVFrontera {
 export interface SSFVCatalogItem {
   [key: string]: unknown
 }
+
+// ─── Auth / User Management ───────────────────────────────────────────────────
+
+export interface User {
+  id: number
+  username: string
+  email: string
+  full_name: string
+  role: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}

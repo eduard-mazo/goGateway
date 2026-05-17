@@ -4,18 +4,20 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Toaster } from '@/components/ui/sonner'
 import {
   Gauge, Radio, Server, Table2, History as HistoryIcon, Cpu,
-  Database, Sun as SunIcon, Activity,
+  Database, Sun as SunIcon, Activity, Users,
   PanelLeftClose, PanelLeftOpen, Moon, Sun, Menu, X, WifiOff,
 } from 'lucide-vue-next'
 import { useStatus } from '@/composables/useStatus'
+import { useAuth } from '@/composables/useAuth'
 import StatusPill from '@/components/StatusPill.vue'
 import UserBadge from '@/components/UserBadge.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { t } from '@/i18n'
 
 const { status, errorCount, isStale } = useStatus()
+const { role } = useAuth()
 
-const nav = [
+const baseNav = [
   { to: '/', label: t.nav.overview, icon: Gauge },
   { to: '/mappings', label: t.nav.mappings, icon: Table2 },
   { to: '/devices', label: t.nav.devices, icon: Cpu },
@@ -27,6 +29,14 @@ const nav = [
   { to: '/ssfv', label: 'Plantas Solares', icon: SunIcon },
   { to: '/broker-monitor', label: 'Monitor Broker', icon: Activity },
 ]
+
+const nav = computed(() => {
+  const items = [...baseNav]
+  if (role.value === 'superadmin') {
+    items.push({ to: '/users', label: 'Usuarios', icon: Users })
+  }
+  return items
+})
 
 const collapsed = ref(false)
 const mobileOpen = ref(false)

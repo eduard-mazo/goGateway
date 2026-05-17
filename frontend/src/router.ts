@@ -19,5 +19,15 @@ export const router = createRouter({
     { path: '/tsdb', component: () => import('./views/TSDBView.vue'), meta: { title: 'Pipeline TSDB' } },
     { path: '/ssfv', component: () => import('./views/SSFVView.vue'), meta: { title: 'SSFV – Plantas Solares' } },
     { path: '/broker-monitor', component: () => import('./views/BrokerMonitorView.vue'), meta: { title: 'Monitor Broker' } },
+    { path: '/users', component: () => import('./views/UsersView.vue'), meta: { title: 'Gestión de Usuarios' } },
   ],
+})
+
+// Global auth guard: redirect to /login if no access token is stored.
+// Pages with layout:'auth' (login itself) are always allowed through.
+router.beforeEach(to => {
+  if (to.meta?.layout === 'auth') return true
+  const token = localStorage.getItem('gw:access')
+  if (!token) return { path: '/login', query: { redirect: to.fullPath } }
+  return true
 })
