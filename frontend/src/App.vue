@@ -4,25 +4,31 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Toaster } from '@/components/ui/sonner'
 import {
   Gauge, Radio, Server, Table2, History as HistoryIcon, Cpu,
-  PanelLeftClose, PanelLeftOpen, Moon, Sun, Menu, X,
+  Database, Sun as SunIcon, Activity,
+  PanelLeftClose, PanelLeftOpen, Moon, Sun, Menu, X, WifiOff,
 } from 'lucide-vue-next'
 import { useStatus } from '@/composables/useStatus'
 import StatusPill from '@/components/StatusPill.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { t } from '@/i18n'
 
-const { status } = useStatus()
+const { status, errorCount, isStale } = useStatus()
 
 const nav = [
-  { to: '/', label: 'Overview', icon: Gauge },
-  { to: '/mappings', label: 'Signal Mapping', icon: Table2 },
-  { to: '/devices', label: 'Devices & Topics', icon: Cpu },
-  { to: '/mqtt', label: 'MQTT', icon: Radio },
-  { to: '/iec104', label: 'IEC 104', icon: Server },
-  { to: '/history', label: 'History', icon: HistoryIcon },
+  { to: '/', label: t.nav.overview, icon: Gauge },
+  { to: '/mappings', label: t.nav.mappings, icon: Table2 },
+  { to: '/devices', label: t.nav.devices, icon: Cpu },
+  { to: '/mqtt', label: t.nav.mqtt, icon: Radio },
+  { to: '/nats', label: t.nav.nats, icon: Database },
+  { to: '/iec104', label: t.nav.iec104, icon: Server },
+  { to: '/history', label: t.nav.history, icon: HistoryIcon },
+  { to: '/tsdb', label: t.nav.tsdb, icon: Database },
+  { to: '/ssfv', label: 'Plantas Solares', icon: SunIcon },
+  { to: '/broker-monitor', label: 'Monitor Broker', icon: Activity },
 ]
 
-const collapsed = ref(false)        // desktop mini mode
-const mobileOpen = ref(false)       // mobile drawer
+const collapsed = ref(false)
+const mobileOpen = ref(false)
 const dark = ref(false)
 
 onMounted(() => {
@@ -51,7 +57,6 @@ function applyTheme() {
 const route = useRoute()
 const pageTitle = computed(() => (route.meta?.title as string) || 'goGateway')
 
-// Close mobile drawer on route change.
 watch(() => route.fullPath, () => { mobileOpen.value = false })
 
 const brokerState = computed<'ok' | 'warn' | 'fault' | 'idle'>(() => {
@@ -67,24 +72,29 @@ type FleetState = 'ok' | 'warn' | 'fault' | 'idle' | 'wait'
 const iecFleet = computed<{ state: FleetState; label: string; value: string }>(() => {
   const ip = status.value?.iec104.listen_ip || '0.0.0.0'
   const list = status.value?.iec104.servers ?? []
-  if (!list.length) return { state: 'idle', label: 'IEC 104', value: `${ip} · no endpoints` }
+  if (!list.length) return { state: 'idle', label: 'IEC 104', value: `${ip} · sin endpoints` }
   const enabled = list.filter(s => s.enabled)
-  if (!enabled.length) return { state: 'idle', label: 'IEC 104', value: `${ip} · disabled` }
+  if (!enabled.length) return { state: 'idle', label: 'IEC 104', value: `${ip} · ${t.status.disabled}` }
   const running = enabled.filter(s => s.running)
-  if (!running.length) return { state: 'fault', label: 'IEC 104', value: `${ip} · bind failed` }
+  if (!running.length) return { state: 'fault', label: 'IEC 104', value: `${ip} · ${t.status.bindFailed}` }
   if (running.length < enabled.length) {
-    return { state: 'warn', label: 'IEC 104', value: `${ip} · ${running.length}/${enabled.length} bound` }
+    return { state: 'warn', label: 'IEC 104', value: `${ip} · ${running.length}/${enabled.length} enlazados` }
   }
   const totalActivated = list.reduce((n, s) => n + s.activated, 0)
   const totalTCP = list.reduce((n, s) => n + s.clients, 0)
   if (totalActivated > 0) {
-    return { state: 'ok', label: 'IEC 104', value: `${ip} · ${totalActivated} protocol link${totalActivated === 1 ? '' : 's'}` }
+    return { state: 'ok', label: 'IEC 104', value: `${ip} · ${totalActivated} enlace${totalActivated === 1 ? '' : 's'} protocolo` }
   }
   if (totalTCP > 0) {
-    return { state: 'warn', label: 'IEC 104', value: `${ip} · ${totalTCP} TCP, no STARTDT` }
+    return { state: 'warn', label: 'IEC 104', value: `${ip} · ${totalTCP} TCP, sin STARTDT` }
   }
-  return { state: 'wait', label: 'IEC 104', value: `${ip} · listening` }
+  return { state: 'wait', label: 'IEC 104', value: `${ip} · ${t.status.listening}` }
 })
+
+// Show a subtle reconnecting indicator when polling has failed multiple times
+// and data is stale. Threshold of 3 prevents transient network blips from
+// alarming the operator.
+const showReconnecting = computed(() => isStale.value && errorCount.value >= 3)
 
 function fmtUptime(s: number) {
   if (!s) return '—'
@@ -94,6 +104,11 @@ function fmtUptime(s: number) {
   if (h) return `${h}h ${m}m`
   if (m) return `${m}m ${sec}s`
   return `${sec}s`
+}
+
+function fmtBuildTime(bt?: string) {
+  if (!bt || bt === 'dev') return 'local dev'
+  return bt.replace('T', ' ').slice(0, 16)
 }
 </script>
 
@@ -107,8 +122,9 @@ function fmtUptime(s: number) {
       @click="mobileOpen = false"
     />
 
-    <!-- SIDEBAR -->
+    <!-- ── SIDEBAR ────────────────────────────────────────────────────────── -->
     <aside
+      aria-label="Navegación principal"
       class="bg-sidebar text-sidebar-foreground border-r border-sidebar-border flex flex-col h-screen overflow-hidden transition-[width,transform] duration-300 ease-out
              fixed inset-y-0 left-0 z-50 md:static md:z-auto"
       :class="[
@@ -129,15 +145,18 @@ function fmtUptime(s: number) {
         </div>
         <button
           class="md:hidden grid place-items-center w-8 h-8 rounded-sm hover:bg-sidebar-accent text-white/70"
-          aria-label="Close menu"
+          aria-label="Cerrar menú"
           @click="mobileOpen = false"
         >
           <X class="h-4 w-4" />
         </button>
       </div>
 
-      <!-- Nav (scrollable only if it really overflows; sidebar itself doesn't scroll) -->
-      <nav class="flex-1 min-h-0 overflow-y-auto py-4 px-3 space-y-0.5 sidebar-nav-scroll">
+      <!-- Nav -->
+      <nav
+        aria-label="Secciones del gateway"
+        class="flex-1 min-h-0 overflow-y-auto py-4 px-3 space-y-0.5 sidebar-nav-scroll"
+      >
         <RouterLink
           v-for="item in nav"
           :key="item.to"
@@ -145,8 +164,9 @@ function fmtUptime(s: number) {
           class="group relative flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
           active-class="bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:bg-[color:var(--sidebar-primary)]"
           :title="item.label"
+          :aria-label="item.label"
         >
-          <component :is="item.icon" class="h-4 w-4 shrink-0" />
+          <component :is="item.icon" class="h-4 w-4 shrink-0" aria-hidden="true" />
           <span class="sidebar-label truncate">{{ item.label }}</span>
         </RouterLink>
       </nav>
@@ -155,54 +175,88 @@ function fmtUptime(s: number) {
       <div class="border-t border-sidebar-border p-3 space-y-1 shrink-0">
         <button
           class="w-full flex items-center gap-3 rounded-sm px-3 py-2 text-sm hover:bg-sidebar-accent transition-colors"
-          :title="dark ? 'Light mode' : 'Dark mode'"
+          :title="dark ? t.nav.lightMode : t.nav.darkMode"
           @click="toggleTheme"
         >
-          <component :is="dark ? Sun : Moon" class="h-4 w-4 shrink-0" />
-          <span class="sidebar-label">{{ dark ? 'Light' : 'Dark' }}</span>
+          <component :is="dark ? Sun : Moon" class="h-4 w-4 shrink-0" aria-hidden="true" />
+          <span class="sidebar-label">{{ dark ? t.nav.lightMode : t.nav.darkMode }}</span>
         </button>
         <button
           class="hidden md:flex w-full items-center gap-3 rounded-sm px-3 py-2 text-sm hover:bg-sidebar-accent transition-colors"
-          :title="collapsed ? 'Expand' : 'Collapse'"
+          :title="t.nav.collapse"
           @click="toggleSidebar"
         >
-          <component :is="collapsed ? PanelLeftOpen : PanelLeftClose" class="h-4 w-4 shrink-0" />
-          <span class="sidebar-label">Collapse</span>
+          <component :is="collapsed ? PanelLeftOpen : PanelLeftClose" class="h-4 w-4 shrink-0" aria-hidden="true" />
+          <span class="sidebar-label">{{ t.nav.collapse }}</span>
         </button>
         <div class="px-3 pt-3 sidebar-wide-only">
-          <div class="text-[10px] uppercase tracking-[0.22em] text-[color:var(--epm-citrico)] font-semibold">Uptime</div>
+          <div class="text-[10px] uppercase tracking-[0.22em] text-[color:var(--epm-citrico)] font-semibold">{{ t.nav.uptime }}</div>
           <div class="font-mono text-xs mt-1 text-white/90">{{ fmtUptime(status?.uptime_seconds ?? 0) }}</div>
+        </div>
+        <div class="px-3 pt-2 pb-1 sidebar-wide-only">
+          <div class="text-[10px] uppercase tracking-[0.22em] text-[color:var(--epm-citrico)] font-semibold">Build</div>
+          <div class="font-mono text-[11px] mt-1 text-white/70 truncate">{{ status?.git_commit ?? '—' }}</div>
+          <div class="font-mono text-[10px] text-white/40 truncate">{{ fmtBuildTime(status?.build_time) }}</div>
         </div>
       </div>
     </aside>
 
-    <!-- MAIN COLUMN -->
+    <!-- ── MAIN COLUMN ────────────────────────────────────────────────────── -->
     <div class="flex-1 flex flex-col min-w-0 h-screen overflow-hidden bg-grain">
-      <!-- Top rail: never scrolls, never reflows on status change -->
-      <header class="shrink-0 flex items-center justify-between gap-3 sm:gap-6 h-16 px-4 sm:px-8 border-b border-border bg-background/80 backdrop-blur-md z-30">
+      <!-- Top rail -->
+      <header
+        role="banner"
+        class="shrink-0 flex items-center justify-between gap-3 sm:gap-6 h-16 px-4 sm:px-8 border-b border-border bg-background/80 backdrop-blur-md z-30"
+      >
         <div class="flex items-center gap-3 min-w-0 flex-1">
           <button
             class="md:hidden grid place-items-center w-9 h-9 rounded-sm border border-border hover:bg-muted shrink-0"
-            aria-label="Open menu"
+            aria-label="Abrir menú"
             @click="toggleMobile"
           >
-            <Menu class="h-4 w-4" />
+            <Menu class="h-4 w-4" aria-hidden="true" />
           </button>
           <div class="flex items-baseline gap-3 min-w-0">
             <h2 class="font-heading text-xl sm:text-2xl leading-none truncate">{{ pageTitle }}</h2>
-            <span class="font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground hidden lg:inline">
+            <span class="font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground hidden lg:inline" aria-hidden="true">
               / {{ route.path === '/' ? 'overview' : route.path.slice(1) }}
             </span>
           </div>
         </div>
-        <!-- Status pills: desktop only. Mobile sees status on dashboard. -->
-        <div class="hidden md:flex items-center gap-3 shrink-0">
-          <StatusPill label="MQTT" :state="brokerState" :value="brokerText" stable />
-          <StatusPill :label="iecFleet.label" :state="iecFleet.state" :value="iecFleet.value" stable />
+
+        <!-- Header right: status pills + reconnect indicator -->
+        <div class="flex items-center gap-3 shrink-0">
+          <!-- Reconnecting indicator: only shown after 3+ consecutive failures
+               with stale data. Amber pill keeps the operator informed without
+               causing alarm for brief network blips. -->
+          <Transition name="fade">
+            <div
+              v-if="showReconnecting"
+              class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-sm border border-[color:var(--signal-warn)] bg-[color:color-mix(in_srgb,var(--signal-warn)_10%,transparent)]"
+              role="status"
+              aria-live="polite"
+              :aria-label="`Sin señal del servidor, reintento ${errorCount}`"
+            >
+              <WifiOff class="h-3 w-3 text-[color:var(--signal-warn)]" aria-hidden="true" />
+              <span class="text-[10px] uppercase tracking-[0.18em] font-bold text-[color:var(--signal-warn)]">
+                Reconectando
+              </span>
+            </div>
+          </Transition>
+
+          <!-- Live status pills: desktop only -->
+          <div class="hidden md:flex items-center gap-3" aria-label="Estado del sistema">
+            <StatusPill label="MQTT" :state="brokerState" :value="brokerText" stable />
+            <StatusPill :label="iecFleet.label" :state="iecFleet.state" :value="iecFleet.value" stable />
+          </div>
         </div>
       </header>
 
-      <main class="flex-1 min-h-0 overflow-auto">
+      <main
+        id="main-content"
+        class="flex-1 min-h-0 overflow-auto"
+        role="main"
+      >
         <RouterView v-slot="{ Component }">
           <transition name="fade" mode="out-in">
             <component :is="Component" />
@@ -233,7 +287,6 @@ function fmtUptime(s: number) {
 .fade-enter-active, .fade-leave-active { transition: opacity 120ms ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
-/* Subtle scrollbar inside sidebar nav when overflow happens */
 .sidebar-nav-scroll {
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.18) transparent;

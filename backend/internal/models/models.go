@@ -17,14 +17,21 @@ type Device struct {
 }
 
 // MQTTConfig = broker connection params. Single row expected (id=1).
+// When SparkplugEnabled is true the client operates in Sparkplug B mode:
+// topics are spBv1.0 namespaced, payloads are protobuf, and signal mappings
+// are matched by MetricName instead of JSONKey.
 type MQTTConfig struct {
-	ID       int64  `db:"id" json:"id"`
-	Host     string `db:"host" json:"host"`
-	Port     int    `db:"port" json:"port"`
-	Username string `db:"username" json:"username"`
-	Password string `db:"password" json:"password"`
-	ClientID string `db:"client_id" json:"client_id"`
-	UseTLS   bool   `db:"use_tls" json:"use_tls"`
+	ID               int64  `db:"id"                json:"id"`
+	Host             string `db:"host"              json:"host"`
+	Port             int    `db:"port"              json:"port"`
+	Username         string `db:"username"          json:"username"`
+	Password         string `db:"password"          json:"password"`
+	ClientID         string `db:"client_id"         json:"client_id"`
+	UseTLS           bool   `db:"use_tls"           json:"use_tls"`
+	SparkplugEnabled bool   `db:"sparkplug_enabled" json:"sparkplug_enabled"`
+	SpGroupID        string `db:"sp_group_id"       json:"sp_group_id"`
+	SpHostID         string `db:"sp_host_id"        json:"sp_host_id"`
+	SpTopics         string `db:"sp_topics"          json:"sp_topics"`
 }
 
 // Topic = MQTT subscription bound to a device.
@@ -67,27 +74,61 @@ type IEC104Server struct {
 // SignalMapping = core row. MQTT key → IEC 104 point on a specific slave.
 // ServerID pins the mapping to one iec104_servers row; values are dispatched
 // only to that endpoint and (server_id, ioa) is the uniqueness key.
+// QualityKey, if non-empty, names the JSON key in the MQTT payload that carries
+// the quality for this signal (overrides the payload-level "quality" field).
+// MetricName, if non-empty, is the Sparkplug B metric name used when the
+// gateway operates in Sparkplug B mode (SparkplugEnabled=true in MQTTConfig).
 type SignalMapping struct {
-	ID             int64   `db:"id" json:"id"`
-	ServerID       int64   `db:"server_id" json:"server_id"`
-	TopicID        int64   `db:"topic_id" json:"topic_id"`
-	DeviceName     string  `db:"device_name" json:"device_name"`
-	VariableType   string  `db:"variable_type" json:"variable_type"`
+	ID             int64   `db:"id"             json:"id"`
+	ServerID       int64   `db:"server_id"      json:"server_id"`
+	TopicID        int64   `db:"topic_id"       json:"topic_id"`
+	DeviceName     string  `db:"device_name"    json:"device_name"`
+	VariableType   string  `db:"variable_type"  json:"variable_type"`
 	Characteristic string  `db:"characteristic" json:"characteristic"`
-	JSONKey        string  `db:"json_key" json:"json_key"`
-	IEC104Type     string  `db:"iec104_type" json:"iec104_type"`
-	IOA            int     `db:"ioa" json:"ioa"`
-	Unit           string  `db:"unit" json:"unit"`
-	Scale          float64 `db:"scale" json:"scale"`
-	Enabled        bool    `db:"enabled" json:"enabled"`
+	JSONKey        string  `db:"json_key"       json:"json_key"`
+	QualityKey     string  `db:"quality_key"    json:"quality_key"`
+	MetricName     string  `db:"metric_name"    json:"metric_name"`
+	IEC104Type     string  `db:"iec104_type"    json:"iec104_type"`
+	IOA            int     `db:"ioa"            json:"ioa"`
+	Unit           string  `db:"unit"           json:"unit"`
+	Scale          float64 `db:"scale"          json:"scale"`
+	Enabled        bool    `db:"enabled"        json:"enabled"`
+	Business       string  `db:"business"       json:"business"`
+	Company        string  `db:"company"        json:"company"`
 }
+
+// TSDBConfig = time-series pipeline settings. Singleton (id=1).
+type TSDBConfig struct {
+	ID         int64  `db:"id" json:"id"`
+	Backend    string `db:"backend" json:"backend"`
+	VMUrl      string `db:"vm_url" json:"vm_url"`
+	VMUsername string `db:"vm_username" json:"vm_username"`
+	VMPassword string `db:"vm_password" json:"vm_password"`
+	TsDSN      string `db:"ts_dsn" json:"ts_dsn"`
+	TsTable    string `db:"ts_table" json:"ts_table"`
+	WALPath    string `db:"wal_path" json:"wal_path"`
+	DLQPath    string `db:"dlq_path" json:"dlq_path"`
+	BatchSize  int    `db:"batch_size" json:"batch_size"`
+	FlushMs    int    `db:"flush_ms" json:"flush_ms"`
+	Enabled    bool   `db:"enabled" json:"enabled"`
+}
+
+// NATSConfig = settings for the NATS JetStream fan-out buffer. Singleton (id=1).
+type NATSConfig struct {
+	ID         int64  `db:"id" json:"id"`
+	Host       string `db:"host" json:"host"`
+	Port       int    `db:"port" json:"port"`
+	StreamName string `db:"stream_name" json:"stream_name"`
+	Enabled    bool   `db:"enabled" json:"enabled"`
+}
+
 
 // History = time-series log row.
 type History struct {
-	ID        int64     `db:"id" json:"id"`
-	MappingID int64     `db:"mapping_id" json:"mapping_id"`
-	SignalKey string    `db:"signal_key" json:"signal_key"`
-	Value     float64   `db:"value" json:"value"`
-	Quality   int       `db:"quality" json:"quality"`
-	Timestamp time.Time `db:"timestamp" json:"timestamp"`
+	ID         int64     `db:"id" json:"id"`
+	MappingID  int64     `db:"mapping_id" json:"mapping_id"`
+	SignalPath string    `db:"signal_path" json:"signal_path"`
+	Value      float64   `db:"value" json:"value"`
+	Quality    int       `db:"quality" json:"quality"`
+	Timestamp  time.Time `db:"timestamp" json:"timestamp"`
 }

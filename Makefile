@@ -1,8 +1,13 @@
-.PHONY: build frontend embed backend backend-win backend-rh-amd64 backend-rh-ppc64le build-win build-rh-amd64 build-rh-ppc64le run run-win test vet clean help
+.PHONY: build frontend embed backend backend-win backend-rh-amd64 backend-rh-ppc64le build-win build-rh-amd64 build-rh-ppc64le run run-win test vet clean help image-ppc64le export-ppc64le dev-container
 
 BIN        := goGateway
 FRONT_DIST := frontend/dist
 EMBED_DIST := backend/internal/web/dist
+
+# Container image artefacts
+IMAGE_NAME := gogateway:ppc64le          # production — loaded on target via docker load
+IMAGE_DEV  := gogateway:dev              # dev/test — runs natively on this host
+IMAGE_TAR  := goGateway-ppc64le.tar
 
 # HTTP listen address. Override: make run PORT=9090  or  make run HTTP=0.0.0.0:9090
 PORT ?= 8080
@@ -12,8 +17,19 @@ HTTP ?= :$(PORT)
 # make build DEBUG=1  bakes "on" as binary default.
 # GW_IEC_DEBUG=1 at runtime overrides either way.
 DEBUG ?= 0
+
+# Build stamp: UTC timestamp + short git commit injected into the binary.
+BUILD_TIME  := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+GIT_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
 LDFLAGS := -X goGateway/internal/config.DefaultHTTPListen=$(HTTP) \
-           -X goGateway/internal/iec104.DefaultDebug=$(DEBUG)
+           -X goGateway/internal/iec104.DefaultDebug=$(DEBUG) \
+           -X goGateway/internal/config.BuildTime=$(BUILD_TIME) \
+           -X goGateway/internal/config.GitCommit=$(GIT_COMMIT)
+
+# Container builds strip debug info and symbol tables (-s -w) for a smaller
+# binary.  -trimpath removes local build-host paths from the binary.
+LDFLAGS_CONTAINER := $(LDFLAGS) -s -w
 
 ##@ Build
 
@@ -68,10 +84,51 @@ test:  ## Run Go unit tests
 vet:  ## Run go vet on all backend packages
 	cd backend && go vet ./...
 
+##@ Container (ppc64le offline deployment)
+
+image-ppc64le: frontend embed  ## Build stripped ppc64le static binary + OCI image (FROM scratch)
+	@echo "  Building stripped ppc64le binary..."
+	cd backend && GOOS=linux GOARCH=ppc64le CGO_ENABLED=0 \
+	  go build -trimpath -ldflags "$(LDFLAGS_CONTAINER)" \
+	  -o ../$(BIN)-linux-ppc64le ./cmd/gateway
+	@echo "  Building OCI image $(IMAGE_NAME)..."
+	docker build \
+	  --platform linux/ppc64le \
+	  --file deploy/Dockerfile.ppc64le \
+	  --tag $(IMAGE_NAME) \
+	  --no-cache \
+	  .
+
+export-ppc64le: image-ppc64le  ## Export ppc64le OCI image to tar for offline transfer
+	docker save --output $(IMAGE_TAR) $(IMAGE_NAME)
+	@echo ""
+	@echo "  Artefact: $(IMAGE_TAR)  ($$(du -sh $(IMAGE_TAR) | cut -f1))"
+	@echo "  Load on target:  podman load -i $(IMAGE_TAR)"
+
+dev-container: frontend embed  ## Build + run dev container on host OS (linux/amd64) — Ctrl-C to stop
+	@echo "  Building linux/amd64 binary for dev container..."
+	cd backend && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+	  go build -trimpath -ldflags "$(LDFLAGS_CONTAINER)" \
+	  -o ../$(BIN)-linux-amd64 ./cmd/gateway
+	docker build \
+	  --platform linux/amd64 \
+	  --file deploy/Dockerfile.dev \
+	  --tag $(IMAGE_DEV) \
+	  .
+	@mkdir -p dev-data
+	docker run --rm -it \
+	  --name goGateway-dev \
+	  --network host \
+	  -v $(CURDIR)/dev-data:/data \
+	  -e GW_DB=/data/gateway.db \
+	  -e GW_HTTP=$(HTTP) \
+	  -e GW_IEC_DEBUG=1 \
+	  $(IMAGE_DEV)
+
 ##@ Misc
 
 clean:  ## Remove build artefacts (binaries + dist directories)
-	rm -f $(BIN) $(BIN).exe $(BIN)-linux-amd64 $(BIN)-linux-ppc64le
+	rm -f $(BIN) $(BIN).exe $(BIN)-linux-amd64 $(BIN)-linux-ppc64le $(IMAGE_TAR)
 	rm -rf $(EMBED_DIST) $(FRONT_DIST)
 
 help:  ## Show this help

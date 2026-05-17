@@ -18,7 +18,7 @@ func (h *HistoryHandler) Mount(r chi.Router) {
 
 // GET /history?mapping_id=1&limit=500
 func (h *HistoryHandler) query(w http.ResponseWriter, r *http.Request) {
-	q := `SELECT id,mapping_id,signal_key,value,quality,timestamp FROM history`
+	q := `SELECT id,mapping_id,signal_path,value,quality,timestamp FROM history`
 	args := []any{}
 	if mid := r.URL.Query().Get("mapping_id"); mid != "" {
 		q += ` WHERE mapping_id=?`

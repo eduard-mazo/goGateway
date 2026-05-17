@@ -15,7 +15,10 @@ import (
 	"goGateway/internal/config"
 	"goGateway/internal/db"
 	"goGateway/internal/iec104"
+	"goGateway/internal/models"
 	"goGateway/internal/mqtt"
+	"goGateway/internal/nats"
+	"goGateway/internal/tsdb"
 	"goGateway/internal/worker"
 )
 
@@ -44,6 +47,50 @@ func main() {
 
 	// History logger — async batched writer.
 	hist := worker.NewHistoryLogger(database, 4096, 100, 2*time.Second)
+
+	// TSDB manager — owns the pipeline lifecycle; reloaded from DB on config save.
+	tsdbMgr := tsdb.NewManager(ctx, hist.SetTSDB)
+
+	// Load initial TSDB config from DB and start pipeline if enabled.
+	var tsdbCfg models.TSDBConfig
+	if err := database.Get(&tsdbCfg, `SELECT id,backend,vm_url,vm_username,vm_password,ts_dsn,ts_table,wal_path,dlq_path,batch_size,flush_ms,enabled FROM tsdb_config WHERE id=1`); err != nil {
+		log.Printf("tsdb: load config: %v", err)
+	} else {
+		tsdbMgr.Reload(tsdbCfg)
+	}
+
+	// NATS Fan-out integration.
+	var natsCfg models.NATSConfig
+	if err := database.Get(&natsCfg, `SELECT id,host,port,stream_name,enabled FROM nats_config WHERE id=1`); err != nil {
+		log.Printf("nats: load config: %v", err)
+	}
+
+	var natsClient *nats.Client
+	var dispatcher worker.Dispatcher = worker.NewDirectDispatcher(iecMgr, hist)
+
+	if natsCfg.Enabled {
+		natsClient = nats.NewClient(natsCfg)
+		if err := natsClient.Connect(); err != nil {
+			log.Printf("nats: connect error (falling back to direct dispatch): %v", err)
+		} else {
+			dispatcher = worker.NewNatsDispatcher(natsClient, natsCfg.StreamName)
+			// Start NATS workers.
+			scadaWorker := worker.NewSCADAWorker(natsClient, natsCfg.StreamName, iecMgr)
+			go func() {
+				if err := scadaWorker.Run(ctx); err != nil {
+					log.Printf("scada worker: %v", err)
+				}
+			}()
+
+			tsdbWorker := worker.NewTSDBWorker(natsClient, natsCfg.StreamName, hist)
+			go func() {
+				if err := tsdbWorker.Run(ctx); err != nil {
+					log.Printf("tsdb worker: %v", err)
+				}
+			}()
+		}
+	}
+
 	histDone := make(chan struct{})
 	go func() {
 		hist.Run(ctx)
@@ -55,7 +102,26 @@ func main() {
 	if err := cache.Reload(); err != nil {
 		log.Printf("initial cache reload: %v", err)
 	}
-	mqttMgr := mqtt.NewManager(database, cache, iecMgr, hist)
+	mqttMgr := mqtt.NewManager(database, cache, dispatcher)
+
+	// SSFV subsystem: JSON handler routes solar equipment topics into TimescaleDB.
+	ssfvCache := worker.NewSSFVMappingCache()
+	ssfvHandler := worker.NewSSFVHandler(ssfvCache, tsdbMgr.Pipeline(), nil)
+	// Wire pool, alarm manager, and miss callback if SSFV adapter is already connected.
+	if sa := tsdbMgr.SSFVAdapter(); sa != nil {
+		alarmMgr := worker.NewAlarmManager(sa.Pool())
+		ssfvHandler.SetAlarmManager(alarmMgr)
+		ssfvHandler.SetMissFn(sa.RecordMiss)
+		if err := ssfvCache.Reload(sa.Pool()); err != nil {
+			log.Printf("ssfv cache reload: %v", err)
+		}
+	}
+	mqttMgr.SetSSFVHandler(ssfvHandler)
+
+	// Broker monitor — ring buffer + SSE fan-out for the UI monitor view.
+	brokerMon := api.NewBrokerMonitor()
+	mqttMgr.SetMonitorHook(brokerMon.Push)
+
 	if err := mqttMgr.Start(ctx); err != nil {
 		log.Printf("mqtt start: %v", err)
 	}
@@ -71,9 +137,43 @@ func main() {
 			}
 		},
 		NotifyMappings: mqttMgr.Notify, // mapping change = resubscribe + refresh cache
-		MQTT:           mqttMgr,
-		IEC104:         iecMgr,
-		StartedAt:      startedAt,
+		NotifyTSDB: func() {
+			var reloadCfg models.TSDBConfig
+			if err := database.Get(&reloadCfg, `SELECT id,backend,vm_url,vm_username,vm_password,ts_dsn,ts_table,wal_path,dlq_path,batch_size,flush_ms,enabled FROM tsdb_config WHERE id=1`); err != nil {
+				log.Printf("tsdb: reload config: %v", err)
+				return
+			}
+			tsdbMgr.Reload(reloadCfg)
+			// Update SSFVHandler with the new pipeline — the old one is closed.
+			ssfvHandler.SetPipeline(tsdbMgr.Pipeline())
+			if sa := tsdbMgr.SSFVAdapter(); sa != nil {
+				ssfvHandler.SetAlarmManager(worker.NewAlarmManager(sa.Pool()))
+				ssfvHandler.SetMissFn(sa.RecordMiss)
+				if err := ssfvCache.Reload(sa.Pool()); err != nil {
+					log.Printf("ssfv: mapping cache reload after tsdb reload: %v", err)
+				}
+			} else {
+				ssfvHandler.SetAlarmManager(nil)
+				ssfvHandler.SetMissFn(nil)
+			}
+		},
+		NotifyNATS: func() {
+			log.Printf("nats: config changed (restart required to apply)")
+		},
+		NotifySSFV: func() {
+			sa := tsdbMgr.SSFVAdapter()
+			if sa == nil {
+				return
+			}
+			if err := ssfvCache.Reload(sa.Pool()); err != nil {
+				log.Printf("ssfv: mapping cache reload: %v", err)
+			}
+		},
+		MQTT:      mqttMgr,
+		IEC104:    iecMgr,
+		TSDBMgr:   tsdbMgr,
+		BrokerMon: brokerMon,
+		StartedAt: startedAt,
 	})
 
 	srv := &http.Server{
@@ -95,12 +195,15 @@ func main() {
 	log.Println("shutdown...")
 
 	// Orderly shutdown. Sequence matters:
+	//   0. close SSE connections → unblocks http.Shutdown (SSE are long-lived)
 	//   1. stop accepting HTTP   → no new writes from the API
 	//   2. stop MQTT             → no new samples from the bus
 	//   3. stop IEC-104 fleet    → disconnect SCADA masters
-	//   4. cancel ctx            → history drains its buffer via ctx.Done
-	//   5. wait for drain        → all rows flushed
-	//   6. checkpoint + close DB → WAL merged, no truncated tail
+	//   4. stop TSDB pipeline    → flush remaining points
+	//   5. cancel ctx            → history drains its buffer via ctx.Done
+	//   6. wait for drain        → all rows flushed
+	//   7. checkpoint + close DB → WAL merged, no truncated tail
+	brokerMon.Close() // terminate SSE streams so Shutdown doesn't time out
 	shCtx, shCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shCancel()
 	if err := srv.Shutdown(shCtx); err != nil {
@@ -108,6 +211,10 @@ func main() {
 	}
 	mqttMgr.Stop()
 	_ = iecMgr.Stop()
+	tsdbMgr.Stop()
+	if natsClient != nil {
+		natsClient.Close()
+	}
 
 	cancel()
 	select {

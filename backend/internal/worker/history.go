@@ -2,30 +2,36 @@ package worker
 
 import (
 	"context"
-	"log"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
+
+	"goGateway/internal/tsdb"
 )
 
-// HistoryEvent = one row to persist.
+// HistoryEvent = one decoded sample travelling through the hot path.
 type HistoryEvent struct {
-	MappingID int64
-	SignalKey string
-	Value     float64
-	Quality   int
-	Timestamp time.Time
+	MappingID  int64
+	SignalPath string
+	Value      float64
+	Quality    int
+	Timestamp  time.Time
+	IOA        int
+	Business   string
+	Company    string
 }
 
-// HistoryLogger = async batched writer. Drops on full buffer (never blocks hot path).
+// HistoryLogger forwards events to the TSDB pipeline.
+// SQLite history writes are disabled — TimescaleDB is the sole time-series store.
 type HistoryLogger struct {
-	db    *sqlx.DB
-	ch    chan HistoryEvent
-	batch int
-	flush time.Duration
+	ch       chan HistoryEvent
+	batch    int
+	interval time.Duration
+	tsdbPipe *tsdb.WritePipeline
 }
 
-func NewHistoryLogger(db *sqlx.DB, bufSize, batch int, flush time.Duration) *HistoryLogger {
+func NewHistoryLogger(_ *sqlx.DB, bufSize, batch int, flush time.Duration) *HistoryLogger {
 	if bufSize <= 0 {
 		bufSize = 1024
 	}
@@ -35,11 +41,27 @@ func NewHistoryLogger(db *sqlx.DB, bufSize, batch int, flush time.Duration) *His
 	if flush <= 0 {
 		flush = 2 * time.Second
 	}
-	return &HistoryLogger{db: db, ch: make(chan HistoryEvent, bufSize), batch: batch, flush: flush}
+	return &HistoryLogger{ch: make(chan HistoryEvent, bufSize), batch: batch, interval: flush}
 }
 
-// Log = non-blocking enqueue. Returns false if buffer full.
+// SetTSDB attaches the TSDB pipeline. Events are forwarded as DataPoints.
+func (h *HistoryLogger) SetTSDB(p *tsdb.WritePipeline) { h.tsdbPipe = p }
+
+// Log enqueues an event non-blocking. Returns false if the buffer is full.
 func (h *HistoryLogger) Log(e HistoryEvent) bool {
+	if h.tsdbPipe != nil {
+		pt := tsdb.DataPoint{
+			Measurement: lastPathSegment(e.SignalPath),
+			Tags: map[string]string{
+				"signal_path": e.SignalPath,
+				"business":    e.Business,
+				"company":     e.Company,
+			},
+			Fields:    map[string]float64{"value": e.Value, "quality": float64(e.Quality)},
+			Timestamp: e.Timestamp,
+		}
+		h.tsdbPipe.Push(pt) //nolint:errcheck
+	}
 	select {
 	case h.ch <- e:
 		return true
@@ -48,62 +70,30 @@ func (h *HistoryLogger) Log(e HistoryEvent) bool {
 	}
 }
 
-// Run = blocks until ctx done. Flushes remainder on exit.
+// Run drains the channel until ctx is cancelled. No SQLite writes.
 func (h *HistoryLogger) Run(ctx context.Context) {
-	buf := make([]HistoryEvent, 0, h.batch)
-	tick := time.NewTicker(h.flush)
+	tick := time.NewTicker(h.interval)
 	defer tick.Stop()
-
-	flush := func() {
-		if len(buf) == 0 {
-			return
-		}
-		if err := h.writeBatch(buf); err != nil {
-			log.Printf("history write: %v", err)
-		}
-		buf = buf[:0]
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
-			// drain
 			for {
 				select {
-				case e := <-h.ch:
-					buf = append(buf, e)
+				case <-h.ch:
 				default:
-					flush()
 					return
 				}
 			}
-		case e := <-h.ch:
-			buf = append(buf, e)
-			if len(buf) >= h.batch {
-				flush()
-			}
+		case <-h.ch:
 		case <-tick.C:
-			flush()
 		}
 	}
 }
 
-func (h *HistoryLogger) writeBatch(batch []HistoryEvent) error {
-	tx, err := h.db.Beginx()
-	if err != nil {
-		return err
+// lastPathSegment returns the last "/" segment of path, or the full string.
+func lastPathSegment(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[i+1:]
 	}
-	stmt, err := tx.Preparex(`INSERT INTO history(mapping_id,signal_key,value,quality,timestamp) VALUES(?,?,?,?,?)`)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	defer stmt.Close()
-	for _, e := range batch {
-		if _, err := stmt.Exec(e.MappingID, e.SignalKey, e.Value, e.Quality, e.Timestamp); err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
-	return tx.Commit()
+	return path
 }

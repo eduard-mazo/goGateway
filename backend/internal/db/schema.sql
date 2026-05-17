@@ -14,13 +14,17 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE INDEX IF NOT EXISTS idx_devices_server ON devices(server_id);
 
 CREATE TABLE IF NOT EXISTS mqtt_config (
-    id       INTEGER PRIMARY KEY CHECK (id = 1),
-    host     TEXT NOT NULL DEFAULT 'localhost',
-    port     INTEGER NOT NULL DEFAULT 1883,
-    username TEXT DEFAULT '',
-    password TEXT DEFAULT '',
-    client_id TEXT DEFAULT 'goGateway',
-    use_tls  INTEGER NOT NULL DEFAULT 0
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    host              TEXT    NOT NULL DEFAULT 'localhost',
+    port              INTEGER NOT NULL DEFAULT 1883,
+    username          TEXT    DEFAULT '',
+    password          TEXT    DEFAULT '',
+    client_id         TEXT    DEFAULT 'goGateway',
+    use_tls           INTEGER NOT NULL DEFAULT 0,
+    sparkplug_enabled INTEGER NOT NULL DEFAULT 0,
+    sp_group_id       TEXT    NOT NULL DEFAULT 'goGateway',
+    sp_host_id        TEXT    NOT NULL DEFAULT 'goGateway-host',
+    sp_topics         TEXT    NOT NULL DEFAULT ''
 );
 INSERT OR IGNORE INTO mqtt_config (id) VALUES (1);
 
@@ -82,23 +86,52 @@ CREATE TABLE IF NOT EXISTS signal_mappings (
     variable_type  TEXT DEFAULT '',
     characteristic TEXT DEFAULT '',
     json_key       TEXT NOT NULL,
+    quality_key    TEXT NOT NULL DEFAULT '',
+    metric_name    TEXT NOT NULL DEFAULT '',
     iec104_type    TEXT NOT NULL,
     ioa            INTEGER NOT NULL,
     unit           TEXT DEFAULT '',
     scale          REAL NOT NULL DEFAULT 1.0,
     enabled        INTEGER NOT NULL DEFAULT 1,
+    business       TEXT NOT NULL DEFAULT '',
+    company        TEXT NOT NULL DEFAULT '',
     UNIQUE (server_id, ioa)
 );
 CREATE INDEX IF NOT EXISTS idx_sigmap_topic ON signal_mappings(topic_id);
 CREATE INDEX IF NOT EXISTS idx_sigmap_server ON signal_mappings(server_id);
 
 CREATE TABLE IF NOT EXISTS history (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    mapping_id INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
-    signal_key TEXT NOT NULL,
-    value      REAL NOT NULL,
-    quality    INTEGER NOT NULL DEFAULT 0,
-    timestamp  DATETIME NOT NULL
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    mapping_id  INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
+    signal_path TEXT NOT NULL,
+    value       REAL NOT NULL,
+    quality     INTEGER NOT NULL DEFAULT 0,
+    timestamp   DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_history_mapping_ts ON history(mapping_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_history_ts ON history(timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS tsdb_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    backend     TEXT    NOT NULL DEFAULT 'none',
+    vm_url      TEXT    NOT NULL DEFAULT '',
+    vm_username TEXT    NOT NULL DEFAULT '',
+    vm_password TEXT    NOT NULL DEFAULT '',
+    ts_dsn      TEXT    NOT NULL DEFAULT '',
+    ts_table    TEXT    NOT NULL DEFAULT 'signals',
+    wal_path    TEXT    NOT NULL DEFAULT 'data/wal.bolt',
+    dlq_path    TEXT    NOT NULL DEFAULT 'data/dlq.bolt',
+    batch_size  INTEGER NOT NULL DEFAULT 2000,
+    flush_ms    INTEGER NOT NULL DEFAULT 100,
+    enabled     INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO tsdb_config(id) VALUES(1);
+
+CREATE TABLE IF NOT EXISTS nats_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    host        TEXT    NOT NULL DEFAULT 'localhost',
+    port        INTEGER NOT NULL DEFAULT 4222,
+    stream_name TEXT    NOT NULL DEFAULT 'GOGATEWAY',
+    enabled     INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO nats_config(id) VALUES(1);

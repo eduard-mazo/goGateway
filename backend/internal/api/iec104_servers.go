@@ -47,7 +47,11 @@ func (h *IEC104ServersHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *IEC104ServersHandler) get(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	var s models.IEC104Server
 	if err := h.DB.Get(&s, `SELECT `+iec104Cols+` FROM iec104_servers WHERE id=?`, id); err != nil {
 		writeErr(w, 404, "not found")
@@ -80,7 +84,11 @@ func (h *IEC104ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *IEC104ServersHandler) update(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	var s models.IEC104Server
 	if err := decode(r, &s); err != nil {
 		writeErr(w, 400, err.Error())
@@ -103,7 +111,11 @@ func (h *IEC104ServersHandler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *IEC104ServersHandler) delete(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid id")
+		return
+	}
 	if _, err := h.DB.Exec(`DELETE FROM iec104_servers WHERE id=?`, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return

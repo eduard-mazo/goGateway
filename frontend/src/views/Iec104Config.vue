@@ -2,6 +2,7 @@
 import { ref, onMounted, computed, reactive } from 'vue'
 import { toast } from 'vue-sonner'
 import { api, type IEC104Server, type IEC104Gateway } from '@/api'
+import { t } from '@/i18n'
 import { useStatus } from '@/composables/useStatus'
 import StatusPill from '@/components/StatusPill.vue'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -150,19 +151,19 @@ async function toggleEnabled(s: IEC104Server) {
 
 async function del(s: IEC104Server) {
   const ok = await confirm({
-    title: 'Delete IEC-104 server',
-    message: 'The listener stops immediately. Connected SCADA masters will be dropped. This cannot be undone.',
+    title: t.iec104.deleteTitle,
+    message: t.iec104.deleteMessage,
     detail: `${s.name || 'unnamed'} · port ${s.port} · ASDU ${s.asdu_addr}`,
     variant: 'danger',
-    confirmText: 'Delete server',
+    confirmText: t.iec104.deleteConfirm,
     challenge: s.name || `server-${s.id}`,
   })
   if (!ok) return
   try {
     await api.delete(`/iec104-servers/${s.id}`)
     await reload()
-    toast.success('Deleted')
-  } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
+    toast.success(t.iec104.deleted)
+  } catch (e: any) { toast.error(e?.response?.data?.error ?? t.common.error) }
 }
 
 onMounted(() => { loadGateway(); reload() })
@@ -195,17 +196,17 @@ function linkInfo(s: IEC104Server): LinkInfo {
   const clients = rt?.clients ?? 0
   const activated = rt?.activated ?? 0
   if (!s.enabled) {
-    return { state: 'off', pillState: 'idle', label: 'Off', hint: 'Disabled', clients, activated }
+    return { state: 'off', pillState: 'idle', label: t.common.disabled, hint: t.status.disabled, clients, activated }
   }
   if (!rt?.running) {
-    return { state: 'bind-fail', pillState: 'fault', label: 'Bind failed', hint: 'Listener not running — check IP/port', clients, activated }
+    return { state: 'bind-fail', pillState: 'fault', label: t.status.bindFailed, hint: 'Listener no activo — revisar IP/puerto', clients, activated }
   }
   if (activated > 0) {
     return {
       state: 'linked',
       pillState: 'ok',
-      label: activated === 1 ? 'Protocol up · 1' : `Protocol up · ${activated}`,
-      hint: 'STARTDT activated — frames flowing',
+      label: activated === 1 ? `${t.status.protocolUp} · 1` : `${t.status.protocolUp} · ${activated}`,
+      hint: 'STARTDT activado — tramas fluyendo',
       clients,
       activated,
     }
@@ -214,13 +215,13 @@ function linkInfo(s: IEC104Server): LinkInfo {
     return {
       state: 'tcp-only',
       pillState: 'warn',
-      label: 'TCP only',
-      hint: 'Connected, awaiting STARTDT',
+      label: t.status.tcpOnly,
+      hint: 'Conectado, esperando STARTDT',
       clients,
       activated,
     }
   }
-  return { state: 'listening', pillState: 'wait', label: 'Listening', hint: 'Listener up, no master yet', clients, activated }
+  return { state: 'listening', pillState: 'wait', label: t.status.listening, hint: 'Listener activo, sin master', clients, activated }
 }
 
 const fleetState = computed<'ok' | 'warn' | 'fault' | 'wait' | 'idle'>(() => {
@@ -237,13 +238,13 @@ const fleetState = computed<'ok' | 'warn' | 'fault' | 'wait' | 'idle'>(() => {
 })
 const fleetLabel = computed(() => {
   switch (fleetState.value) {
-    case 'idle': return 'Idle'
-    case 'fault': return 'Bind failed'
-    case 'wait': return 'Listening'
-    case 'warn': return 'Partial protocol'
-    case 'ok': return 'Protocol up'
+    case 'idle': return t.status.idle
+    case 'fault': return t.status.bindFailed
+    case 'wait': return t.status.listening
+    case 'warn': return 'Protocolo parcial'
+    case 'ok': return t.status.protocolUp
   }
-  return 'Idle'
+  return t.status.idle
 })
 
 function chips(csv: string): string[] { return parseIPs(csv) }
@@ -260,17 +261,17 @@ function chips(csv: string): string[] { return parseIPs(csv) }
               <Server class="h-5 w-5" />
             </div>
             <span class="text-[11px] uppercase tracking-[0.26em] font-bold text-[color:var(--epm-bosque)]">
-              IEC 60870-5-104 · passive fleet
+              IEC 60870-5-104 · flota pasiva
             </span>
           </div>
-          <h1 class="mb-2">Slave endpoints</h1>
+          <h1 class="mb-2">{{ t.iec104.servers }}</h1>
           <div class="font-mono text-sm mt-2 text-[color:var(--epm-bosque)]">
-            {{ servers.length }} configured · {{ servers.filter(s => s.enabled).length }} enabled
+            {{ servers.length }} configurados · {{ servers.filter(s => s.enabled).length }} habilitados
           </div>
           <p class="mt-3 text-sm text-muted-foreground max-w-xl">
-            The gateway is strictly passive. SCADA masters dial in; the gateway never dials out.
-            Each row below is a separate listener (port + ASDU + SCADA-IP allowlist) sharing the
-            same point set, all bound on the gateway-wide listen IP defined in the next card.
+            El gateway es estrictamente pasivo. Los masters SCADA se conectan; el gateway nunca marca.
+            Cada fila es un listener independiente (puerto + ASDU + lista de IPs SCADA) que comparte
+            el mismo conjunto de puntos, todos vinculados a la IP de escucha global del gateway.
           </p>
         </div>
         <div class="col-span-12 md:col-span-4 flex flex-col gap-3 md:items-end">
@@ -293,18 +294,16 @@ function chips(csv: string): string[] { return parseIPs(csv) }
       <CardHeader>
         <div class="flex items-center gap-2">
           <Globe class="h-5 w-5 text-[color:var(--epm-bosque)]" />
-          <CardTitle class="font-extrabold tracking-tight">Gateway listen IP</CardTitle>
+          <CardTitle class="font-extrabold tracking-tight">{{ t.iec104.gateway }}</CardTitle>
         </div>
         <CardDescription>
-          Local NIC IP this gateway binds for every slave endpoint. Use
-          <code class="font-mono">0.0.0.0</code> to bind every interface.
-          The IP must already exist on this host — the kernel will reject otherwise.
+          {{ t.iec104.listenDesc }}
         </CardDescription>
       </CardHeader>
       <CardContent>
         <div class="flex flex-col md:flex-row md:items-end gap-4">
           <div class="space-y-1.5 flex-1 max-w-md">
-            <Label>Listen IP</Label>
+            <Label>{{ t.iec104.listenIp }}</Label>
             <Input
               v-model="gateway.listen_ip"
               class="font-mono"
@@ -318,7 +317,7 @@ function chips(csv: string): string[] { return parseIPs(csv) }
           <Button :disabled="!gatewayDirty || savingGateway" @click="saveGateway"
                   class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm">
             <Save class="h-4 w-4 mr-2" />
-            {{ savingGateway ? 'Saving…' : 'Save listen IP' }}
+            {{ savingGateway ? t.iec104.saving : t.iec104.save }}
           </Button>
         </div>
       </CardContent>
@@ -328,21 +327,21 @@ function chips(csv: string): string[] { return parseIPs(csv) }
     <Card class="card-soft">
       <CardHeader class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <CardTitle class="font-extrabold tracking-tight">Servers</CardTitle>
+          <CardTitle class="font-extrabold tracking-tight">{{ t.iec104.servers }}</CardTitle>
           <CardDescription>
-            One listener per row. The link column shows the live connection between
-            this gateway and the SCADA master(s) for that port + ASDU.
+            Un listener por fila. La columna de enlace muestra la conexión en vivo entre
+            este gateway y el(los) master(s) SCADA para ese puerto + ASDU.
           </CardDescription>
         </div>
         <div class="flex items-center gap-2">
           <Button variant="outline" @click="reload" class="rounded-sm">
-            <RefreshCw class="h-4 w-4 mr-2" /> Reload
+            <RefreshCw class="h-4 w-4 mr-2" /> {{ t.common.reload }}
           </Button>
           <Dialog v-model:open="dialogOpen">
             <DialogTrigger as-child>
               <Button @click="openCreate"
                       class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm px-4">
-                <Plus class="h-4 w-4 mr-1" /> New server
+                <Plus class="h-4 w-4 mr-1" /> {{ t.iec104.addServer }}
               </Button>
             </DialogTrigger>
 
@@ -355,12 +354,12 @@ function chips(csv: string): string[] { return parseIPs(csv) }
                 <DialogHeader class="text-left space-y-1">
                   <DialogTitle class="text-lg font-extrabold tracking-tight flex items-center gap-2">
                     <Server class="h-4 w-4 text-[color:var(--epm-bosque)]" />
-                    {{ isEdit ? `Edit server #${editing.id}` : 'New IEC-104 server' }}
+                    {{ isEdit ? `Editar servidor #${editing.id}` : 'Nuevo servidor IEC-104' }}
                   </DialogTitle>
                   <DialogDescription class="text-xs">
-                    Passive slave endpoint. SCADA masters connect to
+                    Endpoint esclavo pasivo. Los masters SCADA se conectan a
                     <code class="font-mono text-[color:var(--epm-bosque)]">{{ gateway.listen_ip || '0.0.0.0' }}:{{ editing.port || 2404 }}</code>
-                    and read this gateway under ASDU
+                    y leen este gateway bajo ASDU
                     <code class="font-mono text-[color:var(--epm-bosque)]">{{ editing.asdu_addr || 1 }}</code>.
                   </DialogDescription>
                 </DialogHeader>
@@ -370,15 +369,15 @@ function chips(csv: string): string[] { return parseIPs(csv) }
                 <!-- Identity row -->
                 <div class="grid grid-cols-12 gap-4">
                   <div class="col-span-12 sm:col-span-6 space-y-1.5">
-                    <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Name</Label>
+                    <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.iec104.name }}</Label>
                     <Input v-model="editing.name" placeholder="control-center-a" />
                   </div>
                   <div class="col-span-6 sm:col-span-3 space-y-1.5">
-                    <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Port</Label>
+                    <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.iec104.port }}</Label>
                     <Input v-model.number="editing.port" type="number" class="font-mono" />
                   </div>
                   <div class="col-span-6 sm:col-span-3 space-y-1.5">
-                    <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">ASDU</Label>
+                    <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.iec104.asduAddr }}</Label>
                     <Input v-model.number="editing.asdu_addr" type="number" class="font-mono" />
                   </div>
                 </div>
@@ -387,12 +386,11 @@ function chips(csv: string): string[] { return parseIPs(csv) }
                 <div class="space-y-1.5">
                   <Label class="text-[11px] uppercase tracking-[0.18em] font-bold flex items-center gap-1.5">
                     <ShieldCheck class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" />
-                    SCADA IP allowlist
+                    {{ t.iec104.scadaIps }}
                   </Label>
                   <Input v-model="editing.scada_ips" class="font-mono" placeholder="10.13.13.25, 10.117.18.23" />
                   <p class="text-xs text-muted-foreground leading-relaxed">
-                    Comma-separated. Only these remote IPs may complete the TCP handshake.
-                    Empty = block all (fail closed).
+                    {{ t.iec104.scadaIpsDesc }}
                   </p>
                 </div>
 
@@ -401,40 +399,40 @@ function chips(csv: string): string[] { return parseIPs(csv) }
                   <div class="flex items-center gap-2">
                     <div class="rule-brand flex-1" />
                     <span class="text-[10px] uppercase tracking-[0.22em] font-bold text-muted-foreground">
-                      Protocol timers · IEC 60870-5-104 §5
+                      {{ t.iec104.timing }}
                     </span>
                     <div class="rule-brand flex-1" />
                   </div>
                   <div class="grid grid-cols-6 gap-3">
                     <div class="col-span-2 sm:col-span-1 space-y-1">
-                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold">k</Label>
+                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold" :title="t.iec104.kDesc">k</Label>
                       <Input v-model.number="editing.k" type="number" class="font-mono text-center" />
-                      <p class="text-[10px] text-muted-foreground leading-tight text-center">unacked I</p>
+                      <p class="text-[10px] text-muted-foreground leading-tight text-center">ventana env.</p>
                     </div>
                     <div class="col-span-2 sm:col-span-1 space-y-1">
-                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold">w</Label>
+                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold" :title="t.iec104.wDesc">w</Label>
                       <Input v-model.number="editing.w" type="number" class="font-mono text-center" />
-                      <p class="text-[10px] text-muted-foreground leading-tight text-center">ack window</p>
+                      <p class="text-[10px] text-muted-foreground leading-tight text-center">umbral ack</p>
                     </div>
                     <div class="col-span-2 sm:col-span-1 space-y-1">
-                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold">t0</Label>
+                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold" :title="t.iec104.t0Desc">t0</Label>
                       <Input v-model.number="editing.t0" type="number" class="font-mono text-center" />
-                      <p class="text-[10px] text-muted-foreground leading-tight text-center">connect</p>
+                      <p class="text-[10px] text-muted-foreground leading-tight text-center">conexión</p>
                     </div>
                     <div class="col-span-2 sm:col-span-1 space-y-1">
-                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold">t1</Label>
+                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold" :title="t.iec104.t1Desc">t1</Label>
                       <Input v-model.number="editing.t1" type="number" class="font-mono text-center" />
-                      <p class="text-[10px] text-muted-foreground leading-tight text-center">send</p>
+                      <p class="text-[10px] text-muted-foreground leading-tight text-center">envío</p>
                     </div>
                     <div class="col-span-2 sm:col-span-1 space-y-1">
-                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold">t2</Label>
+                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold" :title="t.iec104.t2Desc">t2</Label>
                       <Input v-model.number="editing.t2" type="number" class="font-mono text-center" />
-                      <p class="text-[10px] text-muted-foreground leading-tight text-center">ack</p>
+                      <p class="text-[10px] text-muted-foreground leading-tight text-center">confirmación</p>
                     </div>
                     <div class="col-span-2 sm:col-span-1 space-y-1">
-                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold">t3</Label>
+                      <Label class="text-[10px] uppercase tracking-[0.16em] font-bold" :title="t.iec104.t3Desc">t3</Label>
                       <Input v-model.number="editing.t3" type="number" class="font-mono text-center" />
-                      <p class="text-[10px] text-muted-foreground leading-tight text-center">test</p>
+                      <p class="text-[10px] text-muted-foreground leading-tight text-center">prueba</p>
                     </div>
                   </div>
                 </div>
@@ -443,17 +441,17 @@ function chips(csv: string): string[] { return parseIPs(csv) }
                 <div class="flex items-center gap-3 pt-1">
                   <Switch id="en" v-model="editing.enabled" />
                   <Label for="en" class="cursor-pointer">
-                    Enabled — start listener immediately on save
+                    {{ t.iec104.enabled }} — iniciar listener al guardar
                   </Label>
                 </div>
               </div>
 
               <DialogFooter class="px-6 py-4 border-t border-border bg-[color:color-mix(in_srgb,var(--epm-citrico)_5%,transparent)]">
-                <Button variant="outline" @click="dialogOpen = false" class="rounded-sm">Cancel</Button>
+                <Button variant="outline" @click="dialogOpen = false" class="rounded-sm">{{ t.common.cancel }}</Button>
                 <Button :disabled="saving" @click="save"
                         class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm">
                   <Save class="h-4 w-4 mr-2" />
-                  {{ saving ? 'Saving…' : (isEdit ? 'Save changes' : 'Create') }}
+                  {{ saving ? t.iec104.saving : (isEdit ? t.common.save : 'Crear') }}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -465,15 +463,15 @@ function chips(csv: string): string[] { return parseIPs(csv) }
         <Table>
           <TableHeader>
             <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)]">
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Name</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Port</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">ASDU</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">SCADA allowlist</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.iec104.name }}</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.iec104.port }}</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.iec104.asduAddr }}</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.iec104.scadaIps }}</TableHead>
               <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">
-                <span class="inline-flex items-center gap-1"><Link2 class="h-3 w-3" /> Link</span>
+                <span class="inline-flex items-center gap-1"><Link2 class="h-3 w-3" /> Enlace</span>
               </TableHead>
-              <TableHead class="w-20 text-[10px] uppercase tracking-[0.2em] font-bold">On</TableHead>
-              <TableHead class="w-24 text-right text-[10px] uppercase tracking-[0.2em] font-bold">Actions</TableHead>
+              <TableHead class="w-20 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.iec104.enabled }}</TableHead>
+              <TableHead class="w-24 text-right text-[10px] uppercase tracking-[0.2em] font-bold">Acciones</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -487,7 +485,7 @@ function chips(csv: string): string[] { return parseIPs(csv) }
                         class="chip font-mono text-[11px]">{{ ip }}</span>
                 </div>
                 <span v-else class="inline-flex items-center gap-1 text-xs text-[color:var(--destructive)] font-semibold">
-                  <ShieldAlert class="h-3.5 w-3.5" /> empty — blocks all
+                  <ShieldAlert class="h-3.5 w-3.5" /> vacío — bloquea todo
                 </span>
               </TableCell>
               <TableCell>
@@ -510,7 +508,7 @@ function chips(csv: string): string[] { return parseIPs(csv) }
             </TableRow>
             <TableRow v-if="!servers.length">
               <TableCell colspan="7" class="text-center text-muted-foreground py-8">
-                No servers. Click "New server" to add one.
+                Sin servidores. Haga clic en "{{ t.iec104.addServer }}" para agregar uno.
               </TableCell>
             </TableRow>
           </TableBody>

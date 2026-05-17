@@ -27,8 +27,8 @@ export const confirmState = reactive<ConfirmState>({
   message: '',
   detail: '',
   variant: 'danger',
-  confirmText: 'Confirm',
-  cancelText: 'Cancel',
+  confirmText: 'Confirmar',
+  cancelText: 'Cancelar',
   challenge: '',
   resolve: null,
 })
@@ -39,8 +39,8 @@ export function confirm(opts: ConfirmOptions): Promise<boolean> {
     confirmState.message = opts.message ?? ''
     confirmState.detail = opts.detail ?? ''
     confirmState.variant = opts.variant ?? 'danger'
-    confirmState.confirmText = opts.confirmText ?? (opts.variant === 'danger' ? 'Delete' : 'Confirm')
-    confirmState.cancelText = opts.cancelText ?? 'Cancel'
+    confirmState.confirmText = opts.confirmText ?? (opts.variant === 'danger' ? 'Eliminar' : 'Confirmar')
+    confirmState.cancelText = opts.cancelText ?? 'Cancelar'
     confirmState.challenge = opts.challenge ?? ''
     confirmState.resolve = resolve
     confirmState.open = true

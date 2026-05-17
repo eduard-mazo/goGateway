@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { toast } from 'vue-sonner'
 import { api, type History, type SignalMapping } from '@/api'
+import { t } from '@/i18n'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -45,9 +46,9 @@ function toggleAuto(v: boolean) {
 }
 
 function exportCSV() {
-  const lines = ['timestamp,mapping_id,signal_key,value,quality']
+  const lines = ['timestamp,mapping_id,signal_path,value,quality']
   for (const r of rows.value) {
-    lines.push([r.timestamp, r.mapping_id, JSON.stringify(r.signal_key), r.value, r.quality].join(','))
+    lines.push([r.timestamp, r.mapping_id, JSON.stringify(r.signal_path), r.value, r.quality].join(','))
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
   const a = document.createElement('a')
@@ -74,10 +75,10 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           <HistoryIcon class="h-5 w-5" />
         </div>
         <div class="flex-1">
-          <div class="text-[11px] uppercase tracking-[0.26em] font-bold text-[color:var(--epm-bosque)]">Telemetry</div>
-          <h1 class="mt-1 mb-1">History</h1>
+          <div class="text-[11px] uppercase tracking-[0.26em] font-bold text-[color:var(--epm-bosque)]">{{ t.history.subtitle }}</div>
+          <h1 class="mt-1 mb-1">{{ t.history.title }}</h1>
           <p class="text-sm text-muted-foreground">
-            {{ rows.length }} sample{{ rows.length === 1 ? '' : 's' }} loaded · persisted time-series from MQTT ingest.
+            {{ rows.length }} {{ rows.length === 1 ? t.history.sample : t.history.samples_pl }} {{ t.history.desc }}
           </p>
         </div>
       </div>
@@ -86,16 +87,16 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     <!-- Filter -->
     <Card class="card-soft">
       <CardHeader>
-        <CardTitle class="font-extrabold tracking-tight">Filter</CardTitle>
-        <CardDescription>Query persisted samples by mapping.</CardDescription>
+        <CardTitle class="font-extrabold tracking-tight">{{ t.history.filter }}</CardTitle>
+        <CardDescription>{{ t.history.filterDesc }}</CardDescription>
       </CardHeader>
       <CardContent class="flex items-end gap-3 flex-wrap">
         <div class="w-72 space-y-1.5">
-          <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Mapping</Label>
+          <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.history.mapping }}</Label>
           <Select v-model="mappingId">
             <SelectTrigger class="rounded-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All mappings</SelectItem>
+              <SelectItem value="all">{{ t.history.allMappings }}</SelectItem>
               <SelectItem v-for="m in mappings" :key="m.id" :value="m.id">
                 #{{ m.id }} · IOA {{ m.ioa }} · {{ m.json_key }}
               </SelectItem>
@@ -103,20 +104,20 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           </Select>
         </div>
         <div class="w-28 space-y-1.5">
-          <Label for="lim" class="text-[11px] uppercase tracking-[0.18em] font-bold">Limit</Label>
+          <Label for="lim" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.history.limit }}</Label>
           <Input id="lim" v-model.number="limit" type="number" min="10" max="10000" class="rounded-sm" />
         </div>
         <Button @click="load"
                 class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm px-5">
-          <RefreshCw class="h-4 w-4 mr-1" /> Refresh
+          <RefreshCw class="h-4 w-4 mr-1" /> {{ t.history.refresh }}
         </Button>
         <Button variant="outline" @click="exportCSV" :disabled="!rows.length" class="rounded-sm">
-          <Download class="h-4 w-4 mr-1" /> Export CSV
+          <Download class="h-4 w-4 mr-1" /> {{ t.history.exportCsv }}
         </Button>
         <div class="flex items-center gap-2 ml-auto rounded-sm px-3 py-1.5 border border-border/60
                     bg-[color:color-mix(in_srgb,var(--epm-citrico)_10%,transparent)]">
           <Switch id="auto" :model-value="autoRefresh" @update:model-value="toggleAuto" />
-          <Label for="auto" class="text-[11px] uppercase tracking-[0.18em] font-bold">Auto-refresh · 2s</Label>
+          <Label for="auto" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.history.autoRefresh }}</Label>
         </div>
       </CardContent>
     </Card>
@@ -124,24 +125,24 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     <!-- Samples -->
     <Card class="card-soft">
       <CardHeader>
-        <CardTitle class="font-extrabold tracking-tight">Samples</CardTitle>
-        <CardDescription>{{ rows.length }} row{{ rows.length === 1 ? '' : 's' }}</CardDescription>
+        <CardTitle class="font-extrabold tracking-tight">{{ t.history.samples }}</CardTitle>
+        <CardDescription>{{ rows.length }} {{ rows.length === 1 ? t.history.row : t.history.rows }}</CardDescription>
       </CardHeader>
       <CardContent>
         <Table>
           <TableHeader>
             <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)]">
-              <TableHead class="w-52 text-[10px] uppercase tracking-[0.2em] font-bold">Timestamp</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Signal</TableHead>
-              <TableHead class="w-24 text-[10px] uppercase tracking-[0.2em] font-bold">IOA</TableHead>
-              <TableHead class="text-right text-[10px] uppercase tracking-[0.2em] font-bold">Value</TableHead>
-              <TableHead class="w-24 text-[10px] uppercase tracking-[0.2em] font-bold">Quality</TableHead>
+              <TableHead class="w-52 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.history.timestamp }}</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.history.signal }}</TableHead>
+              <TableHead class="w-24 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.history.ioa }}</TableHead>
+              <TableHead class="text-right text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.history.value }}</TableHead>
+              <TableHead class="w-24 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.history.quality }}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             <TableRow v-for="r in rows" :key="r.id" class="data-row border-b border-border/60">
               <TableCell class="font-mono text-xs text-muted-foreground">{{ fmt(r.timestamp) }}</TableCell>
-              <TableCell class="font-mono text-xs">{{ r.signal_key }}</TableCell>
+              <TableCell class="font-mono text-xs">{{ r.signal_path }}</TableCell>
               <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-bosque)]">
                 {{ mapByID[r.mapping_id]?.ioa ?? '—' }}
               </TableCell>
@@ -153,7 +154,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                              text-[color:var(--epm-bosque-deep)]
                              border border-[color:color-mix(in_srgb,var(--epm-bosque)_35%,transparent)]">
                   <span class="h-1.5 w-1.5 rounded-sm bg-[color:var(--epm-bosque)]" />
-                  good
+                  {{ t.history.good }}
                 </span>
                 <span v-else
                       class="inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em]
@@ -166,7 +167,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
             </TableRow>
             <TableRow v-if="!rows.length">
               <TableCell colspan="5" class="text-center text-muted-foreground py-8">
-                No samples yet. Gateway needs live MQTT payloads matching a mapping's JSON key.
+                {{ t.history.noSamples }}
               </TableCell>
             </TableRow>
           </TableBody>

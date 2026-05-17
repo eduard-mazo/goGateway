@@ -2,6 +2,7 @@
 import { ref, onMounted, computed, reactive, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { api, type SignalMapping, type Topic, type Device, type IEC104Server } from '@/api'
+import { t } from '@/i18n'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -114,6 +115,7 @@ const filteredMappings = computed(() => {
     const srv = serverById.value[m.server_id]
     return [
       m.device_name, m.variable_type, m.characteristic, m.json_key,
+      m.quality_key, m.metric_name,
       m.iec104_type, String(m.ioa), m.unit,
       t?.topic ?? '', dev?.name ?? '', dev?.description ?? '',
       srv?.name ?? '', srv ? String(srv.port) : '',
@@ -201,7 +203,8 @@ watch(search, q => {
 function empty(): SignalMapping {
   return {
     id: 0, server_id: 0, topic_id: 0, device_name: '', variable_type: '', characteristic: '',
-    json_key: '', iec104_type: 'M_ME_TF_1', ioa: 0, unit: '', scale: 1.0, enabled: true,
+    json_key: '', quality_key: '', metric_name: '', iec104_type: 'M_ME_TF_1', ioa: 0, unit: '', scale: 1.0, enabled: true,
+    business: '', company: '',
   }
 }
 
@@ -278,13 +281,14 @@ watch(() => editing.server_id, sid => {
   const t = topics.value.find(x => x.id === editing.topic_id)
   const dev = t ? deviceById.value[t.device_id] : null
   if (!dev || dev.server_id !== sid) editing.topic_id = 0
-  editing.ioa = suggestIOA(sid, editing.id)
+  // Only suggest a new IOA when creating; keep the stored value on edit.
+  if (editing.id === 0) editing.ioa = suggestIOA(sid)
 })
 
 function validate(): string | null {
   if (!editing.server_id) return 'IEC-104 server is required'
   if (!editing.topic_id) return 'Topic is required'
-  if (!editing.json_key.trim()) return 'JSON key is required'
+  if (!editing.metric_name.trim() && !editing.json_key.trim()) return 'JSON key or Sparkplug metric name is required'
   if (!editing.iec104_type) return 'IEC 104 type required'
   if (!Number.isInteger(editing.ioa) || editing.ioa <= 0) return 'IOA must be positive int'
   const dup = mappings.value.find(
@@ -325,11 +329,11 @@ async function toggleEnabled(m: SignalMapping) {
 
 async function del(m: SignalMapping) {
   const ok = await confirm({
-    title: 'Delete mapping',
-    message: 'Removes this MQTT → IEC-104 binding. Cached point stays until restart; new samples for this key will be ignored.',
-    detail: `IOA ${m.ioa} · ${m.iec104_type} · key "${m.json_key}"`,
+    title: 'Eliminar mapeo',
+    message: 'Elimina esta vinculación MQTT → IEC-104. El punto en caché permanece hasta el reinicio; las nuevas muestras para esta clave serán ignoradas.',
+    detail: `IOA ${m.ioa} · ${m.iec104_type} · clave "${m.json_key}"`,
     variant: 'danger',
-    confirmText: 'Delete mapping',
+    confirmText: 'Eliminar mapeo',
   })
   if (!ok) return
   try {
@@ -351,26 +355,26 @@ onMounted(reload)
           <Layers class="h-4 w-4" />
         </div>
         <div>
-          <div class="text-[10px] uppercase tracking-[0.24em] font-bold text-[color:var(--epm-bosque)]">Configuration</div>
-          <h1 class="mt-1 mb-1 text-2xl font-extrabold">Signal mapping</h1>
-          <p class="text-sm text-muted-foreground">MQTT JSON key → IEC 104 point · {{ mappings.length }} active</p>
+          <div class="text-[10px] uppercase tracking-[0.24em] font-bold text-[color:var(--epm-bosque)]">{{ t.iec104.config }}</div>
+          <h1 class="mt-1 mb-1 text-2xl font-extrabold">{{ t.signalMapper.title }}</h1>
+          <p class="text-sm text-muted-foreground">MQTT JSON key → IEC 104 · {{ mappings.length }} activos</p>
         </div>
       </div>
       <Dialog v-model:open="dialogOpen">
         <DialogTrigger as-child>
           <Button @click="openCreate" class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm px-4">
-            <Plus class="h-4 w-4 mr-1" /> New mapping
+            <Plus class="h-4 w-4 mr-1" /> {{ t.signalMapper.addMapping }}
           </Button>
         </DialogTrigger>
         <DialogContent class="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{{ isEdit ? `Edit mapping #${editing.id}` : 'New mapping' }}</DialogTitle>
-            <DialogDescription>Bind a JSON key from an MQTT topic to an IEC 104 point.</DialogDescription>
+            <DialogTitle>{{ isEdit ? `Editar mapeo #${editing.id}` : 'Nuevo mapeo' }}</DialogTitle>
+            <DialogDescription>Vincular una señal MQTT (clave JSON o métrica Sparkplug B) a un punto IEC 104.</DialogDescription>
           </DialogHeader>
 
           <div class="grid grid-cols-6 gap-x-4 gap-y-3 py-2">
             <div class="col-span-6 space-y-1.5">
-              <Label>IEC-104 server</Label>
+              <Label>Servidor IEC-104</Label>
               <Select v-model="editing.server_id">
                 <SelectTrigger class="w-full"><SelectValue placeholder="Select slave endpoint…" /></SelectTrigger>
                 <SelectContent>
@@ -380,11 +384,11 @@ onMounted(reload)
                 </SelectContent>
               </Select>
               <p class="text-[11px] text-muted-foreground">
-                Routes the value to this slave only. SCADA on this endpoint will see it under IOA + ASDU.
+                Enruta el valor solo a este esclavo. El SCADA en este endpoint lo verá bajo IOA + ASDU.
               </p>
             </div>
             <div class="col-span-6 space-y-1.5">
-              <Label>Topic</Label>
+              <Label>{{ t.devices.topic }}</Label>
               <Select v-model="editing.topic_id">
                 <SelectTrigger class="w-full"><SelectValue placeholder="Select topic…" /></SelectTrigger>
                 <SelectContent>
@@ -396,25 +400,34 @@ onMounted(reload)
             </div>
 
             <div class="col-span-3 space-y-1.5">
-              <Label>Device (label)</Label>
+              <Label>Dispositivo (etiqueta)</Label>
               <Input v-model="editing.device_name" placeholder="Inversor 1" />
             </div>
             <div class="col-span-3 space-y-1.5">
-              <Label>JSON key</Label>
+              <Label>{{ t.signalMapper.jsonKey }} <span class="text-muted-foreground font-normal text-[10px]">(modo JSON)</span></Label>
               <Input v-model="editing.json_key" placeholder="IA" />
             </div>
 
             <div class="col-span-3 space-y-1.5">
-              <Label>Variable type</Label>
+              <Label>{{ t.signalMapper.metricName }} <span class="text-muted-foreground font-normal text-[10px]">(modo Sparkplug B)</span></Label>
+              <Input v-model="editing.metric_name" placeholder="outputs/power" class="font-mono" />
+            </div>
+            <div class="col-span-3 space-y-1.5">
+              <Label>Clave JSON calidad <span class="text-muted-foreground font-normal text-[10px]">(opcional)</span></Label>
+              <Input v-model="editing.quality_key" placeholder="quality" class="font-mono" />
+            </div>
+
+            <div class="col-span-3 space-y-1.5">
+              <Label>Tipo de variable</Label>
               <Input v-model="editing.variable_type" placeholder="Corr. Fase A" />
             </div>
             <div class="col-span-3 space-y-1.5">
-              <Label>Characteristic</Label>
+              <Label>Característica</Label>
               <Input v-model="editing.characteristic" placeholder="Corriente AC" />
             </div>
 
             <div class="col-span-4 space-y-1.5 min-w-0">
-              <Label>IEC 104 type</Label>
+              <Label>{{ t.signalMapper.iec104Type }}</Label>
               <Select v-model="editing.iec104_type">
                 <SelectTrigger class="w-full font-mono">
                   <SelectValue placeholder="Select…" />
@@ -428,29 +441,29 @@ onMounted(reload)
               <p v-if="iecDesc" class="text-[11px] text-muted-foreground mt-1 truncate">{{ iecDesc }}</p>
             </div>
             <div class="col-span-2 space-y-1.5">
-              <Label>IOA</Label>
+              <Label>{{ t.signalMapper.ioa }}</Label>
               <Input v-model.number="editing.ioa" type="number" />
             </div>
 
             <div class="col-span-3 space-y-1.5">
-              <Label>Unit</Label>
+              <Label>{{ t.signalMapper.unit }}</Label>
               <Input v-model="editing.unit" placeholder="A, V, kW…" />
             </div>
             <div class="col-span-3 space-y-1.5">
-              <Label>Scale</Label>
+              <Label>{{ t.signalMapper.scale }}</Label>
               <Input v-model.number="editing.scale" type="number" step="0.001" />
             </div>
 
             <div class="col-span-6 flex items-center gap-3 pt-2">
               <Switch id="en" v-model="editing.enabled" />
-              <Label for="en">Enabled</Label>
+              <Label for="en">{{ t.signalMapper.enabled }}</Label>
             </div>
           </div>
 
           <DialogFooter>
-            <Button variant="outline" @click="dialogOpen = false" class="rounded-sm">Cancel</Button>
+            <Button variant="outline" @click="dialogOpen = false" class="rounded-sm">{{ t.common.cancel }}</Button>
             <Button @click="save" class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm">
-              {{ isEdit ? 'Save changes' : 'Create' }}
+              {{ isEdit ? t.common.save : 'Crear' }}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -624,14 +637,14 @@ onMounted(reload)
                   <Table>
                     <TableHeader>
                       <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
-                        <TableHead class="w-14 text-[10px] uppercase tracking-[0.18em] font-bold pl-20">IOA</TableHead>
+                        <TableHead class="w-14 text-[10px] uppercase tracking-[0.18em] font-bold pl-20">{{ t.signalMapper.ioa }}</TableHead>
                         <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">Variable</TableHead>
-                        <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">JSON key</TableHead>
+                        <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">{{ t.signalMapper.signalPath }}</TableHead>
                         <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">IEC 104</TableHead>
-                        <TableHead class="text-right text-[10px] uppercase tracking-[0.18em] font-bold">Scale</TableHead>
-                        <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">Unit</TableHead>
-                        <TableHead class="w-16 text-[10px] uppercase tracking-[0.18em] font-bold">On</TableHead>
-                        <TableHead class="w-20 text-right text-[10px] uppercase tracking-[0.18em] font-bold">Actions</TableHead>
+                        <TableHead class="text-right text-[10px] uppercase tracking-[0.18em] font-bold">{{ t.signalMapper.scale }}</TableHead>
+                        <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">{{ t.signalMapper.unit }}</TableHead>
+                        <TableHead class="w-16 text-[10px] uppercase tracking-[0.18em] font-bold">{{ t.signalMapper.enabled }}</TableHead>
+                        <TableHead class="w-20 text-right text-[10px] uppercase tracking-[0.18em] font-bold">Acciones</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -641,7 +654,13 @@ onMounted(reload)
                           <div class="font-medium text-xs">{{ m.variable_type || m.device_name || '—' }}</div>
                           <div v-if="m.characteristic" class="text-[10px] text-muted-foreground">{{ m.characteristic }}</div>
                         </TableCell>
-                        <TableCell class="font-mono text-xs">{{ m.json_key }}</TableCell>
+                        <TableCell class="font-mono text-xs">
+                          <template v-if="m.metric_name">
+                            <span class="text-[color:var(--epm-bosque)]">{{ m.metric_name }}</span>
+                            <span class="text-[10px] text-muted-foreground ml-1">spB</span>
+                          </template>
+                          <template v-else>{{ m.json_key }}</template>
+                        </TableCell>
                         <TableCell>
                           <span class="inline-flex items-center rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[color:color-mix(in_srgb,var(--epm-citrico)_22%,transparent)] text-[color:var(--epm-bosque)]">
                             {{ m.iec104_type }}
@@ -684,16 +703,16 @@ onMounted(reload)
           <Table>
             <TableHeader>
               <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)]">
-                <TableHead class="w-14 text-[10px] uppercase tracking-[0.2em] font-bold">IOA</TableHead>
-                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Topic</TableHead>
-                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Device</TableHead>
-                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Variable type</TableHead>
-                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">JSON key</TableHead>
+                <TableHead class="w-14 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.signalMapper.ioa }}</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.devices.topic }}</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.devices.device }}</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Tipo variable</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.signalMapper.signalPath }}</TableHead>
                 <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">IEC 104</TableHead>
-                <TableHead class="text-right text-[10px] uppercase tracking-[0.2em] font-bold">Scale</TableHead>
-                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Unit</TableHead>
-                <TableHead class="w-20 text-[10px] uppercase tracking-[0.2em] font-bold">On</TableHead>
-                <TableHead class="w-24 text-right text-[10px] uppercase tracking-[0.2em] font-bold">Actions</TableHead>
+                <TableHead class="text-right text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.signalMapper.scale }}</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.signalMapper.unit }}</TableHead>
+                <TableHead class="w-20 text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.signalMapper.enabled }}</TableHead>
+                <TableHead class="w-24 text-right text-[10px] uppercase tracking-[0.2em] font-bold">Acciones</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -704,7 +723,13 @@ onMounted(reload)
                 </TableCell>
                 <TableCell class="font-semibold">{{ m.device_name }}</TableCell>
                 <TableCell class="text-muted-foreground text-xs">{{ m.variable_type }}</TableCell>
-                <TableCell class="font-mono text-xs">{{ m.json_key }}</TableCell>
+                <TableCell class="font-mono text-xs">
+                  <template v-if="m.metric_name">
+                    <span class="text-[color:var(--epm-bosque)]">{{ m.metric_name }}</span>
+                    <span class="text-[10px] text-muted-foreground ml-1">spB</span>
+                  </template>
+                  <template v-else>{{ m.json_key }}</template>
+                </TableCell>
                 <TableCell>
                   <span class="inline-flex items-center rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[color:color-mix(in_srgb,var(--epm-citrico)_22%,transparent)] text-[color:var(--epm-bosque)]">
                     {{ m.iec104_type }}
