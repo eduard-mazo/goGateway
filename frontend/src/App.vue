@@ -9,6 +9,7 @@ import {
 } from 'lucide-vue-next'
 import { useStatus } from '@/composables/useStatus'
 import StatusPill from '@/components/StatusPill.vue'
+import UserBadge from '@/components/UserBadge.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { t } from '@/i18n'
 
@@ -113,8 +114,24 @@ function fmtBuildTime(bt?: string) {
 </script>
 
 <template>
-  <!-- Root: full viewport, clip overflow. Only <main> scrolls. -->
-  <div class="h-screen w-screen overflow-hidden flex bg-background text-foreground">
+  <!-- Auth layout: full-screen, no sidebar (login page). -->
+  <template v-if="route.meta?.layout === 'auth'">
+    <RouterView />
+    <Toaster
+      position="bottom-right"
+      :offset="20"
+      :toast-options="{
+        classes: {
+          toast: '!rounded-sm !border !border-border !bg-card !text-card-foreground !text-xs !py-2 !px-3 !shadow-md',
+          title: '!text-xs !font-medium',
+          description: '!text-[11px] !text-muted-foreground',
+        },
+      }"
+    />
+  </template>
+
+  <!-- Main layout: sidebar + header + content. -->
+  <div v-else class="h-screen w-screen overflow-hidden flex bg-background text-foreground">
     <!-- Mobile backdrop -->
     <div
       v-show="mobileOpen"
@@ -173,6 +190,9 @@ function fmtBuildTime(bt?: string) {
 
       <!-- Bottom controls -->
       <div class="border-t border-sidebar-border p-3 space-y-1 shrink-0">
+        <!-- User profile: avatar, name, role chip, logout -->
+        <UserBadge />
+        <div class="border-t border-sidebar-border/50 my-1" />
         <button
           class="w-full flex items-center gap-3 rounded-sm px-3 py-2 text-sm hover:bg-sidebar-accent transition-colors"
           :title="dark ? t.nav.lightMode : t.nav.darkMode"

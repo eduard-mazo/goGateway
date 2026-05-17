@@ -3,6 +3,12 @@ import { createRouter, createWebHistory } from 'vue-router'
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
+    // Auth layout — no sidebar, full-screen form.
+    {
+      path: '/login',
+      component: () => import('./views/LoginView.vue'),
+      meta: { title: 'Iniciar sesión', layout: 'auth' },
+    },
     { path: '/', component: () => import('./views/Dashboard.vue'), meta: { title: 'Panel Principal' } },
     { path: '/mappings', component: () => import('./views/SignalMapper.vue'), meta: { title: 'Mapeo de Señales' } },
     { path: '/devices', component: () => import('./views/DevicesTopics.vue'), meta: { title: 'Dispositivos y Tópicos' } },

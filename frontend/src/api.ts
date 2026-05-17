@@ -5,6 +5,55 @@ export const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+// Inject Bearer token from localStorage on every request.
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('gw:access')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+// On 401: attempt a silent token refresh, then retry once.
+// If refresh fails, clear auth state and redirect to /login.
+let _refreshing: Promise<boolean> | null = null
+api.interceptors.response.use(
+  r => r,
+  async err => {
+    const status = err.response?.status
+    const isAuthRoute = err.config?.url?.includes('/auth/login') ||
+                        err.config?.url?.includes('/auth/refresh')
+    if (status === 401 && !isAuthRoute && !err.config?._retry) {
+      err.config._retry = true
+      if (!_refreshing) {
+        _refreshing = (async () => {
+          const sid = localStorage.getItem('gw:session')
+          const rt  = localStorage.getItem('gw:refresh')
+          if (!sid || !rt) return false
+          try {
+            const { data } = await api.post('/auth/refresh', {
+              session_id: sid, refresh_token: rt,
+            })
+            localStorage.setItem('gw:access', data.access_token)
+            return true
+          } catch {
+            return false
+          } finally {
+            _refreshing = null
+          }
+        })()
+      }
+      const ok = await _refreshing
+      if (ok) {
+        err.config.headers.Authorization = `Bearer ${localStorage.getItem('gw:access')}`
+        return api(err.config)
+      }
+      // Refresh failed — wipe tokens and send user to login.
+      ;['gw:access', 'gw:refresh', 'gw:session'].forEach(k => localStorage.removeItem(k))
+      window.location.href = '/login'
+    }
+    return Promise.reject(err)
+  }
+)
+
 export interface Device {
   id: number
   server_id: number
