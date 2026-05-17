@@ -18,12 +18,16 @@ var GitCommit = "unknown"
 type Runtime struct {
 	DBPath     string
 	HTTPListen string
+	// JWTSecret is the HMAC-SHA256 signing key for access tokens.
+	// Set GW_JWT_SECRET in production; the dev default must not be used in prod.
+	JWTSecret string
 }
 
 func Load() Runtime {
 	return Runtime{
 		DBPath:     getenv("GW_DB", "gateway.db"),
 		HTTPListen: getenv("GW_HTTP", DefaultHTTPListen),
+		JWTSecret:  getenv("GW_JWT_SECRET", "change-me-in-production-min-32-chars"),
 	}
 }
 

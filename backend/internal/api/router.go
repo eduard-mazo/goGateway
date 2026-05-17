@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jmoiron/sqlx"
 
+	"goGateway/internal/auth"
 	"goGateway/internal/iec104"
 	"goGateway/internal/mqtt"
 	"goGateway/internal/tsdb"
@@ -29,6 +30,12 @@ type Deps struct {
 	TSDBMgr   *tsdb.Manager
 	BrokerMon *BrokerMonitor
 	StartedAt time.Time
+
+	// AuthCfg configures JWT signing and token lifetimes.
+	// When set, /api/auth/* routes are mounted.
+	// To protect ALL API routes add auth.AuthMiddleware(AuthCfg, sessions)
+	// to the r.Group below.
+	AuthCfg auth.Config
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -47,7 +54,15 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/broker/stream", d.BrokerMon.ServeStream)
 		}
 
+		// Auth routes (public — no token required for login/refresh).
+		if len(d.AuthCfg.Secret) > 0 {
+			authH := NewAuthHandler(d, d.AuthCfg)
+			r.Route("/auth", authH.Mount)
+		}
+
 		// All other API routes: 30s timeout + 1 MB body limit.
+		// To require authentication for ALL routes uncomment:
+		//   r.Use(auth.AuthMiddleware(d.AuthCfg, auth.NewSessionStore(d.DB)))
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Timeout(30 * time.Second))
 			r.Use(func(next http.Handler) http.Handler {

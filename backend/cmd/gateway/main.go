@@ -12,6 +12,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"goGateway/internal/api"
+	"goGateway/internal/auth"
 	"goGateway/internal/config"
 	"goGateway/internal/db"
 	"goGateway/internal/iec104"
@@ -65,15 +66,28 @@ func main() {
 		log.Printf("nats: load config: %v", err)
 	}
 
+	// Edge-compute engines (signal filtering, virtual signals, alarms).
+	deadband := worker.NewDeadbandFilter()
+	calcEng := worker.NewCalcEngine(database, iecMgr)
+	threshEng := worker.NewThresholdEngine(database, iecMgr)
+	if err := calcEng.Reload(); err != nil {
+		log.Printf("calc engine: load: %v", err)
+	}
+	if err := threshEng.Reload(); err != nil {
+		log.Printf("threshold engine: load: %v", err)
+	}
+	go calcEng.Run(ctx)
+	go threshEng.Run(ctx)
+
 	var natsClient *nats.Client
-	var dispatcher worker.Dispatcher = worker.NewDirectDispatcher(iecMgr, hist)
+	var innerDispatcher worker.Dispatcher = worker.NewDirectDispatcher(iecMgr, hist)
 
 	if natsCfg.Enabled {
 		natsClient = nats.NewClient(natsCfg)
 		if err := natsClient.Connect(); err != nil {
 			log.Printf("nats: connect error (falling back to direct dispatch): %v", err)
 		} else {
-			dispatcher = worker.NewNatsDispatcher(natsClient, natsCfg.StreamName)
+			innerDispatcher = worker.NewNatsDispatcher(natsClient, natsCfg.StreamName)
 			// Start NATS workers.
 			scadaWorker := worker.NewSCADAWorker(natsClient, natsCfg.StreamName, iecMgr)
 			go func() {
@@ -90,6 +104,9 @@ func main() {
 			}()
 		}
 	}
+
+	// Wrap the chosen inner dispatcher with edge-compute filtering.
+	dispatcher := worker.NewFilteringDispatcher(innerDispatcher, deadband, calcEng, threshEng)
 
 	histDone := make(chan struct{})
 	go func() {
@@ -128,6 +145,7 @@ func main() {
 
 	// REST API.
 	startedAt := time.Now()
+	authCfg := auth.DefaultConfig(cfg.JWTSecret)
 	handler := api.NewRouter(api.Deps{
 		DB:         database,
 		NotifyMQTT: mqttMgr.Notify,
@@ -174,6 +192,7 @@ func main() {
 		TSDBMgr:   tsdbMgr,
 		BrokerMon: brokerMon,
 		StartedAt: startedAt,
+		AuthCfg:   authCfg,
 	})
 
 	srv := &http.Server{

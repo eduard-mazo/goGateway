@@ -95,6 +95,12 @@ CREATE TABLE IF NOT EXISTS signal_mappings (
     enabled        INTEGER NOT NULL DEFAULT 1,
     business       TEXT NOT NULL DEFAULT '',
     company        TEXT NOT NULL DEFAULT '',
+    -- Deadbanding: suppress dispatches smaller than the configured threshold.
+    -- deadband_abs is an absolute engineering-unit delta; deadband_pct is a
+    -- fraction of the last dispatched value (0.01 = 1 %).  The stricter of
+    -- the two wins.  Zero means disabled for that mode.
+    deadband_abs   REAL NOT NULL DEFAULT 0.0,
+    deadband_pct   REAL NOT NULL DEFAULT 0.0,
     UNIQUE (server_id, ioa)
 );
 CREATE INDEX IF NOT EXISTS idx_sigmap_topic ON signal_mappings(topic_id);
@@ -135,3 +141,96 @@ CREATE TABLE IF NOT EXISTS nats_config (
     enabled     INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO nats_config(id) VALUES(1);
+
+-- ─── RBAC ────────────────────────────────────────────────────────────────────
+
+-- users: gateway operator accounts.  Roles: superadmin, operator, viewer.
+-- password_hash stores a bcrypt digest (cost 12); the plaintext is never kept.
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL UNIQUE,
+    password_hash TEXT    NOT NULL,
+    email         TEXT    NOT NULL DEFAULT '',
+    full_name     TEXT    NOT NULL DEFAULT '',
+    role          TEXT    NOT NULL DEFAULT 'viewer'
+                          CHECK (role IN ('superadmin', 'operator', 'viewer')),
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- sessions: one row per authenticated login event.
+-- id = UUID embedded as the JWT jti claim; revoking the row invalidates all
+-- access tokens issued for that login without invalidating other sessions.
+-- refresh_token_hash stores a bcrypt hash of the raw 256-bit refresh token.
+CREATE TABLE IF NOT EXISTS sessions (
+    id                 TEXT     PRIMARY KEY,
+    user_id            INTEGER  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    refresh_token_hash TEXT     NOT NULL,
+    user_agent         TEXT     NOT NULL DEFAULT '',
+    remote_ip          TEXT     NOT NULL DEFAULT '',
+    expires_at         DATETIME NOT NULL,
+    revoked            INTEGER  NOT NULL DEFAULT 0,
+    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+-- ─── Signal edge compute ─────────────────────────────────────────────────────
+
+-- signal_thresholds: Hi/Lo alarm limits for one signal mapping.
+-- Limit columns are nullable (NULL = that level disabled).
+-- Alarm IOA columns point to existing IEC-104 points that are toggled
+-- (M_SP_TB_1, value=1 when active, value=0 when cleared).
+-- deadband provides hysteresis to prevent chattering near a boundary.
+CREATE TABLE IF NOT EXISTS signal_thresholds (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    mapping_id     INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
+    hh_value       REAL,
+    h_value        REAL,
+    l_value        REAL,
+    ll_value       REAL,
+    hh_alarm_ioa   INTEGER NOT NULL DEFAULT 0,
+    h_alarm_ioa    INTEGER NOT NULL DEFAULT 0,
+    l_alarm_ioa    INTEGER NOT NULL DEFAULT 0,
+    ll_alarm_ioa   INTEGER NOT NULL DEFAULT 0,
+    alarm_server_id INTEGER REFERENCES iec104_servers(id),
+    deadband       REAL    NOT NULL DEFAULT 0.0,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (mapping_id)
+);
+
+-- alarm_events: immutable log of level transitions.
+-- acknowledged / ack_at allow operators to confirm they have seen an alarm.
+CREATE TABLE IF NOT EXISTS alarm_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    mapping_id   INTEGER  NOT NULL REFERENCES signal_mappings(id),
+    level        TEXT     NOT NULL CHECK (level IN ('HH','H','NORMAL','L','LL')),
+    value        REAL     NOT NULL,
+    timestamp    DATETIME NOT NULL,
+    acknowledged INTEGER  NOT NULL DEFAULT 0,
+    ack_at       DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_alarm_events_mapping ON alarm_events(mapping_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_alarm_events_ts      ON alarm_events(timestamp DESC);
+
+-- calculated_signals: virtual IEC-104 points derived from two real IOAs.
+-- operator: '+', '-', '*', '/', 'abs' (unary — operand B columns are ignored).
+-- The result is scaled by `scale` before dispatch.
+-- out_server_id + out_ioa identify the synthesised output point.
+CREATE TABLE IF NOT EXISTS calculated_signals (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT    NOT NULL UNIQUE,
+    operator         TEXT    NOT NULL DEFAULT '*'
+                             CHECK (operator IN ('+','-','*','/','abs')),
+    operand_a_server INTEGER NOT NULL REFERENCES iec104_servers(id),
+    operand_a_ioa    INTEGER NOT NULL,
+    operand_b_server INTEGER REFERENCES iec104_servers(id),
+    operand_b_ioa    INTEGER,
+    scale            REAL    NOT NULL DEFAULT 1.0,
+    out_server_id    INTEGER NOT NULL REFERENCES iec104_servers(id),
+    out_ioa          INTEGER NOT NULL,
+    out_type         TEXT    NOT NULL DEFAULT 'M_ME_NC_1',
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (out_server_id, out_ioa)
+);

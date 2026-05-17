@@ -178,6 +178,28 @@ func migrate(db *sqlx.DB) error {
 		}
 	}
 
+	// signal_mappings: add deadband columns for edge-compute suppression.
+	var hasSigMap int
+	if err := db.Get(&hasSigMap, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='signal_mappings'`); err != nil {
+		return err
+	}
+	if hasSigMap > 0 {
+		for _, col := range []struct{ name, def string }{
+			{"deadband_abs", "REAL NOT NULL DEFAULT 0.0"},
+			{"deadband_pct", "REAL NOT NULL DEFAULT 0.0"},
+		} {
+			var has int
+			if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('signal_mappings') WHERE name=?`, col.name); err != nil {
+				return err
+			}
+			if has == 0 {
+				if _, err := db.Exec(`ALTER TABLE signal_mappings ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
+					return fmt.Errorf("add signal_mappings.%s: %w", col.name, err)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 

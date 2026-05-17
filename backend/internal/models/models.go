@@ -4,6 +4,92 @@ package models
 
 import "time"
 
+// --- RBAC roles ---
+
+const (
+	RoleSuperAdmin = "superadmin"
+	RoleOperator   = "operator"
+	RoleViewer     = "viewer"
+)
+
+// ValidRole reports whether r is a recognised role string.
+func ValidRole(r string) bool {
+	return r == RoleSuperAdmin || r == RoleOperator || r == RoleViewer
+}
+
+// User is a gateway operator account.  PasswordHash is never serialised to JSON.
+type User struct {
+	ID           int64     `db:"id"            json:"id"`
+	Username     string    `db:"username"      json:"username"`
+	PasswordHash string    `db:"password_hash" json:"-"`
+	Email        string    `db:"email"         json:"email"`
+	FullName     string    `db:"full_name"     json:"full_name"`
+	Role         string    `db:"role"          json:"role"`
+	Enabled      bool      `db:"enabled"       json:"enabled"`
+	CreatedAt    time.Time `db:"created_at"    json:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at"    json:"updated_at"`
+}
+
+// Session is one authenticated login event.  RefreshTokenHash is a bcrypt
+// hash of the raw refresh token; the raw token is given to the client only.
+type Session struct {
+	ID               string    `db:"id"                 json:"id"`
+	UserID           int64     `db:"user_id"            json:"user_id"`
+	RefreshTokenHash string    `db:"refresh_token_hash" json:"-"`
+	UserAgent        string    `db:"user_agent"         json:"user_agent"`
+	RemoteIP         string    `db:"remote_ip"          json:"remote_ip"`
+	ExpiresAt        time.Time `db:"expires_at"         json:"expires_at"`
+	Revoked          bool      `db:"revoked"            json:"revoked"`
+	CreatedAt        time.Time `db:"created_at"         json:"created_at"`
+}
+
+// SignalThreshold defines Hi/Lo alarm limits for one signal mapping.
+// Each limit is optional (NULL = disabled).  AlarmIOA fields carry the IEC-104
+// IOA that is toggled when the corresponding level is breached.
+type SignalThreshold struct {
+	ID            int64    `db:"id"              json:"id"`
+	MappingID     int64    `db:"mapping_id"      json:"mapping_id"`
+	HHValue       *float64 `db:"hh_value"        json:"hh_value"`
+	HValue        *float64 `db:"h_value"         json:"h_value"`
+	LValue        *float64 `db:"l_value"         json:"l_value"`
+	LLValue       *float64 `db:"ll_value"        json:"ll_value"`
+	HHAlarmIOA    int      `db:"hh_alarm_ioa"    json:"hh_alarm_ioa"`
+	HAlarmIOA     int      `db:"h_alarm_ioa"     json:"h_alarm_ioa"`
+	LAlarmIOA     int      `db:"l_alarm_ioa"     json:"l_alarm_ioa"`
+	LLAlarmIOA    int      `db:"ll_alarm_ioa"    json:"ll_alarm_ioa"`
+	AlarmServerID int64    `db:"alarm_server_id" json:"alarm_server_id"`
+	Deadband      float64  `db:"deadband"        json:"deadband"`
+	Enabled       bool     `db:"enabled"         json:"enabled"`
+}
+
+// CalculatedSignal defines a virtual signal derived from two real IOAs.
+// Operator is one of: +  -  *  /  abs (unary — operand B ignored).
+type CalculatedSignal struct {
+	ID            int64   `db:"id"               json:"id"`
+	Name          string  `db:"name"             json:"name"`
+	Operator      string  `db:"operator"         json:"operator"`
+	OperandAServer int64  `db:"operand_a_server" json:"operand_a_server"`
+	OperandAIOA   int     `db:"operand_a_ioa"    json:"operand_a_ioa"`
+	OperandBServer *int64 `db:"operand_b_server" json:"operand_b_server"`
+	OperandBIOA   *int    `db:"operand_b_ioa"    json:"operand_b_ioa"`
+	Scale         float64 `db:"scale"            json:"scale"`
+	OutServerID   int64   `db:"out_server_id"    json:"out_server_id"`
+	OutIOA        int     `db:"out_ioa"          json:"out_ioa"`
+	OutType       string  `db:"out_type"         json:"out_type"`
+	Enabled       bool    `db:"enabled"          json:"enabled"`
+}
+
+// AlarmEvent is one transition in a signal's alarm state.
+type AlarmEvent struct {
+	ID           int64      `db:"id"             json:"id"`
+	MappingID    int64      `db:"mapping_id"     json:"mapping_id"`
+	Level        string     `db:"level"          json:"level"`
+	Value        float64    `db:"value"          json:"value"`
+	Timestamp    time.Time  `db:"timestamp"      json:"timestamp"`
+	Acknowledged bool       `db:"acknowledged"   json:"acknowledged"`
+	AckAt        *time.Time `db:"ack_at"         json:"ack_at"`
+}
+
 // Device = logical device (inverter, weather station, ...) on one IEC-104
 // slave. ServerID pins the device to a server row; topics + mappings under
 // it inherit that scope. Same physical asset on two SCADA endpoints = two
