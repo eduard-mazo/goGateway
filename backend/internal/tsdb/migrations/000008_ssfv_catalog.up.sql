@@ -17,168 +17,100 @@ CREATE TABLE IF NOT EXISTS public.tbl_senales_x_tipo_equipo (
 );
 
 -- ---------------------------------------------------------------------------
--- 2. Catálogo completo de señales SSFV + asignaciones por tipo de equipo
+-- 2. Catálogo completo de señales SSFV (plain SQL — auto-commits as its own
+--    statement; FK checks in step 3 see the committed rows)
 -- ---------------------------------------------------------------------------
-
-DO $$
-DECLARE
-    v_cac INT; v_cdc INT; v_vac INT; v_vdc INT;
-    v_pot INT; v_ene INT; v_pro INT; v_tem INT;
-    v_irr INT; v_est INT; v_ala INT;
-    u_A    INT; u_V  INT; u_kW   INT; u_kVar INT; u_kVA  INT;
-    u_kWh  INT; u_kVarh INT; u_pct INT; u_Hz   INT;
-    u_C    INT; u_Wm2 INT; u_MOhm INT; u_adim INT;
-    t_inv INT; t_med INT; t_est INT; t_fro INT;
-    s_IA    INT; s_IB    INT; s_IC   INT;
-    s_UAB   INT; s_UBC   INT; s_UCA  INT;
-    s_AP    INT; s_RP    INT; s_SP   INT;
-    s_FP    INT; s_EF    INT; s_FR   INT;
-    s_ET    INT; s_IP    INT; s_T    INT;
-    s_IR    INT; s_OS    INT; s_OSV  INT;
-    s_IDCx  INT; s_VDCx  INT; s_EFx  INT;
-    s_EVx   INT; s_ALx   INT; s_ALCOM INT;
-    s_RD    INT; s_TA    INT; s_TP   INT;
-    s_UA    INT; s_API   INT; s_AN   INT;
-    s_QPZ   INT; s_QN    INT;
-BEGIN
-    SELECT tipovar_id INTO v_cac FROM ssfv.tbl_tipo_variable WHERE nombre = 'Corriente AC';
-    SELECT tipovar_id INTO v_cdc FROM ssfv.tbl_tipo_variable WHERE nombre = 'Corriente DC';
-    SELECT tipovar_id INTO v_vac FROM ssfv.tbl_tipo_variable WHERE nombre = 'Voltage AC';
-    SELECT tipovar_id INTO v_vdc FROM ssfv.tbl_tipo_variable WHERE nombre = 'Voltage DC';
-    SELECT tipovar_id INTO v_pot FROM ssfv.tbl_tipo_variable WHERE nombre = 'Potencia';
-    SELECT tipovar_id INTO v_ene FROM ssfv.tbl_tipo_variable WHERE nombre = 'Energía';
-    SELECT tipovar_id INTO v_pro FROM ssfv.tbl_tipo_variable WHERE nombre = 'Proceso';
-    SELECT tipovar_id INTO v_tem FROM ssfv.tbl_tipo_variable WHERE nombre = 'Temperatura';
-    SELECT tipovar_id INTO v_irr FROM ssfv.tbl_tipo_variable WHERE nombre = 'Irradiancia';
-    SELECT tipovar_id INTO v_est FROM ssfv.tbl_tipo_variable WHERE nombre = 'Estado';
-    SELECT tipovar_id INTO v_ala FROM ssfv.tbl_tipo_variable WHERE nombre = 'Alarma';
-
-    SELECT unidad_id INTO u_A     FROM ssfv.tbl_unidades WHERE simbolo = 'A';
-    SELECT unidad_id INTO u_V     FROM ssfv.tbl_unidades WHERE simbolo = 'V';
-    SELECT unidad_id INTO u_kW    FROM ssfv.tbl_unidades WHERE simbolo = 'kW';
-    SELECT unidad_id INTO u_kVar  FROM ssfv.tbl_unidades WHERE simbolo = 'kVar';
-    SELECT unidad_id INTO u_kVA   FROM ssfv.tbl_unidades WHERE simbolo = 'kVA';
-    SELECT unidad_id INTO u_kWh   FROM ssfv.tbl_unidades WHERE simbolo = 'kWh';
-    SELECT unidad_id INTO u_kVarh FROM ssfv.tbl_unidades WHERE simbolo = 'kVarh';
-    SELECT unidad_id INTO u_pct   FROM ssfv.tbl_unidades WHERE simbolo = '%';
-    SELECT unidad_id INTO u_Hz    FROM ssfv.tbl_unidades WHERE simbolo = 'Hz';
-    SELECT unidad_id INTO u_C     FROM ssfv.tbl_unidades WHERE simbolo = '°C';
-    SELECT unidad_id INTO u_Wm2   FROM ssfv.tbl_unidades WHERE simbolo = 'W/m2';
-    SELECT unidad_id INTO u_MOhm  FROM ssfv.tbl_unidades WHERE simbolo = 'MΩ';
-    SELECT unidad_id INTO u_adim  FROM ssfv.tbl_unidades WHERE simbolo = 'Adimensional';
-
-    SELECT tipo_id INTO t_inv FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Inversor';
-    SELECT tipo_id INTO t_med FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Medidor';
-    SELECT tipo_id INTO t_est FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Estación Meteorológica';
-    SELECT tipo_id INTO t_fro FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Frontera Comercial';
-
-    INSERT INTO ssfv.tbl_senales
-        (tipovar_id, unidad_id, nombre, tipo_valor, codigo_senal, es_indexada, activo)
-    VALUES
-        (v_cac, u_A,    'Corriente Fase A AC',        'Instantaneo', 'IA',     false, true),
-        (v_cac, u_A,    'Corriente Fase B AC',        'Instantaneo', 'IB',     false, true),
-        (v_cac, u_A,    'Corriente Fase C AC',        'Instantaneo', 'IC',     false, true),
-        (v_vac, u_V,    'Voltaje Línea AB',           'Instantaneo', 'UAB',    false, true),
-        (v_vac, u_V,    'Voltaje Línea BC',           'Instantaneo', 'UBC',    false, true),
-        (v_vac, u_V,    'Voltaje Línea CA',           'Instantaneo', 'UCA',    false, true),
-        (v_pot, u_kW,   'Potencia Activa',            'Instantaneo', 'AP',     false, true),
-        (v_pot, u_kVar, 'Potencia Reactiva',          'Instantaneo', 'RP',     false, true),
-        (v_pot, u_kVA,  'Potencia Aparente',          'Instantaneo', 'SP',     false, true),
-        (v_pro, u_adim, 'Factor de Potencia',         'Instantaneo', 'FP',     false, true),
-        (v_pro, u_pct,  'Eficiencia Inversor',        'Instantaneo', 'EF',     false, true),
-        (v_pro, u_Hz,   'Frecuencia Red',             'Instantaneo', 'FR',     false, true),
-        (v_ene, u_kWh,  'Energía Acumulada',          'Acumulado',   'ET',     false, true),
-        (v_pot, u_kW,   'Potencia Entrada DC',        'Instantaneo', 'IP',     false, true),
-        (v_tem, u_C,    'Temperatura Inversor',       'Instantaneo', 'T',      false, true),
-        (v_pro, u_MOhm, 'Resistencia Aislamiento',   'Instantaneo', 'IR',     false, true),
-        (v_est, u_adim, 'Estado Operación',           'Instantaneo', 'OS',     false, true),
-        (v_est, u_adim, 'OS Fabricante',              'Instantaneo', 'OSV',    false, true),
-        (v_cdc, u_A,    'Corriente DC String',        'Instantaneo', 'IDC_x',  true,  true),
-        (v_vdc, u_V,    'Voltaje DC String',          'Instantaneo', 'VDC_x',  true,  true),
-        (v_est, u_adim, 'Alarma Dispositivo EF',      'Instantaneo', 'EF_x',   true,  true),
-        (v_est, u_adim, 'Alarma Fabricante EV',       'Instantaneo', 'EV_x',   true,  true),
-        (v_ala, u_adim, 'Alarma Dispositivo AL',      'Instantaneo', 'AL_x',   true,  true),
-        (v_ala, u_adim, 'Alarma Comunicación',        'Instantaneo', 'AL_COM', false, true),
-        (v_irr, u_Wm2,  'Irradiancia Principal',     'Instantaneo', 'RD',     false, true),
-        (v_tem, u_C,    'Temperatura Ambiente',       'Instantaneo', 'TA',     false, true),
-        (v_tem, u_C,    'Temperatura Panel',          'Instantaneo', 'TP',     false, true),
-        (v_vac, u_V,    'Voltaje Fase A',             'Instantaneo', 'UA',     false, true),
-        (v_ene, u_kWh,  'Energía Activa Importada',  'Acumulado',   'API',    false, true),
-        (v_ene, u_kWh,  'Energía Activa Exportada',  'Acumulado',   'AN',     false, true),
-        (v_ene, u_kVarh,'Energía Reactiva Importada','Acumulado',   'QPZ',    false, true),
-        (v_ene, u_kVarh,'Energía Reactiva Exportada','Acumulado',   'QN',     false, true)
-    ON CONFLICT (codigo_senal, tipovar_id) DO NOTHING;
-
-    SELECT senal_id INTO s_IA    FROM ssfv.tbl_senales WHERE codigo_senal = 'IA'     AND tipovar_id = v_cac;
-    SELECT senal_id INTO s_IB    FROM ssfv.tbl_senales WHERE codigo_senal = 'IB'     AND tipovar_id = v_cac;
-    SELECT senal_id INTO s_IC    FROM ssfv.tbl_senales WHERE codigo_senal = 'IC'     AND tipovar_id = v_cac;
-    SELECT senal_id INTO s_UAB   FROM ssfv.tbl_senales WHERE codigo_senal = 'UAB'    AND tipovar_id = v_vac;
-    SELECT senal_id INTO s_UBC   FROM ssfv.tbl_senales WHERE codigo_senal = 'UBC'    AND tipovar_id = v_vac;
-    SELECT senal_id INTO s_UCA   FROM ssfv.tbl_senales WHERE codigo_senal = 'UCA'    AND tipovar_id = v_vac;
-    SELECT senal_id INTO s_AP    FROM ssfv.tbl_senales WHERE codigo_senal = 'AP'     AND tipovar_id = v_pot;
-    SELECT senal_id INTO s_RP    FROM ssfv.tbl_senales WHERE codigo_senal = 'RP'     AND tipovar_id = v_pot;
-    SELECT senal_id INTO s_SP    FROM ssfv.tbl_senales WHERE codigo_senal = 'SP'     AND tipovar_id = v_pot;
-    SELECT senal_id INTO s_FP    FROM ssfv.tbl_senales WHERE codigo_senal = 'FP'     AND tipovar_id = v_pro;
-    SELECT senal_id INTO s_EF    FROM ssfv.tbl_senales WHERE codigo_senal = 'EF'     AND tipovar_id = v_pro;
-    SELECT senal_id INTO s_FR    FROM ssfv.tbl_senales WHERE codigo_senal = 'FR'     AND tipovar_id = v_pro;
-    SELECT senal_id INTO s_ET    FROM ssfv.tbl_senales WHERE codigo_senal = 'ET'     AND tipovar_id = v_ene;
-    SELECT senal_id INTO s_IP    FROM ssfv.tbl_senales WHERE codigo_senal = 'IP'     AND tipovar_id = v_pot;
-    SELECT senal_id INTO s_T     FROM ssfv.tbl_senales WHERE codigo_senal = 'T'      AND tipovar_id = v_tem;
-    SELECT senal_id INTO s_IR    FROM ssfv.tbl_senales WHERE codigo_senal = 'IR'     AND tipovar_id = v_pro;
-    SELECT senal_id INTO s_OS    FROM ssfv.tbl_senales WHERE codigo_senal = 'OS'     AND tipovar_id = v_est;
-    SELECT senal_id INTO s_OSV   FROM ssfv.tbl_senales WHERE codigo_senal = 'OSV'    AND tipovar_id = v_est;
-    SELECT senal_id INTO s_IDCx  FROM ssfv.tbl_senales WHERE codigo_senal = 'IDC_x'  AND tipovar_id = v_cdc;
-    SELECT senal_id INTO s_VDCx  FROM ssfv.tbl_senales WHERE codigo_senal = 'VDC_x'  AND tipovar_id = v_vdc;
-    SELECT senal_id INTO s_EFx   FROM ssfv.tbl_senales WHERE codigo_senal = 'EF_x'   AND tipovar_id = v_est;
-    SELECT senal_id INTO s_EVx   FROM ssfv.tbl_senales WHERE codigo_senal = 'EV_x'   AND tipovar_id = v_est;
-    SELECT senal_id INTO s_ALx   FROM ssfv.tbl_senales WHERE codigo_senal = 'AL_x'   AND tipovar_id = v_ala;
-    SELECT senal_id INTO s_ALCOM FROM ssfv.tbl_senales WHERE codigo_senal = 'AL_COM' AND tipovar_id = v_ala;
-    SELECT senal_id INTO s_RD    FROM ssfv.tbl_senales WHERE codigo_senal = 'RD'     AND tipovar_id = v_irr;
-    SELECT senal_id INTO s_TA    FROM ssfv.tbl_senales WHERE codigo_senal = 'TA'     AND tipovar_id = v_tem;
-    SELECT senal_id INTO s_TP    FROM ssfv.tbl_senales WHERE codigo_senal = 'TP'     AND tipovar_id = v_tem;
-    SELECT senal_id INTO s_UA    FROM ssfv.tbl_senales WHERE codigo_senal = 'UA'     AND tipovar_id = v_vac;
-    SELECT senal_id INTO s_API   FROM ssfv.tbl_senales WHERE codigo_senal = 'API'    AND tipovar_id = v_ene;
-    SELECT senal_id INTO s_AN    FROM ssfv.tbl_senales WHERE codigo_senal = 'AN'     AND tipovar_id = v_ene;
-    SELECT senal_id INTO s_QPZ   FROM ssfv.tbl_senales WHERE codigo_senal = 'QPZ'    AND tipovar_id = v_ene;
-    SELECT senal_id INTO s_QN    FROM ssfv.tbl_senales WHERE codigo_senal = 'QN'     AND tipovar_id = v_ene;
-
-    -- Junction Inversor
-    INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
-        (s_IA, t_inv, 1), (s_IB, t_inv, 1), (s_IC, t_inv, 1),
-        (s_UAB, t_inv, 1), (s_UBC, t_inv, 1), (s_UCA, t_inv, 1),
-        (s_AP, t_inv, 1), (s_RP, t_inv, 1), (s_SP, t_inv, 1),
-        (s_FP, t_inv, 1), (s_EF, t_inv, 1), (s_FR, t_inv, 1),
-        (s_ET, t_inv, 1), (s_IP, t_inv, 1), (s_T, t_inv, 1),
-        (s_IR, t_inv, 1), (s_OS, t_inv, 1), (s_OSV, t_inv, 1),
-        (s_IDCx, t_inv, 3), (s_VDCx, t_inv, 3),
-        (s_EFx, t_inv, 1), (s_EVx, t_inv, 1),
-        (s_ALx, t_inv, 1), (s_ALCOM, t_inv, 1)
-    ON CONFLICT DO NOTHING;
-
-    -- Junction Medidor
-    INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
-        (s_UA, t_med, 1), (s_UAB, t_med, 1), (s_UBC, t_med, 1), (s_UCA, t_med, 1),
-        (s_IA, t_med, 1), (s_IB, t_med, 1), (s_IC, t_med, 1),
-        (s_AP, t_med, 1), (s_RP, t_med, 1), (s_SP, t_med, 1), (s_FP, t_med, 1),
-        (s_ET, t_med, 1),
-        (s_API, t_med, 1), (s_AN, t_med, 1), (s_QPZ, t_med, 1), (s_QN, t_med, 1),
-        (s_ALCOM, t_med, 1)
-    ON CONFLICT DO NOTHING;
-
-    -- Junction Estación Meteorológica
-    INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
-        (s_RD, t_est, 1), (s_TA, t_est, 1), (s_TP, t_est, 1), (s_ALCOM, t_est, 1)
-    ON CONFLICT DO NOTHING;
-
-    -- Junction Frontera Comercial
-    INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
-        (s_API, t_fro, 1), (s_AN, t_fro, 1), (s_QPZ, t_fro, 1), (s_QN, t_fro, 1),
-        (s_IA,  t_fro, 1), (s_UAB, t_fro, 1), (s_ALCOM, t_fro, 1)
-    ON CONFLICT DO NOTHING;
-END $$;
+INSERT INTO ssfv.tbl_senales
+    (tipovar_id, unidad_id, nombre, tipo_valor, codigo_senal, es_indexada, activo)
+SELECT tv.tipovar_id, u.unidad_id, v.nombre, v.tipo_valor, v.codigo_senal,
+       v.es_indexada, v.activo
+FROM (VALUES
+    ('Corriente AC',  'A',            'Corriente Fase A AC',         'Instantaneo', 'IA',     false, true),
+    ('Corriente AC',  'A',            'Corriente Fase B AC',         'Instantaneo', 'IB',     false, true),
+    ('Corriente AC',  'A',            'Corriente Fase C AC',         'Instantaneo', 'IC',     false, true),
+    ('Voltage AC',    'V',            'Voltaje Línea AB',            'Instantaneo', 'UAB',    false, true),
+    ('Voltage AC',    'V',            'Voltaje Línea BC',            'Instantaneo', 'UBC',    false, true),
+    ('Voltage AC',    'V',            'Voltaje Línea CA',            'Instantaneo', 'UCA',    false, true),
+    ('Potencia',      'kW',           'Potencia Activa',             'Instantaneo', 'AP',     false, true),
+    ('Potencia',      'kVar',         'Potencia Reactiva',           'Instantaneo', 'RP',     false, true),
+    ('Potencia',      'kVA',          'Potencia Aparente',           'Instantaneo', 'SP',     false, true),
+    ('Proceso',       'Adimensional', 'Factor de Potencia',          'Instantaneo', 'FP',     false, true),
+    ('Proceso',       '%',            'Eficiencia Inversor',         'Instantaneo', 'EF',     false, true),
+    ('Proceso',       'Hz',           'Frecuencia Red',              'Instantaneo', 'FR',     false, true),
+    ('Energía',       'kWh',          'Energía Acumulada',           'Acumulado',   'ET',     false, true),
+    ('Potencia',      'kW',           'Potencia Entrada DC',         'Instantaneo', 'IP',     false, true),
+    ('Temperatura',   '°C',           'Temperatura Inversor',        'Instantaneo', 'T',      false, true),
+    ('Proceso',       'MΩ',           'Resistencia Aislamiento',     'Instantaneo', 'IR',     false, true),
+    ('Estado',        'Adimensional', 'Estado Operación',            'Instantaneo', 'OS',     false, true),
+    ('Estado',        'Adimensional', 'OS Fabricante',               'Instantaneo', 'OSV',    false, true),
+    ('Corriente DC',  'A',            'Corriente DC String',         'Instantaneo', 'IDC_x',  true,  true),
+    ('Voltage DC',    'V',            'Voltaje DC String',           'Instantaneo', 'VDC_x',  true,  true),
+    ('Estado',        'Adimensional', 'Alarma Dispositivo EF',       'Instantaneo', 'EF_x',   true,  true),
+    ('Estado',        'Adimensional', 'Alarma Fabricante EV',        'Instantaneo', 'EV_x',   true,  true),
+    ('Alarma',        'Adimensional', 'Alarma Dispositivo AL',       'Instantaneo', 'AL_x',   true,  true),
+    ('Alarma',        'Adimensional', 'Alarma Comunicación',         'Instantaneo', 'AL_COM', false, true),
+    ('Irradiancia',   'W/m2',         'Irradiancia Principal',       'Instantaneo', 'RD',     false, true),
+    ('Temperatura',   '°C',           'Temperatura Ambiente',        'Instantaneo', 'TA',     false, true),
+    ('Temperatura',   '°C',           'Temperatura Panel',           'Instantaneo', 'TP',     false, true),
+    ('Voltage AC',    'V',            'Voltaje Fase A',              'Instantaneo', 'UA',     false, true),
+    ('Energía',       'kWh',          'Energía Activa Importada',    'Acumulado',   'API',    false, true),
+    ('Energía',       'kWh',          'Energía Activa Exportada',    'Acumulado',   'AN',     false, true),
+    ('Energía',       'kVarh',        'Energía Reactiva Importada',  'Acumulado',   'QPZ',    false, true),
+    ('Energía',       'kVarh',        'Energía Reactiva Exportada',  'Acumulado',   'QN',     false, true)
+) AS v(tipovar_nombre, unidad_simbolo, nombre, tipo_valor, codigo_senal, es_indexada, activo)
+JOIN ssfv.tbl_tipo_variable tv ON tv.nombre  = v.tipovar_nombre
+JOIN ssfv.tbl_unidades      u  ON u.simbolo  = v.unidad_simbolo
+ON CONFLICT (codigo_senal, tipovar_id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
--- 3. Agregados continuos (15 min y diario)
+-- 3. Asignaciones señales ↔ tipo de equipo (plain SQL — each statement
+--    auto-commits; FK on senal_id sees the committed rows from step 2)
+-- ---------------------------------------------------------------------------
+
+-- Junction: Inversor (IDC_x and VDC_x use num_canales = 3)
+INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+SELECT s.senal_id, te.tipo_id, n.num_canales::smallint
+FROM (VALUES
+    ('IA', 1), ('IB', 1), ('IC', 1),
+    ('UAB', 1), ('UBC', 1), ('UCA', 1),
+    ('AP', 1), ('RP', 1), ('SP', 1),
+    ('FP', 1), ('EF', 1), ('FR', 1),
+    ('ET', 1), ('IP', 1), ('T', 1),
+    ('IR', 1), ('OS', 1), ('OSV', 1),
+    ('IDC_x', 3), ('VDC_x', 3),
+    ('EF_x', 1), ('EV_x', 1),
+    ('AL_x', 1), ('AL_COM', 1)
+) AS n(codigo_senal, num_canales)
+JOIN ssfv.tbl_senales s ON s.codigo_senal = n.codigo_senal
+CROSS JOIN (SELECT tipo_id FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Inversor') te
+ON CONFLICT (senal_id, tipo_id) DO NOTHING;
+
+-- Junction: Medidor
+INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+SELECT s.senal_id, te.tipo_id, 1::smallint
+FROM ssfv.tbl_senales s
+CROSS JOIN (SELECT tipo_id FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Medidor') te
+WHERE s.codigo_senal IN ('UA','UAB','UBC','UCA','IA','IB','IC','AP','RP','SP','FP','ET','API','AN','QPZ','QN','AL_COM')
+ON CONFLICT (senal_id, tipo_id) DO NOTHING;
+
+-- Junction: Estación Meteorológica
+INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+SELECT s.senal_id, te.tipo_id, 1::smallint
+FROM ssfv.tbl_senales s
+CROSS JOIN (SELECT tipo_id FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Estación Meteorológica') te
+WHERE s.codigo_senal IN ('RD','TA','TP','AL_COM')
+ON CONFLICT (senal_id, tipo_id) DO NOTHING;
+
+-- Junction: Frontera Comercial
+INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+SELECT s.senal_id, te.tipo_id, 1::smallint
+FROM ssfv.tbl_senales s
+CROSS JOIN (SELECT tipo_id FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Frontera Comercial') te
+WHERE s.codigo_senal IN ('API','AN','QPZ','QN','IA','UAB','AL_COM')
+ON CONFLICT (senal_id, tipo_id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- 4. Agregados continuos (15 min y diario)
 -- ---------------------------------------------------------------------------
 
 DO $$
