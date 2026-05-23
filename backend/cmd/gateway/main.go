@@ -136,6 +136,10 @@ func main() {
 	}
 	mqttMgr.SetSSFVHandler(ssfvHandler)
 
+	// Auto-discovery: records unknown Sparkplug B nodes/devices in SQLite.
+	autoDisc := worker.NewAutoDiscoveryService(database)
+	mqttMgr.SetAutoDiscovery(autoDisc)
+
 	// Broker monitor — ring buffer + SSE fan-out for the UI monitor view.
 	brokerMon := api.NewBrokerMonitor()
 	mqttMgr.SetMonitorHook(brokerMon.Push)

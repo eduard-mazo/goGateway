@@ -22,6 +22,7 @@ type SparkplugHandler struct {
 	cache       *MappingCache
 	d           Dispatcher
 	ssfvHandler *SSFVHandler
+	autoDisc    *AutoDiscoveryService
 	// rebirthFn is called when the handler needs to publish an NCMD Rebirth.
 	// The mqtt.Manager sets this field after creating the handler.
 	rebirthFn func(groupID, nodeID string)
@@ -50,6 +51,10 @@ func (h *SparkplugHandler) SetRebirthFn(fn func(groupID, nodeID string)) {
 // SetSSFVHandler wires an SSFV handler so that metrics whose UNS path matches
 // a known SSFV equipment topic are routed to TimescaleDB instead of IEC-104.
 func (h *SparkplugHandler) SetSSFVHandler(s *SSFVHandler) { h.ssfvHandler = s }
+
+// SetAutoDiscovery wires the auto-discovery service so that NBIRTH/DBIRTH events
+// from unconfigured nodes are recorded in SQLite for operator review.
+func (h *SparkplugHandler) SetAutoDiscovery(a *AutoDiscoveryService) { h.autoDisc = a }
 
 // Dispatch routes a decoded Sparkplug B topic to the appropriate handler.
 // Returns the number of metrics forwarded to the SSFV pipeline in this message.
@@ -102,6 +107,11 @@ func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) int {
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
 	session := h.registry.Session(key)
 	session.SetBirth(p)
+
+	if h.autoDisc != nil {
+		names := collectMetricNames(p.Metrics)
+		go h.autoDisc.OnBIRTH(topic.GroupID, topic.EdgeNodeID, "", names)
+	}
 
 	ts := msToTime(p.Timestamp)
 	ssfvHits := 0
@@ -185,6 +195,11 @@ func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) int {
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
 	session := h.registry.Session(key).Device(topic.DeviceID)
 	session.SetBirth(p)
+
+	if h.autoDisc != nil {
+		names := collectMetricNames(p.Metrics)
+		go h.autoDisc.OnBIRTH(topic.GroupID, topic.EdgeNodeID, topic.DeviceID, names)
+	}
 
 	ts := msToTime(p.Timestamp)
 	ssfvHits := 0
@@ -352,4 +367,15 @@ func msToTime(ms uint64) time.Time {
 		return time.Now()
 	}
 	return time.UnixMilli(int64(ms))
+}
+
+// collectMetricNames extracts non-empty metric names from a Sparkplug B payload.
+func collectMetricNames(metrics []sparkplug.Metric) []string {
+	out := make([]string, 0, len(metrics))
+	for _, m := range metrics {
+		if m.Name != "" {
+			out = append(out, m.Name)
+		}
+	}
+	return out
 }

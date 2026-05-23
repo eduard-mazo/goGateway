@@ -42,6 +42,9 @@ type Manager struct {
 	// SSFV JSON handler — intercepts equipment topics before generic dispatch.
 	ssfvHandler *worker.SSFVHandler
 
+	// autoDisc records NBIRTH/DBIRTH events in SQLite for operator review.
+	autoDisc *worker.AutoDiscoveryService
+
 	// monitorHook receives (topic, kind, payload, ssfvHits) for every inbound message.
 	// ssfvHits is the count of metrics forwarded to SSFV (sparkplug messages only).
 	// nil = disabled. Set via SetMonitorHook before Start().
@@ -82,6 +85,14 @@ func NewManager(db *sqlx.DB, cache *worker.MappingCache, d worker.Dispatcher) *M
 func (m *Manager) SetSSFVHandler(h *worker.SSFVHandler) {
 	m.mu.Lock()
 	m.ssfvHandler = h
+	m.mu.Unlock()
+}
+
+// SetAutoDiscovery registers the auto-discovery service so that NBIRTH/DBIRTH
+// events are recorded in SQLite. Must be called before Start().
+func (m *Manager) SetAutoDiscovery(a *worker.AutoDiscoveryService) {
+	m.mu.Lock()
+	m.autoDisc = a
 	m.mu.Unlock()
 }
 
@@ -143,6 +154,9 @@ func (m *Manager) reload() error {
 		m.spHandler.SetRebirthFn(m.publishRebirth)
 		if m.ssfvHandler != nil {
 			m.spHandler.SetSSFVHandler(m.ssfvHandler)
+		}
+		if m.autoDisc != nil {
+			m.spHandler.SetAutoDiscovery(m.autoDisc)
 		}
 		m.cfg = worker.MQTTConfigSnapshot{
 			SpGroupID: cfg.SpGroupID,

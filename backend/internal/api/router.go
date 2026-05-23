@@ -42,7 +42,7 @@ func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	r.Use(filteredLogger)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMW)
 
@@ -78,6 +78,7 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Route("/devices", (&DeviceHandler{DB: d.DB}).Mount)
 			r.Route("/topics", (&TopicHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
+			r.Route("/gateway-signals", (&GatewaySignalHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)
 			r.Route("/mqtt-config", (&MQTTConfigHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
 			r.Route("/nats-config", (&NATSConfigHandler{DB: d.DB, Notify: d.NotifyNATS}).Mount)
 			r.Route("/iec104-gateway", (&IEC104GatewayHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
@@ -94,6 +95,7 @@ func NewRouter(d Deps) http.Handler {
 
 			ssfvApiH := NewSSFVHandler(d.TSDBMgr)
 			ssfvApiH.SetReloader(d.NotifySSFV)
+			ssfvApiH.SetDB(d.DB)
 			r.Route("/ssfv", ssfvApiH.Mount)
 		})
 	})
@@ -102,6 +104,19 @@ func NewRouter(d Deps) http.Handler {
 	// Must mount last so /api and /health take precedence.
 	r.Mount("/", web.Handler())
 	return r
+}
+
+// filteredLogger wraps middleware.Logger but suppresses high-frequency
+// polling routes (GET /api/status) that would otherwise flood the console.
+func filteredLogger(next http.Handler) http.Handler {
+	logged := middleware.Logger(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/status" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		logged.ServeHTTP(w, r)
+	})
 }
 
 func corsMW(next http.Handler) http.Handler {

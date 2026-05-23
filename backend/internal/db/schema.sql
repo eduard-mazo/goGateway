@@ -29,14 +29,38 @@ CREATE TABLE IF NOT EXISTS mqtt_config (
 INSERT OR IGNORE INTO mqtt_config (id) VALUES (1);
 
 CREATE TABLE IF NOT EXISTS topics (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    topic     TEXT NOT NULL,
-    qos       INTEGER NOT NULL DEFAULT 0,
-    enabled   INTEGER NOT NULL DEFAULT 1,
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id      INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    topic          TEXT NOT NULL,
+    qos            INTEGER NOT NULL DEFAULT 0,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    payload_format TEXT NOT NULL DEFAULT 'json'
+                   CHECK (payload_format IN ('json','sparkplug')),
     UNIQUE (device_id, topic)
 );
 CREATE INDEX IF NOT EXISTS idx_topics_enabled ON topics(enabled);
+
+-- gateway_signals: the normalisation layer between inbound MQTT streams and
+-- outbound IEC-104 points.  One row per logical signal extracted from a topic.
+-- persist_to_db=1 tells the SSFV adapter to record values in the SQLite history
+-- table; persist_to_db=0 means values are forwarded to IEC-104 only (stateless).
+CREATE TABLE IF NOT EXISTS gateway_signals (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id       INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    json_key       TEXT NOT NULL DEFAULT '',
+    metric_name    TEXT NOT NULL DEFAULT '',
+    quality_key    TEXT NOT NULL DEFAULT '',
+    variable_type  TEXT NOT NULL DEFAULT '',
+    characteristic TEXT NOT NULL DEFAULT '',
+    unit           TEXT NOT NULL DEFAULT '',
+    scale          REAL NOT NULL DEFAULT 1.0,
+    persist_to_db  INTEGER NOT NULL DEFAULT 0,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (topic_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_gateway_signals_topic ON gateway_signals(topic_id);
 
 -- IEC 60870-5-104 gateway-wide settings. Singleton (id=1). The listen_ip is
 -- the IP this host binds on for ALL slave endpoints; SCADA masters connect to
@@ -78,14 +102,19 @@ DROP TABLE IF EXISTS iec104_config;
 -- ASDU address space. Worker dispatch routes every MQTT sample to the single
 -- server pinned by server_id; GI from a SCADA master returns only that
 -- server's slice of the point set.
+-- signal_mappings: each row is a point on ONE specific IEC-104 slave endpoint.
+-- signal_id (nullable) links to a gateway_signals row when the signal was
+-- defined via the 4-menu workflow (Menu 2 → Menu 3). Legacy rows created
+-- directly (json_key / metric_name without a gateway_signal) keep signal_id NULL.
 CREATE TABLE IF NOT EXISTS signal_mappings (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     server_id      INTEGER NOT NULL REFERENCES iec104_servers(id) ON DELETE CASCADE,
     topic_id       INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    signal_id      INTEGER REFERENCES gateway_signals(id) ON DELETE SET NULL,
     device_name    TEXT DEFAULT '',
     variable_type  TEXT DEFAULT '',
     characteristic TEXT DEFAULT '',
-    json_key       TEXT NOT NULL,
+    json_key       TEXT NOT NULL DEFAULT '',
     quality_key    TEXT NOT NULL DEFAULT '',
     metric_name    TEXT NOT NULL DEFAULT '',
     iec104_type    TEXT NOT NULL,
@@ -106,16 +135,6 @@ CREATE TABLE IF NOT EXISTS signal_mappings (
 CREATE INDEX IF NOT EXISTS idx_sigmap_topic ON signal_mappings(topic_id);
 CREATE INDEX IF NOT EXISTS idx_sigmap_server ON signal_mappings(server_id);
 
-CREATE TABLE IF NOT EXISTS history (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    mapping_id  INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
-    signal_path TEXT NOT NULL,
-    value       REAL NOT NULL,
-    quality     INTEGER NOT NULL DEFAULT 0,
-    timestamp   DATETIME NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_history_mapping_ts ON history(mapping_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_history_ts ON history(timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS tsdb_config (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
@@ -234,3 +253,22 @@ CREATE TABLE IF NOT EXISTS calculated_signals (
     enabled          INTEGER NOT NULL DEFAULT 1,
     UNIQUE (out_server_id, out_ioa)
 );
+
+-- autodiscovered_entities: Sparkplug B nodes/devices seen on the bus that have
+-- not yet been matched to an SSFV catalog entry. The operator reviews pending
+-- rows and either approves (creating tbl_equipo + tbl_senales_x_equipo) or
+-- rejects. Approved/rejected rows are preserved for auditing; only pending rows
+-- are updated when the same node re-announces itself via NBIRTH/DBIRTH.
+CREATE TABLE IF NOT EXISTS autodiscovered_entities (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id     TEXT    NOT NULL,
+    node_id      TEXT    NOT NULL,
+    device_id    TEXT    NOT NULL DEFAULT '', -- empty for NBIRTH, set for DBIRTH
+    metric_names TEXT    NOT NULL DEFAULT '[]', -- JSON array of metric name strings
+    status       TEXT    NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending', 'approved', 'rejected')),
+    first_seen   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (group_id, node_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_autodisc_status ON autodiscovered_entities(status);

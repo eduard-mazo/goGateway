@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jmoiron/sqlx"
 
 	"goGateway/internal/tsdb"
 )
@@ -20,12 +22,16 @@ import (
 // It obtains the pool lazily from TSDBMgr so it survives pipeline reloads.
 type SSFVHandler struct {
 	mgr      *tsdb.Manager
-	reloader func() // reloads the worker SSFVMappingCache; set via SetReloader
+	db       *sqlx.DB // SQLite, for autodiscovery queries
+	reloader func()   // reloads the worker SSFVMappingCache; set via SetReloader
 }
 
 func NewSSFVHandler(mgr *tsdb.Manager) *SSFVHandler {
 	return &SSFVHandler{mgr: mgr}
 }
+
+// SetDB provides the SQLite connection used by the autodiscovery endpoints.
+func (h *SSFVHandler) SetDB(db *sqlx.DB) { h.db = db }
 
 // SetReloader registers a callback invoked after any catalog mutation so the
 // in-memory SSFVMappingCache (used by the Sparkplug B dispatch path) stays
@@ -78,10 +84,26 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 	r.Put("/fronteras/{id}", h.updateFrontera)
 	r.Delete("/fronteras/{id}", h.deleteFrontera)
 
-	// Catálogos de soporte (solo lectura para el UI)
+	// Catálogos de soporte — CRUD completo
 	r.Get("/tipo-equipo", h.listTipoEquipo)
+	r.Post("/tipo-equipo", h.createTipoEquipo)
+	r.Put("/tipo-equipo/{id}", h.updateTipoEquipo)
+	r.Delete("/tipo-equipo/{id}", h.deleteTipoEquipo)
+
 	r.Get("/tipo-variable", h.listTipoVariable)
+	r.Post("/tipo-variable", h.createTipoVariable)
+	r.Put("/tipo-variable/{id}", h.updateTipoVariable)
+	r.Delete("/tipo-variable/{id}", h.deleteTipoVariable)
+
 	r.Get("/unidades", h.listUnidades)
+	r.Post("/unidades", h.createUnidad)
+	r.Put("/unidades/{id}", h.updateUnidad)
+	r.Delete("/unidades/{id}", h.deleteUnidad)
+
+	// Señales x Tipo Equipo (plantilla de auto-instanciación)
+	r.Get("/senales-x-tipo", h.listSenalesXTipo)
+	r.Post("/senales-x-tipo", h.createSenalXTipo)
+	r.Delete("/senales-x-tipo/{id}", h.deleteSenalXTipo)
 
 	// Alarmas
 	r.Get("/alarmas", h.listAlarmas)
@@ -93,6 +115,11 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 
 	// Señales sin mapeo (ring buffer de los últimos 300 signal_paths descartados)
 	r.Get("/missed", h.getMissedSignals)
+
+	// Auto-discovery: Sparkplug B nodes/devices pending catalog assignment
+	r.Get("/autodiscovered", h.listAutodiscovered)
+	r.Post("/autodiscovered/{id}/approve", h.approveAutodiscovered)
+	r.Post("/autodiscovered/{id}/reject", h.rejectAutodiscovered)
 
 	// Invalidar cache
 	r.Post("/cache/invalidate", h.invalidateCache)
@@ -1087,7 +1114,421 @@ func (h *SSFVHandler) invalidateCache(w http.ResponseWriter, r *http.Request) {
 	jsonResp(w, http.StatusOK, map[string]any{"invalidated": true})
 }
 
+// ─── Tipo Equipo CRUD ─────────────────────────────────────────────────────────
+
+func (h *SSFVHandler) createTipoEquipo(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Nombre      string  `json:"nombre"`
+		Descripcion *string `json:"descripcion"`
+		Activo      bool    `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var id int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO ssfv.tbl_tipo_equipo (nombre, descripcion, activo) VALUES ($1,$2,$3) RETURNING tipo_id`,
+		body.Nombre, body.Descripcion, body.Activo).Scan(&id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusCreated, map[string]any{"tipo_id": id})
+}
+
+func (h *SSFVHandler) updateTipoEquipo(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Nombre      string  `json:"nombre"`
+		Descripcion *string `json:"descripcion"`
+		Activo      bool    `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_tipo_equipo SET nombre=$1, descripcion=$2, activo=$3, fecha_modif=NOW() WHERE tipo_id=$4`,
+		body.Nombre, body.Descripcion, body.Activo, id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *SSFVHandler) deleteTipoEquipo(w http.ResponseWriter, r *http.Request) {
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_tipo_equipo WHERE tipo_id=$1`)
+}
+
+// ─── Tipo Variable CRUD ───────────────────────────────────────────────────────
+
+func (h *SSFVHandler) createTipoVariable(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Nombre      string  `json:"nombre"`
+		Descripcion *string `json:"descripcion"`
+		Activo      bool    `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var id int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO ssfv.tbl_tipo_variable (nombre, descripcion, activo) VALUES ($1,$2,$3) RETURNING tipovar_id`,
+		body.Nombre, body.Descripcion, body.Activo).Scan(&id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusCreated, map[string]any{"tipovar_id": id})
+}
+
+func (h *SSFVHandler) updateTipoVariable(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Nombre      string  `json:"nombre"`
+		Descripcion *string `json:"descripcion"`
+		Activo      bool    `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_tipo_variable SET nombre=$1, descripcion=$2, activo=$3, fecha_modif=NOW() WHERE tipovar_id=$4`,
+		body.Nombre, body.Descripcion, body.Activo, id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *SSFVHandler) deleteTipoVariable(w http.ResponseWriter, r *http.Request) {
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_tipo_variable WHERE tipovar_id=$1`)
+}
+
+// ─── Unidades CRUD ────────────────────────────────────────────────────────────
+
+func (h *SSFVHandler) createUnidad(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Simbolo  string `json:"simbolo"`
+		Nombre   string `json:"nombre"`
+		Magnitud string `json:"magnitud"`
+		Activo   bool   `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var id int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO ssfv.tbl_unidades (simbolo, nombre, magnitud, activo) VALUES ($1,$2,$3,$4) RETURNING unidad_id`,
+		body.Simbolo, body.Nombre, body.Magnitud, body.Activo).Scan(&id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusCreated, map[string]any{"unidad_id": id})
+}
+
+func (h *SSFVHandler) updateUnidad(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Simbolo  string `json:"simbolo"`
+		Nombre   string `json:"nombre"`
+		Magnitud string `json:"magnitud"`
+		Activo   bool   `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_unidades SET simbolo=$1, nombre=$2, magnitud=$3, activo=$4 WHERE unidad_id=$5`,
+		body.Simbolo, body.Nombre, body.Magnitud, body.Activo, id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *SSFVHandler) deleteUnidad(w http.ResponseWriter, r *http.Request) {
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_unidades WHERE unidad_id=$1`)
+}
+
+// ─── Señales x Tipo Equipo ────────────────────────────────────────────────────
+
+func (h *SSFVHandler) listSenalesXTipo(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	tipoID := r.URL.Query().Get("tipo_id")
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT st.senaltipo_id, st.senal_id, st.tipo_id, st.num_canales,
+		       s.nombre AS senal_nombre, s.codigo_senal,
+		       te.nombre AS tipo_nombre
+		FROM public.tbl_senales_x_tipo_equipo st
+		JOIN ssfv.tbl_senales     s  ON s.senal_id  = st.senal_id
+		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id  = st.tipo_id`
+	args := []any{}
+	if tipoID != "" {
+		query += ` WHERE st.tipo_id=$1`
+		args = append(args, tipoID)
+	}
+	query += ` ORDER BY te.nombre, s.codigo_senal`
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var senaltipoID, senalID, tipoIDv, numCanales int
+		var senalNombre, codigoSenal, tipoNombre string
+		if err := rows.Scan(&senaltipoID, &senalID, &tipoIDv, &numCanales,
+			&senalNombre, &codigoSenal, &tipoNombre); err != nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"senaltipo_id": senaltipoID, "senal_id": senalID,
+			"tipo_id": tipoIDv, "num_canales": numCanales,
+			"senal_nombre": senalNombre, "codigo_senal": codigoSenal,
+			"tipo_nombre": tipoNombre,
+		})
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	jsonResp(w, http.StatusOK, out)
+}
+
+func (h *SSFVHandler) createSenalXTipo(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		SenalID    int `json:"senal_id"`
+		TipoID     int `json:"tipo_id"`
+		NumCanales int `json:"num_canales"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.NumCanales < 1 {
+		body.NumCanales = 1
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var id int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+		 VALUES ($1,$2,$3) ON CONFLICT (senal_id, tipo_id) DO UPDATE SET num_canales=$3
+		 RETURNING senaltipo_id`,
+		body.SenalID, body.TipoID, body.NumCanales).Scan(&id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusCreated, map[string]any{"senaltipo_id": id})
+}
+
+func (h *SSFVHandler) deleteSenalXTipo(w http.ResponseWriter, r *http.Request) {
+	h.deleteRow(w, r, `DELETE FROM public.tbl_senales_x_tipo_equipo WHERE senaltipo_id=$1`)
+}
+
 // ─── Generic helpers ──────────────────────────────────────────────────────────
+
+// ─── Auto-Discovery ───────────────────────────────────────────────────────────
+
+func (h *SSFVHandler) listAutodiscovered(w http.ResponseWriter, r *http.Request) {
+	if h.db == nil {
+		errResp(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+	rows, err := h.db.QueryContext(r.Context(), `
+		SELECT id, group_id, node_id, device_id, metric_names, status, first_seen, last_seen
+		FROM autodiscovered_entities
+		ORDER BY last_seen DESC`)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var id int64
+		var groupID, nodeID, deviceID, rawNames, status string
+		var firstSeen, lastSeen time.Time
+		if err := rows.Scan(&id, &groupID, &nodeID, &deviceID, &rawNames, &status, &firstSeen, &lastSeen); err != nil {
+			continue
+		}
+		var names []string
+		_ = json.Unmarshal([]byte(rawNames), &names)
+		if names == nil {
+			names = []string{}
+		}
+		out = append(out, map[string]any{
+			"id": id, "group_id": groupID, "node_id": nodeID, "device_id": deviceID,
+			"metric_names": names, "status": status,
+			"first_seen": firstSeen, "last_seen": lastSeen,
+		})
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	jsonResp(w, http.StatusOK, out)
+}
+
+func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if h.db == nil {
+		errResp(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	var groupID, nodeID, deviceID string
+	err := h.db.QueryRowContext(r.Context(),
+		`SELECT group_id, node_id, device_id FROM autodiscovered_entities WHERE id=?`, id).
+		Scan(&groupID, &nodeID, &deviceID)
+	if err == sql.ErrNoRows {
+		errResp(w, http.StatusNotFound, "entity not found")
+		return
+	}
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	var body struct {
+		PlantaID     int    `json:"planta_id"`
+		TipoID       int    `json:"tipo_id"`
+		NombreEquipo string `json:"nombre_equipo"`
+		NombreTopic  string `json:"nombre_topic"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.NombreTopic == "" {
+		if deviceID != "" {
+			body.NombreTopic = groupID + "/" + nodeID + "/" + deviceID
+		} else {
+			body.NombreTopic = groupID + "/" + nodeID
+		}
+	}
+	if body.NombreEquipo == "" {
+		if deviceID != "" {
+			body.NombreEquipo = deviceID
+		} else {
+			body.NombreEquipo = nodeID
+		}
+	}
+
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	var equipoID int
+	err = pool.QueryRow(ctx, `
+		INSERT INTO ssfv.tbl_equipo (planta_id, tipo_id, nombre_equipo, nombre_topic, estado)
+		VALUES ($1,$2,$3,$4,1)
+		ON CONFLICT (nombre_topic) DO UPDATE SET
+		    nombre_equipo = excluded.nombre_equipo,
+		    estado        = excluded.estado
+		RETURNING equipo_id`,
+		body.PlantaID, body.TipoID, body.NombreEquipo, body.NombreTopic).Scan(&equipoID)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if autoErr := h.autoInstanciarSenales(ctx, pool, equipoID, body.TipoID); autoErr != nil {
+		log.Printf("autodiscovery: auto-instanciar equipo %d: %v", equipoID, autoErr)
+	}
+
+	if _, dbErr := h.db.ExecContext(r.Context(),
+		`UPDATE autodiscovered_entities SET status='approved', last_seen=CURRENT_TIMESTAMP WHERE id=?`, id); dbErr != nil {
+		log.Printf("autodiscovery: mark approved id=%d: %v", id, dbErr)
+	}
+
+	h.triggerReload()
+	jsonResp(w, http.StatusOK, map[string]any{"equipo_id": equipoID})
+}
+
+func (h *SSFVHandler) rejectAutodiscovered(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if h.db == nil {
+		errResp(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+	res, err := h.db.ExecContext(r.Context(),
+		`UPDATE autodiscovered_entities SET status='rejected', last_seen=CURRENT_TIMESTAMP WHERE id=?`, id)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		errResp(w, http.StatusNotFound, "entity not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 
 func (h *SSFVHandler) deleteRow(w http.ResponseWriter, r *http.Request, query string) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))

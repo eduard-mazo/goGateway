@@ -121,12 +121,39 @@ type MQTTConfig struct {
 }
 
 // Topic = MQTT subscription bound to a device.
+// PayloadFormat selects the ingestion decoder: "json" (default) or "sparkplug".
+// Sparkplug topics carry protobuf payloads matched by MetricName; JSON topics
+// are decoded by JSONKey.  The gateway MQTT client still uses the global
+// SparkplugEnabled flag to switch protocol mode, but per-topic format allows
+// mixing JSON and Sparkplug streams on the same broker.
 type Topic struct {
-	ID       int64  `db:"id" json:"id"`
-	DeviceID int64  `db:"device_id" json:"device_id"`
-	Topic    string `db:"topic" json:"topic"`
-	QoS      int    `db:"qos" json:"qos"`
-	Enabled  bool   `db:"enabled" json:"enabled"`
+	ID            int64  `db:"id"             json:"id"`
+	DeviceID      int64  `db:"device_id"      json:"device_id"`
+	Topic         string `db:"topic"          json:"topic"`
+	QoS           int    `db:"qos"            json:"qos"`
+	Enabled       bool   `db:"enabled"        json:"enabled"`
+	PayloadFormat string `db:"payload_format" json:"payload_format"`
+}
+
+// GatewaySignal is the normalisation layer between an inbound MQTT topic stream
+// and the rest of the pipeline.  It defines one logical measurement point:
+//   - json_key or metric_name identifies the value inside the payload.
+//   - persist_to_db=true tells the history writer to record samples in SQLite.
+//   - A corresponding signal_mappings row (signal_id FK) exposes it on IEC-104.
+type GatewaySignal struct {
+	ID             int64   `db:"id"             json:"id"`
+	TopicID        int64   `db:"topic_id"       json:"topic_id"`
+	Name           string  `db:"name"           json:"name"`
+	JSONKey        string  `db:"json_key"       json:"json_key"`
+	MetricName     string  `db:"metric_name"    json:"metric_name"`
+	QualityKey     string  `db:"quality_key"    json:"quality_key"`
+	VariableType   string  `db:"variable_type"  json:"variable_type"`
+	Characteristic string  `db:"characteristic" json:"characteristic"`
+	Unit           string  `db:"unit"           json:"unit"`
+	Scale          float64 `db:"scale"          json:"scale"`
+	PersistToDB    bool    `db:"persist_to_db"  json:"persist_to_db"`
+	Enabled        bool    `db:"enabled"        json:"enabled"`
+	CreatedAt      time.Time `db:"created_at"   json:"created_at"`
 }
 
 // IEC104Gateway = host-wide IEC-104 settings. Singleton (id=1). ListenIP is
@@ -160,27 +187,30 @@ type IEC104Server struct {
 // SignalMapping = core row. MQTT key → IEC 104 point on a specific slave.
 // ServerID pins the mapping to one iec104_servers row; values are dispatched
 // only to that endpoint and (server_id, ioa) is the uniqueness key.
-// QualityKey, if non-empty, names the JSON key in the MQTT payload that carries
-// the quality for this signal (overrides the payload-level "quality" field).
-// MetricName, if non-empty, is the Sparkplug B metric name used when the
-// gateway operates in Sparkplug B mode (SparkplugEnabled=true in MQTTConfig).
+// SignalID (optional) links to a gateway_signals row when created via the
+// 4-menu workflow — the signal definition is inherited from there.
+// Legacy rows created directly keep SignalID nil and carry json_key/metric_name
+// inline as before.
 type SignalMapping struct {
-	ID             int64   `db:"id"             json:"id"`
-	ServerID       int64   `db:"server_id"      json:"server_id"`
-	TopicID        int64   `db:"topic_id"       json:"topic_id"`
-	DeviceName     string  `db:"device_name"    json:"device_name"`
-	VariableType   string  `db:"variable_type"  json:"variable_type"`
-	Characteristic string  `db:"characteristic" json:"characteristic"`
-	JSONKey        string  `db:"json_key"       json:"json_key"`
-	QualityKey     string  `db:"quality_key"    json:"quality_key"`
-	MetricName     string  `db:"metric_name"    json:"metric_name"`
-	IEC104Type     string  `db:"iec104_type"    json:"iec104_type"`
-	IOA            int     `db:"ioa"            json:"ioa"`
-	Unit           string  `db:"unit"           json:"unit"`
-	Scale          float64 `db:"scale"          json:"scale"`
-	Enabled        bool    `db:"enabled"        json:"enabled"`
-	Business       string  `db:"business"       json:"business"`
-	Company        string  `db:"company"        json:"company"`
+	ID             int64    `db:"id"             json:"id"`
+	ServerID       int64    `db:"server_id"      json:"server_id"`
+	TopicID        int64    `db:"topic_id"       json:"topic_id"`
+	SignalID       *int64   `db:"signal_id"      json:"signal_id"`
+	DeviceName     string   `db:"device_name"    json:"device_name"`
+	VariableType   string   `db:"variable_type"  json:"variable_type"`
+	Characteristic string   `db:"characteristic" json:"characteristic"`
+	JSONKey        string   `db:"json_key"       json:"json_key"`
+	QualityKey     string   `db:"quality_key"    json:"quality_key"`
+	MetricName     string   `db:"metric_name"    json:"metric_name"`
+	IEC104Type     string   `db:"iec104_type"    json:"iec104_type"`
+	IOA            int      `db:"ioa"            json:"ioa"`
+	Unit           string   `db:"unit"           json:"unit"`
+	Scale          float64  `db:"scale"          json:"scale"`
+	Enabled        bool     `db:"enabled"        json:"enabled"`
+	Business       string   `db:"business"       json:"business"`
+	Company        string   `db:"company"        json:"company"`
+	DeadbandAbs    float64  `db:"deadband_abs"   json:"deadband_abs"`
+	DeadbandPct    float64  `db:"deadband_pct"   json:"deadband_pct"`
 }
 
 // TSDBConfig = time-series pipeline settings. Singleton (id=1).
@@ -208,6 +238,19 @@ type NATSConfig struct {
 	Enabled    bool   `db:"enabled" json:"enabled"`
 }
 
+
+// AutodiscoveredEntity is a Sparkplug B node or device seen on the bus that
+// has no matching SSFV catalog entry yet. metric_names is a JSON-encoded array.
+type AutodiscoveredEntity struct {
+	ID          int64     `db:"id"           json:"id"`
+	GroupID     string    `db:"group_id"     json:"group_id"`
+	NodeID      string    `db:"node_id"      json:"node_id"`
+	DeviceID    string    `db:"device_id"    json:"device_id"`
+	MetricNames string    `db:"metric_names" json:"metric_names"`
+	Status      string    `db:"status"       json:"status"`
+	FirstSeen   time.Time `db:"first_seen"   json:"first_seen"`
+	LastSeen    time.Time `db:"last_seen"    json:"last_seen"`
+}
 
 // History = time-series log row.
 type History struct {
