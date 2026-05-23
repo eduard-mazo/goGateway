@@ -143,7 +143,7 @@ BEGIN
     SELECT senal_id INTO s_QN    FROM ssfv.tbl_senales WHERE codigo_senal = 'QN'     AND tipovar_id = v_ene;
 
     -- Junction Inversor
-    INSERT INTO ssfv.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
+    INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
         (s_IA, t_inv, 1), (s_IB, t_inv, 1), (s_IC, t_inv, 1),
         (s_UAB, t_inv, 1), (s_UBC, t_inv, 1), (s_UCA, t_inv, 1),
         (s_AP, t_inv, 1), (s_RP, t_inv, 1), (s_SP, t_inv, 1),
@@ -156,7 +156,7 @@ BEGIN
     ON CONFLICT DO NOTHING;
 
     -- Junction Medidor
-    INSERT INTO ssfv.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
+    INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
         (s_UA, t_med, 1), (s_UAB, t_med, 1), (s_UBC, t_med, 1), (s_UCA, t_med, 1),
         (s_IA, t_med, 1), (s_IB, t_med, 1), (s_IC, t_med, 1),
         (s_AP, t_med, 1), (s_RP, t_med, 1), (s_SP, t_med, 1), (s_FP, t_med, 1),
@@ -166,12 +166,12 @@ BEGIN
     ON CONFLICT DO NOTHING;
 
     -- Junction Estación Meteorológica
-    INSERT INTO ssfv.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
+    INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
         (s_RD, t_est, 1), (s_TA, t_est, 1), (s_TP, t_est, 1), (s_ALCOM, t_est, 1)
     ON CONFLICT DO NOTHING;
 
     -- Junction Frontera Comercial
-    INSERT INTO ssfv.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
+    INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales) VALUES
         (s_API, t_fro, 1), (s_AN, t_fro, 1), (s_QPZ, t_fro, 1), (s_QN, t_fro, 1),
         (s_IA,  t_fro, 1), (s_UAB, t_fro, 1), (s_ALCOM, t_fro, 1)
     ON CONFLICT DO NOTHING;
