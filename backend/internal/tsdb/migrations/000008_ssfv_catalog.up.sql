@@ -1,25 +1,34 @@
 -- =============================================================================
 -- MIGRATION 008 — SSFV catalog: tipo_equipo↔señales junction, full signal
 --                 catalog, continuous aggregates. All names lowercase.
--- Idempotent: every statement uses IF NOT EXISTS / ON CONFLICT / EXCEPTION guards.
+-- Idempotent: ON CONFLICT DO NOTHING / EXCEPTION guards.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- 1. Junction table: tipo_equipo ↔ señales (drives auto-instantiation)
+-- 1. Junction table: tipo_equipo ↔ señales
+--    senal_id FK is DEFERRABLE INITIALLY DEFERRED so the FK check fires at
+--    COMMIT (step 2+3 below), after the signal rows are already in the txn.
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS public.tbl_senales_x_tipo_equipo (
+DROP TABLE IF EXISTS public.tbl_senales_x_tipo_equipo;
+CREATE TABLE public.tbl_senales_x_tipo_equipo (
     senaltipo_id SERIAL   PRIMARY KEY,
-    senal_id     INT      NOT NULL REFERENCES ssfv.tbl_senales(senal_id),
+    senal_id     INT      NOT NULL
+                          REFERENCES ssfv.tbl_senales(senal_id)
+                          DEFERRABLE INITIALLY DEFERRED,
     tipo_id      INT      NOT NULL REFERENCES ssfv.tbl_tipo_equipo(tipo_id),
     num_canales  SMALLINT NOT NULL DEFAULT 1,
     CONSTRAINT uq_senal_tipo_equipo UNIQUE (senal_id, tipo_id)
 );
 
 -- ---------------------------------------------------------------------------
--- 2. Catálogo completo de señales SSFV (plain SQL — auto-commits as its own
---    statement; FK checks in step 3 see the committed rows)
+-- 2 + 3. Signal catalog and junction assignments in one explicit transaction.
+--        With INITIALLY DEFERRED the senal_id FK is not checked until COMMIT,
+--        so the junction INSERTs safely reference the signals inserted above.
 -- ---------------------------------------------------------------------------
+
+BEGIN;
+
 INSERT INTO ssfv.tbl_senales
     (tipovar_id, unidad_id, nombre, tipo_valor, codigo_senal, es_indexada, activo)
 SELECT tv.tipovar_id, u.unidad_id, v.nombre, v.tipo_valor, v.codigo_senal,
@@ -62,11 +71,6 @@ JOIN ssfv.tbl_tipo_variable tv ON tv.nombre  = v.tipovar_nombre
 JOIN ssfv.tbl_unidades      u  ON u.simbolo  = v.unidad_simbolo
 ON CONFLICT (codigo_senal, tipovar_id) DO NOTHING;
 
--- ---------------------------------------------------------------------------
--- 3. Asignaciones señales ↔ tipo de equipo (plain SQL — each statement
---    auto-commits; FK on senal_id sees the committed rows from step 2)
--- ---------------------------------------------------------------------------
-
 -- Junction: Inversor (IDC_x and VDC_x use num_canales = 3)
 INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
 SELECT s.senal_id, te.tipo_id, n.num_canales::smallint
@@ -108,6 +112,8 @@ FROM ssfv.tbl_senales s
 CROSS JOIN (SELECT tipo_id FROM ssfv.tbl_tipo_equipo WHERE nombre = 'Frontera Comercial') te
 WHERE s.codigo_senal IN ('API','AN','QPZ','QN','IA','UAB','AL_COM')
 ON CONFLICT (senal_id, tipo_id) DO NOTHING;
+
+COMMIT;
 
 -- ---------------------------------------------------------------------------
 -- 4. Agregados continuos (15 min y diario)
