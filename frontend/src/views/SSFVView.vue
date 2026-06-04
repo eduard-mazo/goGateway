@@ -25,8 +25,9 @@ import {
 } from '@/components/ui/table'
 import {
   Sun, Plus, Pencil, Trash2, RefreshCw, CheckCircle2, XCircle,
-  ChevronRight, Zap, Building2, Cpu, Layers,
+  ChevronRight, ChevronDown, Zap, Building2, Cpu, Layers,
   Link2, Activity, Ruler, GitBranch, TriangleAlert, Scan,
+  Eye, Search, Hash, Tag, Gauge, Boxes, Cog, Fingerprint, Radio,
 } from 'lucide-vue-next'
 import { useConfirm } from '@/composables/useConfirm'
 
@@ -538,6 +539,138 @@ const approveDetectedTypes = computed(() => {
   return types as string[]
 })
 
+// ─── Metric review model ──────────────────────────────────────────────────────
+// Classifies each NBIRTH/DBIRTH metric by the Sparkplug B naming convention
+// (sparkplug-contract.md §4) and merges in the typed PropertySet metadata
+// (§5) so the operator can audit every reported signal before approval.
+type MetricKind = 'proceso' | 'sistema' | 'identidad' | 'sesion'
+
+const KIND_META: Record<MetricKind, { label: string; icon: any; dot: string; chip: string }> = {
+  proceso:   { label: 'Proceso',   icon: Gauge,       dot: 'bg-emerald-500', chip: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' },
+  sistema:   { label: 'Sistema',   icon: Cog,         dot: 'bg-sky-500',     chip: 'bg-sky-500/15 text-sky-400 border-sky-500/30' },
+  identidad: { label: 'Identidad', icon: Fingerprint, dot: 'bg-violet-500',  chip: 'bg-violet-500/15 text-violet-400 border-violet-500/30' },
+  sesion:    { label: 'Sesión',    icon: Radio,       dot: 'bg-zinc-500',    chip: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/30' },
+}
+
+function metricKind(name: string): MetricKind {
+  if (name === 'bdSeq' || name === 'seq') return 'sesion'
+  if (name.startsWith('System/Device/')) return 'identidad'
+  if (name.startsWith('System/')) return 'sistema'
+  return 'proceso'
+}
+
+interface ReviewMetric {
+  name: string
+  group: string
+  leaf: string
+  engUnit?: string
+  tipoVariable?: string
+  tipoValor?: string
+  description?: string
+  deviceType?: string
+  kind: MetricKind
+}
+
+// buildReviewMetrics merges metric_names with the per-metric PropertySet meta,
+// keyed by name. Names without meta still appear (NBIRTH always lists names).
+function buildReviewMetrics(e: AutodiscEntity): ReviewMetric[] {
+  const metaByName = new Map(e.metric_meta.map(m => [m.name, m]))
+  return e.metric_names.map(name => {
+    const m = metaByName.get(name)
+    const seg = name.split('/')
+    return {
+      name,
+      group: seg.length > 1 ? seg[0] : 'Nodo',
+      leaf:  seg.length > 1 ? seg.slice(1).join('/') : name,
+      engUnit:      m?.engUnit || undefined,
+      tipoVariable: m?.tipo_variable || undefined,
+      tipoValor:    m?.tipo_valor || undefined,
+      description:  m?.description || undefined,
+      deviceType:   m?.device_type || undefined,
+      kind: metricKind(name),
+    }
+  })
+}
+
+// groupedPreview groups an entity's metrics by source namespace for the
+// expandable inline preview in the Pendientes table.
+function groupedPreview(e: AutodiscEntity): { name: string; metrics: ReviewMetric[] }[] {
+  const groups = new Map<string, ReviewMetric[]>()
+  for (const m of buildReviewMetrics(e)) {
+    if (!groups.has(m.group)) groups.set(m.group, [])
+    groups.get(m.group)!.push(m)
+  }
+  return [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, metrics]) => ({ name, metrics }))
+}
+
+// Per-entity kind tally for the table summary chips.
+function entityKindCounts(e: AutodiscEntity): { kind: MetricKind; n: number }[] {
+  const counts = {} as Record<MetricKind, number>
+  for (const n of e.metric_names) {
+    const k = metricKind(n)
+    counts[k] = (counts[k] ?? 0) + 1
+  }
+  return (Object.keys(counts) as MetricKind[])
+    .sort((a, b) => counts[b] - counts[a])
+    .map(kind => ({ kind, n: counts[kind] }))
+}
+
+// Inline row expansion in the Pendientes table.
+const expandedAuto = ref<Set<number>>(new Set())
+function toggleAutoRow(id: number) {
+  const s = new Set(expandedAuto.value)
+  s.has(id) ? s.delete(id) : s.add(id)
+  expandedAuto.value = s
+}
+
+// ─── Metric review modal (opens on Aprobar, or read-only via Inspeccionar) ────
+const metricSearch  = ref('')
+const approveReadOnly = ref(false)
+
+const reviewMetrics = computed<ReviewMetric[]>(() =>
+  approveTarget.value ? buildReviewMetrics(approveTarget.value) : [])
+
+const reviewFiltered = computed<ReviewMetric[]>(() => {
+  const q = metricSearch.value.trim().toLowerCase()
+  if (!q) return reviewMetrics.value
+  return reviewMetrics.value.filter(m =>
+    m.name.toLowerCase().includes(q) ||
+    (m.description?.toLowerCase().includes(q)) ||
+    (m.engUnit?.toLowerCase().includes(q)) ||
+    (m.tipoVariable?.toLowerCase().includes(q)))
+})
+
+// Grouped by source namespace (first path segment) for the scrollable list.
+const reviewGroups = computed(() => {
+  const groups = new Map<string, ReviewMetric[]>()
+  for (const m of reviewFiltered.value) {
+    if (!groups.has(m.group)) groups.set(m.group, [])
+    groups.get(m.group)!.push(m)
+  }
+  return [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, metrics]) => ({ name, metrics }))
+})
+
+// Summary stats shown above the metric list.
+const reviewSummary = computed(() => {
+  const ms = reviewMetrics.value
+  const units = new Set(ms.map(m => m.engUnit).filter(Boolean))
+  const vars  = new Set(ms.map(m => m.tipoVariable).filter(Boolean))
+  const devs  = new Set(ms.map(m => m.deviceType).filter(Boolean))
+  const kinds = entityKindCounts(approveTarget.value ?? { metric_names: [] } as any)
+  return { total: ms.length, units: [...units] as string[], vars: [...vars] as string[], devs: [...devs] as string[], kinds }
+})
+
+function openInspect(e: AutodiscEntity) {
+  approveTarget.value = e
+  approveReadOnly.value = true
+  metricSearch.value = ''
+  approveDialog.value = true
+}
+
 async function fetchAutodiscovered() {
   try {
     const r = await api.get('/ssfv/autodiscovered')
@@ -547,6 +680,8 @@ async function fetchAutodiscovered() {
 
 function openApprove(e: AutodiscEntity) {
   approveTarget.value = e
+  approveReadOnly.value = false
+  metricSearch.value = ''
   const defaultTopic = e.device_id
     ? `${e.group_id}/${e.node_id}/${e.device_id}`
     : `${e.group_id}/${e.node_id}`
@@ -1270,11 +1405,29 @@ function tipoEquipoIcon(nombre: string) {
          TAB: Pendientes (Sparkplug B auto-discovery)
     ═══════════════════════════════════════════════════════════════════════ -->
     <div v-if="tab === 'pendientes'" class="space-y-4">
-      <div class="flex items-center justify-between">
-        <p class="text-sm text-muted-foreground">
-          Nodos y dispositivos Sparkplug B detectados en el bus sin entrada en el catálogo SSFV.
-          Aprueba para crear el equipo y auto-instanciar señales, o rechaza para ignorar.
-        </p>
+      <div class="flex items-start justify-between gap-4">
+        <div class="space-y-1">
+          <p class="text-sm text-muted-foreground max-w-2xl">
+            Nodos y dispositivos <span class="font-semibold text-foreground">Sparkplug B</span> detectados en el bus
+            sin entrada en el catálogo SSFV. Expande una fila para inspeccionar las métricas del
+            <span class="font-mono text-[11px]">NBIRTH/DBIRTH</span>, luego aprueba para crear el equipo y
+            auto-instanciar señales, o rechaza para ignorar.
+          </p>
+          <div class="flex items-center gap-3 text-[11px] text-muted-foreground">
+            <span class="inline-flex items-center gap-1">
+              <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span>
+              {{ autoPendingCount }} pendiente{{ autoPendingCount === 1 ? '' : 's' }}
+            </span>
+            <span class="inline-flex items-center gap-1">
+              <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+              {{ autoEntities.filter(e => e.status === 'approved').length }} aprobada(s)
+            </span>
+            <span class="inline-flex items-center gap-1">
+              <span class="h-1.5 w-1.5 rounded-full bg-zinc-500"></span>
+              {{ autoEntities.filter(e => e.status === 'rejected').length }} rechazada(s)
+            </span>
+          </div>
+        </div>
         <Button variant="outline" size="sm" @click="fetchAutodiscovered">
           <RefreshCw class="h-3.5 w-3.5 mr-1.5" /> Actualizar
         </Button>
@@ -1284,82 +1437,184 @@ function tipoEquipoIcon(nombre: string) {
         <Table>
           <TableHeader>
             <TableRow class="bg-muted/30">
-              <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Grupo</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Nodo</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Dispositivo</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Métricas</TableHead>
+              <TableHead class="w-8" />
+              <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Entidad Sparkplug</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Métricas reportadas</TableHead>
               <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Estado</TableHead>
-              <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Última vez</TableHead>
+              <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Visto</TableHead>
               <TableHead class="text-right" />
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow
-              v-for="e in autoEntities"
-              :key="e.id"
-              class="border-b border-border/50 last:border-0 hover:bg-muted/20"
-            >
-              <TableCell class="font-mono text-xs">{{ e.group_id }}</TableCell>
-              <TableCell class="font-mono text-xs font-medium">{{ e.node_id }}</TableCell>
-              <TableCell class="font-mono text-xs text-muted-foreground">{{ e.device_id || '—' }}</TableCell>
-              <TableCell class="text-xs text-muted-foreground">
-                <span class="font-mono">{{ e.metric_names.length }}</span>
-                <span class="text-[10px] ml-1 truncate max-w-[180px] inline-block align-bottom">
-                  {{ e.metric_names.slice(0, 3).join(', ') }}{{ e.metric_names.length > 3 ? '…' : '' }}
-                </span>
-              </TableCell>
-              <TableCell>
-                <span class="text-[10px] px-1.5 py-0.5 rounded-sm font-semibold" :class="{
-                  'bg-blue-500/15 text-blue-400':    e.status === 'pending',
-                  'bg-green-500/15 text-green-500':  e.status === 'approved',
-                  'bg-muted text-muted-foreground':  e.status === 'rejected',
-                }">
-                  {{ e.status === 'pending' ? 'Pendiente' : e.status === 'approved' ? 'Aprobado' : 'Rechazado' }}
-                </span>
-              </TableCell>
-              <TableCell class="font-mono text-[11px] text-muted-foreground">
-                {{ new Date(e.last_seen).toLocaleString() }}
-              </TableCell>
-              <TableCell class="text-right">
-                <div v-if="e.status === 'pending'" class="flex justify-end gap-1.5">
-                  <Button
-                    size="sm"
-                    class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white h-7 px-2 text-xs rounded-sm"
-                    @click="openApprove(e)"
+            <template v-for="e in autoEntities" :key="e.id">
+              <TableRow class="border-b border-border/50 hover:bg-muted/20">
+                <!-- expand toggle -->
+                <TableCell class="align-top pt-3">
+                  <button
+                    class="h-6 w-6 inline-flex items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                    :title="expandedAuto.has(e.id) ? 'Contraer' : 'Inspeccionar métricas'"
+                    @click="toggleAutoRow(e.id)"
                   >
-                    <CheckCircle2 class="h-3.5 w-3.5 mr-1" /> Aprobar
-                  </Button>
-                  <Button
-                    size="sm" variant="ghost"
-                    class="text-destructive hover:text-destructive h-7 px-2 text-xs rounded-sm"
-                    @click="rejectEntity(e)"
-                  >
-                    <XCircle class="h-3.5 w-3.5 mr-1" /> Rechazar
-                  </Button>
-                </div>
-                <div v-else class="flex justify-end gap-1.5">
-                  <Button
-                    size="sm" variant="ghost"
-                    class="h-7 px-2 text-xs rounded-sm text-muted-foreground hover:text-foreground"
-                    title="Restablecer a pendiente para re-asignar planta o tipo"
-                    @click="resetEntity(e)"
-                  >
-                    <RefreshCw class="h-3 w-3 mr-1" /> Re-asignar
-                  </Button>
-                  <Button
-                    v-if="e.status === 'rejected'"
-                    size="sm" variant="ghost"
-                    class="h-7 px-2 text-xs rounded-sm text-destructive hover:text-destructive"
-                    title="Eliminar definitivamente este registro rechazado"
-                    @click="deleteAutodiscoveredEntity(e)"
-                  >
-                    <Trash2 class="h-3 w-3" />
-                  </Button>
-                </div>
-              </TableCell>
-            </TableRow>
+                    <ChevronDown v-if="expandedAuto.has(e.id)" class="h-4 w-4" />
+                    <ChevronRight v-else class="h-4 w-4" />
+                  </button>
+                </TableCell>
+
+                <!-- entity identity -->
+                <TableCell class="align-top">
+                  <div class="flex items-center gap-2">
+                    <component :is="e.device_id ? Cpu : Radio" class="h-3.5 w-3.5 shrink-0"
+                      :class="e.device_id ? 'text-violet-400' : 'text-sky-400'" />
+                    <span class="font-mono text-xs font-medium">{{ e.device_id || e.node_id }}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase tracking-wide"
+                      :class="e.device_id ? 'bg-violet-500/15 text-violet-400' : 'bg-sky-500/15 text-sky-400'">
+                      {{ e.device_id ? 'DBIRTH' : 'NBIRTH' }}
+                    </span>
+                  </div>
+                  <div class="font-mono text-[10px] text-muted-foreground mt-0.5">
+                    {{ e.group_id }} / {{ e.node_id }}{{ e.device_id ? ' / ' + e.device_id : '' }}
+                  </div>
+                </TableCell>
+
+                <!-- metrics summary -->
+                <TableCell class="align-top">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center gap-1 font-mono text-xs font-semibold">
+                      <Hash class="h-3 w-3 text-muted-foreground" />{{ e.metric_names.length }}
+                    </span>
+                    <div class="flex flex-wrap gap-1">
+                      <span
+                        v-for="kc in entityKindCounts(e)" :key="kc.kind"
+                        class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm border"
+                        :class="KIND_META[kc.kind].chip"
+                      >
+                        <span class="h-1.5 w-1.5 rounded-full" :class="KIND_META[kc.kind].dot"></span>
+                        {{ kc.n }} {{ KIND_META[kc.kind].label.toLowerCase() }}
+                      </span>
+                    </div>
+                  </div>
+                  <div v-if="[...new Set(e.metric_meta.map(m => m.device_type).filter(Boolean))].length"
+                    class="text-[10px] text-muted-foreground mt-1">
+                    Tipo(s): <span class="font-medium text-foreground">{{ [...new Set(e.metric_meta.map(m => m.device_type).filter(Boolean))].join(', ') }}</span>
+                  </div>
+                </TableCell>
+
+                <TableCell class="align-top">
+                  <span class="text-[10px] px-1.5 py-0.5 rounded-sm font-semibold" :class="{
+                    'bg-blue-500/15 text-blue-400':    e.status === 'pending',
+                    'bg-green-500/15 text-green-500':  e.status === 'approved',
+                    'bg-muted text-muted-foreground':  e.status === 'rejected',
+                  }">
+                    {{ e.status === 'pending' ? 'Pendiente' : e.status === 'approved' ? 'Aprobado' : 'Rechazado' }}
+                  </span>
+                </TableCell>
+
+                <TableCell class="align-top font-mono text-[11px] text-muted-foreground whitespace-nowrap">
+                  {{ new Date(e.last_seen).toLocaleString() }}
+                </TableCell>
+
+                <TableCell class="text-right align-top">
+                  <div class="flex justify-end gap-1.5">
+                    <Button
+                      size="sm" variant="ghost"
+                      class="h-7 px-2 text-xs rounded-sm text-muted-foreground hover:text-foreground"
+                      title="Ver todas las métricas reportadas"
+                      @click="openInspect(e)"
+                    >
+                      <Eye class="h-3.5 w-3.5" />
+                    </Button>
+                    <template v-if="e.status === 'pending'">
+                      <Button
+                        size="sm"
+                        class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white h-7 px-2 text-xs rounded-sm"
+                        @click="openApprove(e)"
+                      >
+                        <CheckCircle2 class="h-3.5 w-3.5 mr-1" /> Aprobar
+                      </Button>
+                      <Button
+                        size="sm" variant="ghost"
+                        class="text-destructive hover:text-destructive h-7 px-2 text-xs rounded-sm"
+                        @click="rejectEntity(e)"
+                      >
+                        <XCircle class="h-3.5 w-3.5 mr-1" /> Rechazar
+                      </Button>
+                    </template>
+                    <template v-else>
+                      <Button
+                        size="sm" variant="ghost"
+                        class="h-7 px-2 text-xs rounded-sm text-muted-foreground hover:text-foreground"
+                        title="Restablecer a pendiente para re-asignar planta o tipo"
+                        @click="resetEntity(e)"
+                      >
+                        <RefreshCw class="h-3 w-3 mr-1" /> Re-asignar
+                      </Button>
+                      <Button
+                        v-if="e.status === 'rejected'"
+                        size="sm" variant="ghost"
+                        class="h-7 px-2 text-xs rounded-sm text-destructive hover:text-destructive"
+                        title="Eliminar definitivamente este registro rechazado"
+                        @click="deleteAutodiscoveredEntity(e)"
+                      >
+                        <Trash2 class="h-3 w-3" />
+                      </Button>
+                    </template>
+                  </div>
+                </TableCell>
+              </TableRow>
+
+              <!-- expanded inline metric preview -->
+              <TableRow v-if="expandedAuto.has(e.id)" class="bg-muted/10 border-b border-border/50">
+                <TableCell />
+                <TableCell colspan="5" class="py-3">
+                  <div class="space-y-3">
+                    <!-- node properties -->
+                    <div v-if="Object.keys(e.node_properties || {}).length" class="flex flex-wrap items-center gap-1.5">
+                      <span class="text-[10px] uppercase tracking-wide font-bold text-muted-foreground mr-1">Propiedades del nodo</span>
+                      <span v-for="(v, k) in e.node_properties" :key="k"
+                        class="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded-sm bg-muted border border-border">
+                        <span class="text-muted-foreground">{{ k }}</span><span class="text-foreground font-semibold">{{ v }}</span>
+                      </span>
+                    </div>
+
+                    <!-- grouped metric chips -->
+                    <div v-for="g in groupedPreview(e)" :key="g.name" class="space-y-1">
+                      <div class="flex items-center gap-1.5 text-[10px] uppercase tracking-wide font-bold text-muted-foreground">
+                        <Boxes class="h-3 w-3" />{{ g.name }}
+                        <span class="text-muted-foreground/60 font-normal normal-case">· {{ g.metrics.length }}</span>
+                      </div>
+                      <div class="flex flex-wrap gap-1.5">
+                        <span v-for="m in g.metrics" :key="m.name"
+                          class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-sm bg-card border border-border"
+                          :title="m.description || m.name">
+                          <span class="h-1.5 w-1.5 rounded-full shrink-0" :class="KIND_META[m.kind].dot"></span>
+                          <span class="font-mono">{{ m.leaf }}</span>
+                          <span v-if="m.engUnit" class="text-[9px] px-1 rounded bg-muted text-muted-foreground font-semibold">{{ m.engUnit }}</span>
+                          <span v-if="m.tipoValor" class="text-[9px] text-muted-foreground italic">{{ m.tipoValor }}</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center gap-2 pt-1">
+                      <Button size="sm" variant="outline" class="h-7 px-2.5 text-xs rounded-sm" @click="openInspect(e)">
+                        <Eye class="h-3.5 w-3.5 mr-1.5" /> Ver detalle completo
+                      </Button>
+                      <Button
+                        v-if="e.status === 'pending'"
+                        size="sm"
+                        class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white h-7 px-2.5 text-xs rounded-sm"
+                        @click="openApprove(e)"
+                      >
+                        <CheckCircle2 class="h-3.5 w-3.5 mr-1.5" /> Aprobar y crear equipo
+                      </Button>
+                    </div>
+                  </div>
+                </TableCell>
+              </TableRow>
+            </template>
+
             <TableRow v-if="!autoEntities.length">
-              <TableCell colspan="7" class="text-center text-muted-foreground text-xs py-6">
+              <TableCell colspan="6" class="text-center text-muted-foreground text-xs py-10">
+                <Scan class="h-6 w-6 mx-auto mb-2 opacity-40" />
                 Sin entidades descubiertas. Cuando llegue un NBIRTH/DBIRTH de un nodo no catalogado aparecerá aquí.
               </TableCell>
             </TableRow>
@@ -1374,68 +1629,152 @@ function tipoEquipoIcon(nombre: string) {
        DIALOGS
   ═══════════════════════════════════════════════════════════════════════ -->
 
-  <!-- Aprobar entidad autodescubierta -->
+  <!-- Aprobar entidad autodescubierta — revisión de métricas del NBIRTH -->
   <Dialog v-model:open="approveDialog">
-    <DialogContent class="!max-w-md p-0 overflow-hidden">
-      <DialogHeader class="px-6 pt-6 pb-4 border-b border-border">
-        <DialogTitle class="flex items-center gap-2">
-          <Scan class="h-4 w-4" /> Aprobar entidad descubierta
+    <DialogContent class="!max-w-3xl p-0 overflow-hidden gap-0">
+      <DialogHeader class="px-6 py-4 bg-[color:color-mix(in_srgb,var(--epm-bosque)_10%,transparent)] border-b border-border">
+        <DialogTitle class="flex items-center gap-2 text-base">
+          <Scan class="h-4 w-4 text-[color:var(--epm-bosque)]" />
+          {{ approveReadOnly ? 'Métricas reportadas' : 'Aprobar entidad descubierta' }}
         </DialogTitle>
-        <DialogDescription v-if="approveTarget">
-          <span class="font-mono">{{ approveTarget.device_id
-            ? `${approveTarget.group_id}/${approveTarget.node_id}/${approveTarget.device_id}`
-            : `${approveTarget.group_id}/${approveTarget.node_id}` }}</span>
-          — {{ approveTarget.metric_names.length }} métricas detectadas
+        <DialogDescription v-if="approveTarget" class="flex flex-wrap items-center gap-2 text-xs">
+          <span class="inline-flex items-center gap-1 font-mono px-1.5 py-0.5 rounded-sm bg-card border border-border">
+            <component :is="approveTarget.device_id ? Cpu : Radio" class="h-3 w-3"
+              :class="approveTarget.device_id ? 'text-violet-400' : 'text-sky-400'" />
+            {{ approveTarget.device_id
+              ? `${approveTarget.group_id}/${approveTarget.node_id}/${approveTarget.device_id}`
+              : `${approveTarget.group_id}/${approveTarget.node_id}` }}
+          </span>
+          <span class="text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase tracking-wide"
+            :class="approveTarget.device_id ? 'bg-violet-500/15 text-violet-400' : 'bg-sky-500/15 text-sky-400'">
+            {{ approveTarget.device_id ? 'DBIRTH' : 'NBIRTH' }}
+          </span>
         </DialogDescription>
       </DialogHeader>
-      <div class="px-6 py-4 space-y-4">
 
-        <!-- Detected device types from metadata -->
-        <div v-if="approveDetectedTypes.length" class="rounded-sm bg-muted/40 border border-border px-3 py-2 text-[11px]">
-          <span class="text-muted-foreground">Tipo(s) detectado(s): </span>
-          <span v-for="(t, i) in approveDetectedTypes" :key="t" class="font-semibold">{{ t }}{{ i < approveDetectedTypes.length - 1 ? ', ' : '' }}</span>
+      <div class="max-h-[72vh] overflow-y-auto">
+        <!-- ── Asignación (oculto en modo inspección) ───────────────────────── -->
+        <div v-if="!approveReadOnly" class="px-6 py-5 space-y-4 border-b border-border">
+          <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] font-bold text-muted-foreground">
+            <Building2 class="h-3.5 w-3.5" /> Asignación
+          </div>
+
+          <div v-if="approveDetectedTypes.length" class="rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)] border border-[color:color-mix(in_srgb,var(--epm-citrico)_30%,transparent)] px-3 py-2 text-[11px]">
+            <span class="text-muted-foreground">Tipo(s) de equipo detectado(s) en el payload: </span>
+            <span v-for="(t, i) in approveDetectedTypes" :key="t" class="font-semibold">{{ t }}{{ i < approveDetectedTypes.length - 1 ? ', ' : '' }}</span>
+          </div>
+
+          <div class="grid grid-cols-2 gap-4">
+            <div class="grid gap-1.5">
+              <Label>Planta * <span class="text-[10px] text-muted-foreground font-normal">(destino)</span></Label>
+              <Select v-model="approveForm.planta_id">
+                <SelectTrigger class="rounded-sm"><SelectValue placeholder="Seleccionar planta…" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="p in plantas" :key="p.planta_id" :value="String(p.planta_id)">{{ p.nombre }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div class="grid gap-1.5">
+              <Label>Tipo de equipo *</Label>
+              <Select v-model="approveForm.tipo_id">
+                <SelectTrigger class="rounded-sm"><SelectValue placeholder="Seleccionar tipo…" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="t in tipoEquipos" :key="t.tipo_id" :value="String(t.tipo_id)">{{ t.nombre }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div class="grid gap-1.5">
+              <Label>Nombre del equipo</Label>
+              <Input v-model="approveForm.nombre_equipo" class="rounded-sm h-8" />
+            </div>
+            <div class="grid gap-1.5">
+              <Label>Topic MQTT <span class="text-[10px] text-muted-foreground font-normal">(clave de caché)</span></Label>
+              <Input v-model="approveForm.nombre_topic" class="rounded-sm h-8 font-mono text-xs" />
+            </div>
+          </div>
+          <p class="text-[11px] text-muted-foreground">
+            Se creará el equipo en la planta seleccionada y se auto-instanciarán las señales de la plantilla
+            del tipo elegido. El nodo recibirá un <span class="font-mono">NCMD Rebirth</span> para comenzar a enviar datos.
+          </p>
         </div>
 
-        <div class="grid gap-1.5">
-          <Label>Planta * <span class="text-[10px] text-muted-foreground font-normal">(selecciona dónde asignar este equipo)</span></Label>
-          <Select v-model="approveForm.planta_id">
-            <SelectTrigger class="rounded-sm"><SelectValue placeholder="Seleccionar planta…" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="p in plantas" :key="p.planta_id" :value="String(p.planta_id)">{{ p.nombre }}</SelectItem>
-            </SelectContent>
-          </Select>
+        <!-- ── Métricas reportadas ──────────────────────────────────────────── -->
+        <div class="px-6 py-5 space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] font-bold text-muted-foreground">
+              <Activity class="h-3.5 w-3.5" /> Métricas reportadas
+              <span class="text-foreground">· {{ reviewSummary.total }}</span>
+            </div>
+            <div class="relative w-48">
+              <Search class="h-3.5 w-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <Input v-model="metricSearch" placeholder="Filtrar…" class="rounded-sm h-7 pl-7 text-xs" />
+            </div>
+          </div>
+
+          <!-- summary chips -->
+          <div class="flex flex-wrap items-center gap-1.5">
+            <span v-for="kc in reviewSummary.kinds" :key="kc.kind"
+              class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm border" :class="KIND_META[kc.kind].chip">
+              <component :is="KIND_META[kc.kind].icon" class="h-3 w-3" />
+              {{ kc.n }} {{ KIND_META[kc.kind].label }}
+            </span>
+            <span v-if="reviewSummary.devs.length" class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm border border-border bg-muted text-muted-foreground">
+              <Boxes class="h-3 w-3" /> {{ reviewSummary.devs.length }} tipo(s): {{ reviewSummary.devs.join(', ') }}
+            </span>
+            <span v-if="reviewSummary.units.length" class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm border border-border bg-muted text-muted-foreground">
+              <Ruler class="h-3 w-3" /> {{ reviewSummary.units.join(', ') }}
+            </span>
+          </div>
+
+          <!-- grouped metric list -->
+          <div class="rounded-sm border border-border divide-y divide-border/60">
+            <div v-for="g in reviewGroups" :key="g.name">
+              <div class="flex items-center gap-1.5 px-3 py-1.5 bg-muted/40 text-[10px] uppercase tracking-wide font-bold text-muted-foreground sticky top-0">
+                <Boxes class="h-3 w-3" />{{ g.name }}
+                <span class="text-muted-foreground/60 font-normal normal-case">· {{ g.metrics.length }} métrica(s)</span>
+              </div>
+              <div
+                v-for="m in g.metrics" :key="m.name"
+                class="flex items-start gap-3 px-3 py-2 hover:bg-muted/20"
+              >
+                <span class="h-1.5 w-1.5 rounded-full mt-1.5 shrink-0" :class="KIND_META[m.kind].dot"
+                  :title="KIND_META[m.kind].label" />
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-mono text-xs font-medium text-foreground">{{ m.leaf }}</span>
+                    <span v-if="m.tipoVariable" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-muted border border-border text-muted-foreground">
+                      <Tag class="h-2.5 w-2.5" />{{ m.tipoVariable }}
+                    </span>
+                    <span v-if="m.engUnit" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_15%,transparent)] text-foreground font-semibold">
+                      <Ruler class="h-2.5 w-2.5" />{{ m.engUnit }}
+                    </span>
+                    <span v-if="m.tipoValor" class="text-[9px] px-1.5 py-0.5 rounded-sm border border-border text-muted-foreground italic">{{ m.tipoValor }}</span>
+                    <span v-if="m.deviceType" class="text-[9px] px-1.5 py-0.5 rounded-sm bg-violet-500/10 text-violet-400">{{ m.deviceType }}</span>
+                  </div>
+                  <div class="font-mono text-[10px] text-muted-foreground truncate">{{ m.name }}</div>
+                  <div v-if="m.description" class="text-[11px] text-muted-foreground mt-0.5">{{ m.description }}</div>
+                </div>
+              </div>
+            </div>
+            <div v-if="!reviewGroups.length" class="px-3 py-6 text-center text-xs text-muted-foreground">
+              {{ metricSearch ? 'Ningún metric coincide con el filtro.' : 'Esta entidad no reportó métricas.' }}
+            </div>
+          </div>
         </div>
-        <div class="grid gap-1.5">
-          <Label>Tipo de equipo *</Label>
-          <Select v-model="approveForm.tipo_id">
-            <SelectTrigger class="rounded-sm"><SelectValue placeholder="Seleccionar tipo…" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="t in tipoEquipos" :key="t.tipo_id" :value="String(t.tipo_id)">{{ t.nombre }}</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div class="grid gap-1.5">
-          <Label>Nombre del equipo</Label>
-          <Input v-model="approveForm.nombre_equipo" class="rounded-sm h-8" />
-        </div>
-        <div class="grid gap-1.5">
-          <Label>Nombre topic MQTT <span class="text-[10px] text-muted-foreground font-normal">(clave de enrutamiento en el caché)</span></Label>
-          <Input v-model="approveForm.nombre_topic" class="rounded-sm h-8 font-mono text-xs" />
-        </div>
-        <p class="text-[11px] text-muted-foreground">
-          Se creará el equipo en la planta seleccionada y se auto-instanciarán las señales del tipo elegido.
-          El nodo recibirá un NCMD Rebirth para comenzar a enviar datos inmediatamente.
-        </p>
       </div>
-      <DialogFooter class="px-6 pb-5 gap-2">
-        <Button variant="ghost" size="sm" @click="approveDialog = false">Cancelar</Button>
+
+      <DialogFooter class="px-6 py-4 border-t border-border gap-2">
+        <Button variant="ghost" size="sm" @click="approveDialog = false">
+          {{ approveReadOnly ? 'Cerrar' : 'Cancelar' }}
+        </Button>
         <Button
+          v-if="!approveReadOnly"
           size="sm"
           class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm"
           :disabled="!approveForm.planta_id || !approveForm.tipo_id"
           @click="submitApprove"
         >
-          <CheckCircle2 class="h-3.5 w-3.5 mr-1.5" /> Crear equipo
+          <CheckCircle2 class="h-3.5 w-3.5 mr-1.5" /> Crear equipo · {{ reviewSummary.total }} señales
         </Button>
       </DialogFooter>
     </DialogContent>
