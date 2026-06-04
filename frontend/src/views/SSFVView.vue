@@ -7,6 +7,7 @@ import {
   type SSFVFrontera,
   type SSFVTipoEquipo, type SSFVTipoVariable, type SSFVUnidad,
   type SSFVSenalXTipo,
+  type SSFVHostNode, type SSFVHostMetric, type SSFVHostIface,
 } from '@/api'
 import { Button }  from '@/components/ui/button'
 import { Input }   from '@/components/ui/input'
@@ -28,13 +29,14 @@ import {
   ChevronRight, ChevronDown, Zap, Building2, Cpu, Layers,
   Link2, Activity, Ruler, GitBranch, TriangleAlert, Scan,
   Eye, Search, Hash, Tag, Gauge, Boxes, Cog, Fingerprint, Radio,
+  Database, Network, Thermometer,
 } from 'lucide-vue-next'
 import { useConfirm } from '@/composables/useConfirm'
 
 const { confirm } = useConfirm()
 
 // ─── Tab state ────────────────────────────────────────────────────────────────
-const tab = ref<'plantas' | 'catalogo' | 'tipos' | 'estado' | 'pendientes'>('plantas')
+const tab = ref<'plantas' | 'catalogo' | 'tipos' | 'estado' | 'pendientes' | 'host'>('plantas')
 
 // ─── SSFV Connection status ───────────────────────────────────────────────────
 const status    = ref<SSFVStatus | null>(null)
@@ -552,10 +554,16 @@ const KIND_META: Record<MetricKind, { label: string; icon: any; dot: string; chi
   sesion:    { label: 'Sesión',    icon: Radio,       dot: 'bg-zinc-500',    chip: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/30' },
 }
 
+// Host telemetry categories (matches worker.hostCategories). Metrics in these
+// namespaces describe the gateway host and are stored in tbl_metricas_host, not
+// the plant catalog. The producer's "System/" prefix is optional.
+const HOST_CATEGORIES = new Set(['CPU', 'Memory', 'Disk', 'Network', 'Temperature', 'Power', 'Process'])
+
 function metricKind(name: string): MetricKind {
   if (name === 'bdSeq' || name === 'seq') return 'sesion'
-  if (name.startsWith('System/Device/')) return 'identidad'
-  if (name.startsWith('System/')) return 'sistema'
+  const n = name.startsWith('System/') ? name.slice(7) : name
+  if (n.startsWith('Device/')) return 'identidad'
+  if (n === 'Uptime_h' || HOST_CATEGORIES.has(n.split('/')[0])) return 'sistema'
   return 'proceso'
 }
 
@@ -916,6 +924,106 @@ async function deleteAutodiscoveredEntity(e: AutodiscEntity) {
   } catch (err: any) { toast.error(err.response?.data?.error ?? 'Error eliminando') }
 }
 
+// ─── Host telemetry (gateway System/* metrics) ────────────────────────────────
+const hostNodes   = ref<SSFVHostNode[]>([])
+const hostNode    = ref<string>('')            // selected node
+const hostMetrics = ref<SSFVHostMetric[]>([])
+const hostIfaces  = ref<SSFVHostIface[]>([])
+
+// Metrics grouped: categoria → subkey → metrics[]. Scalars use subkey ''.
+const hostGroups = computed(() => {
+  const byCat = new Map<string, Map<string, SSFVHostMetric[]>>()
+  for (const m of hostMetrics.value) {
+    if (!byCat.has(m.categoria)) byCat.set(m.categoria, new Map())
+    const subs = byCat.get(m.categoria)!
+    if (!subs.has(m.subkey)) subs.set(m.subkey, [])
+    subs.get(m.subkey)!.push(m)
+  }
+  return [...byCat.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([categoria, subs]) => ({
+      categoria,
+      subs: [...subs.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([subkey, metrics]) => ({ subkey, metrics })),
+    }))
+})
+
+function hostCatIcon(cat: string) {
+  switch (cat) {
+    case 'CPU': return Cpu
+    case 'Memory': return Layers
+    case 'Disk': return Database
+    case 'Network': return Network
+    case 'Temperature': return Thermometer
+    case 'Power': return Zap
+    default: return Activity
+  }
+}
+// Compact numeric formatting for host values.
+function fmtHost(v: number | null): string {
+  if (v === null || v === undefined) return '—'
+  const a = Math.abs(v)
+  if (a !== 0 && a < 0.01) return v.toExponential(1)
+  if (a >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 0 })
+  return v.toLocaleString(undefined, { maximumFractionDigits: 2 })
+}
+
+async function fetchHostNodes() {
+  const r = await api.get('/ssfv/host/nodes')
+  hostNodes.value = r.data ?? []
+  if (!hostNode.value && hostNodes.value.length) hostNode.value = hostNodes.value[0].node_topic
+}
+async function fetchHostMetrics() {
+  if (!hostNode.value) { hostMetrics.value = []; return }
+  const r = await api.get('/ssfv/host/metrics', { params: { node: hostNode.value } })
+  hostMetrics.value = r.data ?? []
+}
+async function fetchHostIfaces() {
+  const r = await api.get('/ssfv/host/ifaces')
+  hostIfaces.value = r.data ?? []
+}
+async function refreshHost() {
+  refreshing.value = true
+  try {
+    await fetchHostNodes()
+    await Promise.all([fetchHostMetrics(), fetchHostIfaces()])
+  } catch (e: any) {
+    toast.error('Error cargando host: ' + (e.response?.data?.error ?? e.message))
+  } finally { refreshing.value = false }
+}
+watch(hostNode, fetchHostMetrics)
+
+// Interface allowlist management.
+const ifaceForm = reactive({ nombre: '', descripcion: '' })
+async function addHostIface() {
+  const nombre = ifaceForm.nombre.trim()
+  if (!nombre) return
+  try {
+    await api.post('/ssfv/host/ifaces', { nombre, descripcion: ifaceForm.descripcion || null, activo: true })
+    ifaceForm.nombre = ''; ifaceForm.descripcion = ''
+    toast.success('Interfaz añadida a la lista')
+    await fetchHostIfaces()
+  } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error añadiendo interfaz') }
+}
+async function toggleHostIface(i: SSFVHostIface) {
+  try {
+    await api.put(`/ssfv/host/ifaces/${i.iface_id}`, { nombre: i.nombre, descripcion: i.descripcion ?? null, activo: !i.activo })
+    await fetchHostIfaces()
+  } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error') }
+}
+async function deleteHostIface(i: SSFVHostIface) {
+  const ok = await confirm({
+    title: 'Eliminar interfaz', message: '¿Quitar esta interfaz de la lista de persistencia?',
+    detail: i.nombre, variant: 'danger', confirmText: 'Eliminar',
+  })
+  if (!ok) return
+  try {
+    await api.delete(`/ssfv/host/ifaces/${i.iface_id}`)
+    toast.success('Interfaz eliminada')
+    await fetchHostIfaces()
+  } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error eliminando') }
+}
+
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 onMounted(async () => {
   try {
@@ -936,6 +1044,7 @@ watch(tab, async (t) => {
     if (t === 'tipos')      await fetchCatalogs()
     if (t === 'estado')     await Promise.all([fetchStatus(), fetchMissed()])
     if (t === 'pendientes') await Promise.all([fetchAutodiscovered(), fetchCatalogs(), fetchSenales()])
+    if (t === 'host')       await refreshHost()
   } catch (e: any) {
     toast.error(e?.response?.data?.error ?? e?.message ?? 'Error cargando datos')
   }
@@ -1010,6 +1119,7 @@ function tipoEquipoIcon(nombre: string) {
           { id: 'tipos',      label: 'Tipos y Unidades', icon: Ruler },
           { id: 'estado',     label: 'Estado',            icon: Activity },
           { id: 'pendientes', label: 'Pendientes',        icon: Scan },
+          { id: 'host',       label: 'Host / Sistema',    icon: Cpu },
         ] as const"
         :key="t.id"
         class="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px"
@@ -1799,6 +1909,118 @@ function tipoEquipoIcon(nombre: string) {
       </div>
     </div>
 
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         TAB: Host / Sistema (telemetría del nodo gateway)
+    ═══════════════════════════════════════════════════════════════════════ -->
+    <div v-if="tab === 'host'" class="space-y-4">
+      <div class="flex items-start justify-between gap-4">
+        <p class="text-sm text-muted-foreground max-w-2xl">
+          Telemetría del host del gateway (CPU, memoria, disco, red…) recibida como métricas
+          <span class="font-mono text-[11px]">System/*</span>. Se almacena en
+          <span class="font-mono text-[11px]">ssfv.tbl_metricas_host</span>, separada del catálogo de planta.
+          Las interfaces de red se persisten solo si están en la lista de abajo.
+        </p>
+        <Button variant="outline" size="sm" :disabled="refreshing" @click="refreshHost">
+          <RefreshCw class="h-3.5 w-3.5 mr-1.5" :class="refreshing ? 'animate-spin' : ''" /> Actualizar
+        </Button>
+      </div>
+
+      <!-- node selector -->
+      <div v-if="hostNodes.length" class="flex flex-wrap items-center gap-2">
+        <span class="text-[11px] uppercase tracking-wide font-bold text-muted-foreground">Nodo</span>
+        <button
+          v-for="n in hostNodes" :key="n.node_topic"
+          class="inline-flex items-center gap-2 px-3 py-1.5 rounded-sm text-xs border transition-colors"
+          :class="hostNode === n.node_topic
+            ? 'border-[color:var(--epm-bosque)] bg-[color:color-mix(in_srgb,var(--epm-bosque)_10%,transparent)] text-foreground'
+            : 'border-border text-muted-foreground hover:text-foreground'"
+          @click="hostNode = n.node_topic"
+        >
+          <Cpu class="h-3.5 w-3.5" />
+          <span class="font-mono">{{ n.node_topic }}</span>
+          <span class="text-[10px] text-muted-foreground">· {{ n.metricas }} métricas</span>
+        </button>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <!-- metrics by category -->
+        <div class="xl:col-span-2 space-y-3">
+          <div v-if="!hostMetrics.length" class="rounded-sm border border-dashed border-border p-8 text-center text-xs text-muted-foreground">
+            <Cpu class="h-6 w-6 mx-auto mb-2 opacity-40" />
+            Sin telemetría de host. Aparecerá cuando el nodo gateway publique métricas System/*.
+          </div>
+
+          <Card v-for="g in hostGroups" :key="g.categoria" class="rounded-sm border-border overflow-hidden">
+            <CardHeader class="py-2.5 px-4 bg-muted/30 border-b border-border">
+              <CardTitle class="text-xs font-bold uppercase tracking-[0.14em] flex items-center gap-2">
+                <component :is="hostCatIcon(g.categoria)" class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" />
+                {{ g.categoria }}
+              </CardTitle>
+            </CardHeader>
+            <CardContent class="p-0">
+              <div v-for="s in g.subs" :key="s.subkey" class="border-b border-border/50 last:border-0">
+                <div v-if="s.subkey" class="px-4 pt-2 pb-1 text-[10px] font-mono font-semibold text-muted-foreground flex items-center gap-1.5">
+                  <Network v-if="g.categoria === 'Network'" class="h-3 w-3" />
+                  <Database v-else-if="g.categoria === 'Disk'" class="h-3 w-3" />
+                  {{ s.subkey }}
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-px bg-border/40">
+                  <div v-for="m in s.metrics" :key="m.metrica"
+                    class="bg-card px-3 py-2 flex flex-col">
+                    <span class="text-[10px] text-muted-foreground font-mono truncate" :title="m.metrica">{{ m.metrica }}</span>
+                    <span class="text-sm font-semibold tabular-nums">{{ fmtHost(m.valor) }}</span>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <!-- interface allowlist -->
+        <div class="space-y-3">
+          <Card class="rounded-sm border-border">
+            <CardHeader class="py-2.5 px-4 bg-muted/30 border-b border-border">
+              <CardTitle class="text-xs font-bold uppercase tracking-[0.14em] flex items-center gap-2">
+                <Network class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" /> Interfaces persistidas
+              </CardTitle>
+              <p class="text-[11px] mt-1 text-muted-foreground">
+                Solo las interfaces activas se almacenan. Las efímeras (veth*, br-*) se ignoran por defecto.
+              </p>
+            </CardHeader>
+            <CardContent class="p-3 space-y-3">
+              <!-- add -->
+              <div class="flex items-center gap-2">
+                <Input v-model="ifaceForm.nombre" placeholder="p. ej. eth0" class="rounded-sm h-8 font-mono text-xs"
+                  @keyup.enter="addHostIface" />
+                <Button size="sm" class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm h-8"
+                  :disabled="!ifaceForm.nombre.trim()" @click="addHostIface">
+                  <Plus class="h-3.5 w-3.5" />
+                </Button>
+              </div>
+
+              <div class="rounded-sm border border-border divide-y divide-border/60">
+                <div v-for="i in hostIfaces" :key="i.iface_id"
+                  class="flex items-center gap-2 px-3 py-2">
+                  <Switch :model-value="i.activo" @update:model-value="toggleHostIface(i)" />
+                  <div class="min-w-0 flex-1">
+                    <div class="font-mono text-xs" :class="i.activo ? '' : 'text-muted-foreground line-through'">{{ i.nombre }}</div>
+                    <div v-if="i.descripcion" class="text-[10px] text-muted-foreground truncate">{{ i.descripcion }}</div>
+                  </div>
+                  <Button size="sm" variant="ghost" class="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                    @click="deleteHostIface(i)">
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <div v-if="!hostIfaces.length" class="px-3 py-6 text-center text-[11px] text-muted-foreground">
+                  Sin interfaces en la lista — no se persistirá ninguna métrica de red.
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <!-- ═══════════════════════════════════════════════════════════════════════
@@ -1976,6 +2198,11 @@ function tipoEquipoIcon(nombre: string) {
                       <CheckCircle2 class="h-3 w-3" />Mapeada
                     </span>
                   </div>
+                  <span v-else-if="!approveReadOnly && m.kind === 'sistema'"
+                    class="shrink-0 text-[9px] text-sky-400 inline-flex items-center gap-1 pt-1"
+                    title="Telemetría del host — se almacena en tbl_metricas_host, no en el catálogo de planta">
+                    <Cog class="h-3 w-3" /> host
+                  </span>
                   <span v-else-if="!approveReadOnly && m.kind !== 'proceso'"
                     class="shrink-0 text-[9px] text-muted-foreground italic pt-1">no aplica</span>
                 </div>

@@ -130,6 +130,7 @@ func main() {
 		alarmMgr := worker.NewAlarmManager(sa.Pool())
 		ssfvHandler.SetAlarmManager(alarmMgr)
 		ssfvHandler.SetMissFn(sa.RecordMiss)
+		ssfvHandler.SetHostConfig(sa.IfaceAllowed)
 		if err := ssfvCache.Reload(sa.Pool()); err != nil {
 			log.Printf("ssfv cache reload: %v", err)
 		}
@@ -172,12 +173,14 @@ func main() {
 			if sa := tsdbMgr.SSFVAdapter(); sa != nil {
 				ssfvHandler.SetAlarmManager(worker.NewAlarmManager(sa.Pool()))
 				ssfvHandler.SetMissFn(sa.RecordMiss)
+				ssfvHandler.SetHostConfig(sa.IfaceAllowed)
 				if err := ssfvCache.Reload(sa.Pool()); err != nil {
 					log.Printf("ssfv: mapping cache reload after tsdb reload: %v", err)
 				}
 			} else {
 				ssfvHandler.SetAlarmManager(nil)
 				ssfvHandler.SetMissFn(nil)
+				ssfvHandler.SetHostConfig(nil)
 			}
 		},
 		NotifyNATS: func() {
@@ -191,6 +194,7 @@ func main() {
 			if err := ssfvCache.Reload(sa.Pool()); err != nil {
 				log.Printf("ssfv: mapping cache reload: %v", err)
 			}
+			sa.ReloadHostIfaces(context.Background())
 		},
 		MQTT:      mqttMgr,
 		IEC104:    iecMgr,

@@ -282,6 +282,16 @@ func (h *SparkplugHandler) dispatchMetric(
 	m *sparkplug.Metric,
 	ts time.Time,
 ) bool {
+	// Host telemetry intercept: edge-node System/* metrics (CPU/Memory/Disk/
+	// Network/…) describe the gateway machine, not a plant signal. Route them to
+	// ssfv.tbl_metricas_host and stop — they are never IEC-104 nor catalog signals.
+	if h.ssfvHandler != nil && isHostMetric(metricName) {
+		node := topic.GroupID + "/" + topic.EdgeNodeID
+		val, _ := m.Float64()
+		h.ssfvHandler.HandleHostMetric(node, metricName, val, ts)
+		return true
+	}
+
 	// SSFV intercept: always write to TimescaleDB when the metric matches a known
 	// SSFV topic. Execution continues so an IEC-104 mapping can also be served
 	// (dual routing). Only signals that have a signal_mappings entry reach IEC-104.

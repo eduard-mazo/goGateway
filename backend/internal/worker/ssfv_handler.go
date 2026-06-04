@@ -158,6 +158,7 @@ type SSFVHandler struct {
 	pipe     *tsdb.WritePipeline       // guarded by mu; nil until TSDB connects
 	alarmMgr *AlarmManager             // guarded by mu; nil until TSDB connects
 	missFn   func(signalPath, equipo string) // guarded by mu; optional miss callback
+	ifaceOK  func(iface string) bool   // guarded by mu; network-interface allowlist
 }
 
 func NewSSFVHandler(cache *SSFVMappingCache, pipe *tsdb.WritePipeline, alarms *AlarmManager) *SSFVHandler {
@@ -189,6 +190,92 @@ func (h *SSFVHandler) SetMissFn(fn func(signalPath, equipo string)) {
 	h.mu.Lock()
 	h.missFn = fn
 	h.mu.Unlock()
+}
+
+// SetHostConfig wires the network-interface allowlist predicate used by
+// HandleHostMetric. Source it from SSFVAdapter.IfaceAllowed. A nil predicate
+// stores every interface (no filtering).
+func (h *SSFVHandler) SetHostConfig(ifaceOK func(iface string) bool) {
+	h.mu.Lock()
+	h.ifaceOK = ifaceOK
+	h.mu.Unlock()
+}
+
+// HandleHostMetric routes an edge-node System/* host metric to the host
+// telemetry table (ssfv.tbl_metricas_host) via the TSDB pipeline. node is the
+// gateway node identity (group/node); name is the full metric path.
+// Network metrics are dropped unless their interface is on the allowlist.
+func (h *SSFVHandler) HandleHostMetric(node, name string, value float64, ts time.Time) {
+	categoria, subkey, metrica := parseHostPath(name)
+	if metrica == "" {
+		return
+	}
+
+	h.mu.RLock()
+	pipe := h.pipe
+	ifaceOK := h.ifaceOK
+	h.mu.RUnlock()
+	if pipe == nil {
+		return
+	}
+	if categoria == "Network" && subkey != "" && ifaceOK != nil && !ifaceOK(subkey) {
+		return // interface not on the persistence allowlist
+	}
+
+	pipe.Push(tsdb.DataPoint{ //nolint:errcheck
+		Measurement: metrica,
+		Tags: map[string]string{
+			"host_metric": "1",
+			"node":        node,
+			"categoria":   categoria,
+			"subkey":      subkey,
+			"metrica":     metrica,
+		},
+		Fields:    map[string]float64{"value": value},
+		Timestamp: ts,
+	})
+}
+
+// hostCategories are the top-level groups of edge-node host telemetry
+// (sparkplug-contract.md §4). String identity metrics (System/Device/*) are
+// intentionally excluded — they are not numeric samples.
+var hostCategories = map[string]bool{
+	"CPU": true, "Memory": true, "Disk": true, "Network": true,
+	"Temperature": true, "Power": true, "Process": true,
+}
+
+// isHostMetric reports whether a Sparkplug metric name is gateway host
+// telemetry rather than a plant process signal. Accepts an optional "System/"
+// prefix (the producer's configurable metricPrefix).
+func isHostMetric(name string) bool {
+	n := strings.TrimPrefix(name, "System/")
+	if n == "Uptime_h" {
+		return true
+	}
+	first := n
+	if i := strings.IndexByte(n, '/'); i >= 0 {
+		first = n[:i]
+	}
+	return hostCategories[first]
+}
+
+// parseHostPath splits a host metric path into (categoria, subkey, metrica):
+//
+//	Uptime_h                       → ("Host",    "",           "Uptime_h")
+//	CPU/Usage_pct                  → ("CPU",     "",           "Usage_pct")
+//	Disk/root/Used_pct             → ("Disk",    "root",       "Used_pct")
+//	Network/wlp2s0/RxRate_kbps     → ("Network", "wlp2s0",     "RxRate_kbps")
+func parseHostPath(name string) (categoria, subkey, metrica string) {
+	n := strings.TrimPrefix(name, "System/")
+	parts := strings.Split(n, "/")
+	switch len(parts) {
+	case 1:
+		return "Host", "", parts[0]
+	case 2:
+		return parts[0], "", parts[1]
+	default:
+		return parts[0], parts[1], strings.Join(parts[2:], "/")
+	}
 }
 
 // IsKnownTopic reports whether topic matches a configured SSFV equipment topic.
