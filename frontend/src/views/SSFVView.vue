@@ -664,6 +664,137 @@ const reviewSummary = computed(() => {
   return { total: ms.length, units: [...units] as string[], vars: [...vars] as string[], devs: [...devs] as string[], kinds }
 })
 
+// ─── Signal provisioning plan ─────────────────────────────────────────────────
+// Reconciles each reported NBIRTH metric against the SSFV catalog
+// (ssfv.tbl_senales) and the chosen tipo_equipo template
+// (public.tbl_senales_x_tipo_equipo) so the operator sees exactly which
+// signals already map, which exist but aren't in the template, and which are
+// brand new — then chooses what to create/link on approval.
+
+// codigo_senal is the last path segment of the metric name (matches the SSFV
+// dispatch in sparkplug_dispatch.go: code = parts[len-1]).
+function signalCode(name: string): string {
+  const seg = name.split('/')
+  return seg[seg.length - 1]
+}
+// Indexed signals: "IDC_1" → base "IDC_x" (mirrors resolveIndexedSignal in Go).
+function indexedBase(code: string): string | null {
+  const parts = code.split('_')
+  const last = parts[parts.length - 1]
+  if (parts.length >= 2 && /^\d+$/.test(last)) return parts.slice(0, -1).join('_') + '_x'
+  return null
+}
+
+const catalogByCode = computed(() => {
+  const m = new Map<string, SSFVSenal>()
+  for (const s of senales.value) m.set(s.codigo_senal, s)
+  return m
+})
+
+// True when a metric already has a catalog señal (exact or indexed base).
+function metricInCatalog(name: string): boolean {
+  const code = signalCode(name)
+  const base = indexedBase(code)
+  return catalogByCode.value.has(code) || (!!base && catalogByCode.value.has(base))
+}
+
+// Count of process metrics on this entity that have NO catalog señal yet.
+function entityNewSignalCount(e: AutodiscEntity): number {
+  return buildReviewMetrics(e).filter(m => m.kind === 'proceso' && !metricInCatalog(m.name)).length
+}
+
+// codigo_senal set covered by the selected tipo_equipo template.
+const templateCodes = ref<Set<string>>(new Set())
+async function loadTemplateCodes(tipoId: number) {
+  if (!tipoId) { templateCodes.value = new Set(); return }
+  try {
+    const r = await api.get('/ssfv/senales-x-tipo', { params: { tipo_id: tipoId } })
+    templateCodes.value = new Set((r.data ?? []).map((s: SSFVSenalXTipo) => s.codigo_senal))
+  } catch { templateCodes.value = new Set() }
+}
+
+interface PlanEntry {
+  name: string
+  code: string
+  status: 'catalog' | 'new'   // 'mapped' entries are omitted (no action needed)
+  selected: boolean
+  senalId?: number            // catalog → existing señal to link into template
+  nombre: string
+  tipovarId: string           // new → catalog FKs (string for shadcn Select)
+  unidadId: string
+  tipoValor: string
+  codeTooLong: boolean        // codigo_senal > 20 chars → cannot create
+}
+
+const signalPlan = reactive<Record<string, PlanEntry>>({})
+
+function matchTipoVar(name?: string): string {
+  if (!name) return ''
+  const hit = tipoVars.value.find(t => t.nombre === name)
+  return hit?.tipovar_id ? String(hit.tipovar_id) : ''
+}
+function matchUnidad(simbolo?: string): string {
+  const hit = simbolo ? unidades.value.find(u => u.simbolo === simbolo) : undefined
+  if (hit?.unidad_id) return String(hit.unidad_id)
+  const adim = unidades.value.find(u => u.simbolo === 'Adimensional')
+  return adim?.unidad_id ? String(adim.unidad_id) : ''
+}
+
+// Recompute the plan from the current target + catalog + template selection.
+function rebuildSignalPlan() {
+  for (const k of Object.keys(signalPlan)) delete signalPlan[k]
+  if (!approveTarget.value) return
+  for (const m of buildReviewMetrics(approveTarget.value)) {
+    if (m.kind !== 'proceso') continue // only plant process signals are catalog señales
+    const code = signalCode(m.name)
+    const base = indexedBase(code)
+    const covered = templateCodes.value.has(code) || (!!base && templateCodes.value.has(base))
+    if (covered) continue // already mapped by the tipo template
+    const hit = catalogByCode.value.get(code) || (base ? catalogByCode.value.get(base) : undefined)
+    if (hit) {
+      signalPlan[m.name] = {
+        name: m.name, code, status: 'catalog', selected: true, senalId: hit.senal_id,
+        nombre: hit.nombre, tipovarId: '', unidadId: '', tipoValor: '', codeTooLong: false,
+      }
+    } else {
+      signalPlan[m.name] = {
+        name: m.name, code, status: 'new', selected: code.length <= 20,
+        nombre: m.description || code,
+        tipovarId: matchTipoVar(m.tipoVariable),
+        unidadId:  matchUnidad(m.engUnit),
+        tipoValor: m.tipoValor === 'Acumulado' ? 'Acumulado' : 'Instantaneo',
+        codeTooLong: code.length > 20,
+      }
+    }
+  }
+}
+
+const procesoCount = computed(() =>
+  approveTarget.value ? buildReviewMetrics(approveTarget.value).filter(m => m.kind === 'proceso').length : 0)
+const planEntries = computed(() => Object.values(signalPlan))
+const planSummary = computed(() => {
+  const e = planEntries.value
+  const cat = e.filter(x => x.status === 'catalog')
+  const nw  = e.filter(x => x.status === 'new')
+  return {
+    mapped:     procesoCount.value - e.length,
+    catalog:    cat.length,
+    new:        nw.length,
+    willCreate: nw.filter(x => x.selected).length,
+    willLink:   cat.filter(x => x.selected).length,
+  }
+})
+// Every selected new señal must have its variable + unidad set and a valid code.
+const planValid = computed(() => planEntries.value.every(e =>
+  !(e.selected && e.status === 'new') || (!!e.tipovarId && !!e.unidadId && !e.codeTooLong)))
+
+// Reload template + rebuild plan whenever the operator changes the tipo_equipo.
+watch(() => approveForm.tipo_id, async (v) => {
+  if (approveReadOnly.value) return
+  await loadTemplateCodes(Number(v) || 0)
+  rebuildSignalPlan()
+})
+
 function openInspect(e: AutodiscEntity) {
   approveTarget.value = e
   approveReadOnly.value = true
@@ -678,7 +809,7 @@ async function fetchAutodiscovered() {
   } catch { autoEntities.value = [] }
 }
 
-function openApprove(e: AutodiscEntity) {
+async function openApprove(e: AutodiscEntity) {
   approveTarget.value = e
   approveReadOnly.value = false
   metricSearch.value = ''
@@ -699,20 +830,49 @@ function openApprove(e: AutodiscEntity) {
     nombre_topic: defaultTopic,
   })
   approveDialog.value = true
+
+  // Reconcile reported metrics against catalog + template for the signal plan.
+  try {
+    if (!senales.value.length) await fetchSenales()
+    await loadTemplateCodes(matched?.tipo_id ?? 0)
+    rebuildSignalPlan()
+  } catch { /* plan stays empty; operator can still approve standard template */ }
 }
 
 async function submitApprove() {
   if (!approveTarget.value) return
+  if (!planValid.value) {
+    toast.error('Completa variable y unidad de cada señal nueva marcada')
+    return
+  }
+  const createSignals = planEntries.value
+    .filter(e => e.selected && e.status === 'new')
+    .map(e => ({
+      codigo_senal: e.code,
+      nombre:       e.nombre || e.code,
+      tipavar_id:   Number(e.tipovarId),
+      unidad_id:    Number(e.unidadId),
+      tipo_valor:   e.tipoValor || 'Instantaneo',
+      descripcion:  e.nombre || null,
+    }))
+  const linkSignals = planEntries.value
+    .filter(e => e.selected && e.status === 'catalog' && e.senalId)
+    .map(e => e.senalId as number)
   try {
     await api.post(`/ssfv/autodiscovered/${approveTarget.value.id}/approve`, {
-      planta_id:     Number(approveForm.planta_id),
-      tipo_id:       Number(approveForm.tipo_id),
-      nombre_equipo: approveForm.nombre_equipo,
-      nombre_topic:  approveForm.nombre_topic,
+      planta_id:      Number(approveForm.planta_id),
+      tipo_id:        Number(approveForm.tipo_id),
+      nombre_equipo:  approveForm.nombre_equipo,
+      nombre_topic:   approveForm.nombre_topic,
+      create_signals: createSignals,
+      link_signals:   linkSignals,
     })
-    toast.success('Equipo creado y señales instanciadas')
+    const extra = createSignals.length || linkSignals.length
+      ? ` · ${createSignals.length} nueva(s), ${linkSignals.length} vinculada(s)`
+      : ''
+    toast.success('Equipo creado y señales instanciadas' + extra)
     approveDialog.value = false
-    await fetchAutodiscovered()
+    await Promise.all([fetchAutodiscovered(), fetchSenales()])
   } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error aprobando') }
 }
 
@@ -775,7 +935,7 @@ watch(tab, async (t) => {
     if (t === 'catalogo')   await Promise.all([fetchSenales(), fetchCatalogs()])
     if (t === 'tipos')      await fetchCatalogs()
     if (t === 'estado')     await Promise.all([fetchStatus(), fetchMissed()])
-    if (t === 'pendientes') await Promise.all([fetchAutodiscovered(), fetchCatalogs()])
+    if (t === 'pendientes') await Promise.all([fetchAutodiscovered(), fetchCatalogs(), fetchSenales()])
   } catch (e: any) {
     toast.error(e?.response?.data?.error ?? e?.message ?? 'Error cargando datos')
   }
@@ -1576,6 +1736,19 @@ function tipoEquipoIcon(nombre: string) {
                       </span>
                     </div>
 
+                    <!-- catalog-coverage legend -->
+                    <div class="flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground">
+                      <span class="inline-flex items-center gap-1">
+                        <CheckCircle2 class="h-3 w-3 text-emerald-500" /> en catálogo
+                      </span>
+                      <span class="inline-flex items-center gap-1">
+                        <Plus class="h-3 w-3 text-amber-500" /> señal nueva
+                      </span>
+                      <span v-if="entityNewSignalCount(e)" class="font-semibold text-amber-500">
+                        {{ entityNewSignalCount(e) }} señal(es) sin catalogar — se pueden crear al aprobar
+                      </span>
+                    </div>
+
                     <!-- grouped metric chips -->
                     <div v-for="g in groupedPreview(e)" :key="g.name" class="space-y-1">
                       <div class="flex items-center gap-1.5 text-[10px] uppercase tracking-wide font-bold text-muted-foreground">
@@ -1584,9 +1757,12 @@ function tipoEquipoIcon(nombre: string) {
                       </div>
                       <div class="flex flex-wrap gap-1.5">
                         <span v-for="m in g.metrics" :key="m.name"
-                          class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-sm bg-card border border-border"
+                          class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-sm bg-card border"
+                          :class="m.kind === 'proceso' && !metricInCatalog(m.name) ? 'border-amber-500/40' : 'border-border'"
                           :title="m.description || m.name">
-                          <span class="h-1.5 w-1.5 rounded-full shrink-0" :class="KIND_META[m.kind].dot"></span>
+                          <CheckCircle2 v-if="m.kind === 'proceso' && metricInCatalog(m.name)" class="h-3 w-3 text-emerald-500 shrink-0" />
+                          <Plus v-else-if="m.kind === 'proceso'" class="h-3 w-3 text-amber-500 shrink-0" />
+                          <span v-else class="h-1.5 w-1.5 rounded-full shrink-0" :class="KIND_META[m.kind].dot"></span>
                           <span class="font-mono">{{ m.leaf }}</span>
                           <span v-if="m.engUnit" class="text-[9px] px-1 rounded bg-muted text-muted-foreground font-semibold">{{ m.engUnit }}</span>
                           <span v-if="m.tipoValor" class="text-[9px] text-muted-foreground italic">{{ m.tipoValor }}</span>
@@ -1711,6 +1887,33 @@ function tipoEquipoIcon(nombre: string) {
             </div>
           </div>
 
+          <!-- signal provisioning plan -->
+          <div v-if="!approveReadOnly" class="rounded-sm border border-border bg-muted/30 px-3 py-2 text-[11px]">
+            <div v-if="!approveForm.tipo_id" class="text-muted-foreground inline-flex items-center gap-1.5">
+              <TriangleAlert class="h-3.5 w-3.5 text-amber-500" />
+              Selecciona un tipo de equipo para reconciliar las señales contra el catálogo y su plantilla.
+            </div>
+            <div v-else class="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span class="inline-flex items-center gap-1">
+                <CheckCircle2 class="h-3.5 w-3.5 text-emerald-500" />
+                <span class="font-semibold">{{ planSummary.mapped }}</span> ya mapeadas
+              </span>
+              <span class="inline-flex items-center gap-1">
+                <Link2 class="h-3.5 w-3.5 text-blue-400" />
+                <span class="font-semibold">{{ planSummary.catalog }}</span> en catálogo
+                <span class="text-muted-foreground">→ {{ planSummary.willLink }} a vincular</span>
+              </span>
+              <span class="inline-flex items-center gap-1">
+                <Plus class="h-3.5 w-3.5 text-amber-500" />
+                <span class="font-semibold">{{ planSummary.new }}</span> nuevas
+                <span class="text-muted-foreground">→ {{ planSummary.willCreate }} a crear</span>
+              </span>
+              <span v-if="!planValid" class="text-destructive font-semibold inline-flex items-center gap-1">
+                <TriangleAlert class="h-3.5 w-3.5" /> Completa variable y unidad de las señales nuevas marcadas
+              </span>
+            </div>
+          </div>
+
           <!-- summary chips -->
           <div class="flex flex-wrap items-center gap-1.5">
             <span v-for="kc in reviewSummary.kinds" :key="kc.kind"
@@ -1733,26 +1936,84 @@ function tipoEquipoIcon(nombre: string) {
                 <Boxes class="h-3 w-3" />{{ g.name }}
                 <span class="text-muted-foreground/60 font-normal normal-case">· {{ g.metrics.length }} métrica(s)</span>
               </div>
-              <div
-                v-for="m in g.metrics" :key="m.name"
-                class="flex items-start gap-3 px-3 py-2 hover:bg-muted/20"
-              >
-                <span class="h-1.5 w-1.5 rounded-full mt-1.5 shrink-0" :class="KIND_META[m.kind].dot"
-                  :title="KIND_META[m.kind].label" />
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <span class="font-mono text-xs font-medium text-foreground">{{ m.leaf }}</span>
-                    <span v-if="m.tipoVariable" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-muted border border-border text-muted-foreground">
-                      <Tag class="h-2.5 w-2.5" />{{ m.tipoVariable }}
-                    </span>
-                    <span v-if="m.engUnit" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_15%,transparent)] text-foreground font-semibold">
-                      <Ruler class="h-2.5 w-2.5" />{{ m.engUnit }}
-                    </span>
-                    <span v-if="m.tipoValor" class="text-[9px] px-1.5 py-0.5 rounded-sm border border-border text-muted-foreground italic">{{ m.tipoValor }}</span>
-                    <span v-if="m.deviceType" class="text-[9px] px-1.5 py-0.5 rounded-sm bg-violet-500/10 text-violet-400">{{ m.deviceType }}</span>
+              <div v-for="m in g.metrics" :key="m.name" class="px-3 py-2 hover:bg-muted/20">
+                <div class="flex items-start gap-3">
+                  <span class="h-1.5 w-1.5 rounded-full mt-1.5 shrink-0" :class="KIND_META[m.kind].dot"
+                    :title="KIND_META[m.kind].label" />
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="font-mono text-xs font-medium text-foreground">{{ m.leaf }}</span>
+                      <span v-if="m.tipoVariable" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-muted border border-border text-muted-foreground">
+                        <Tag class="h-2.5 w-2.5" />{{ m.tipoVariable }}
+                      </span>
+                      <span v-if="m.engUnit" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_15%,transparent)] text-foreground font-semibold">
+                        <Ruler class="h-2.5 w-2.5" />{{ m.engUnit }}
+                      </span>
+                      <span v-if="m.tipoValor" class="text-[9px] px-1.5 py-0.5 rounded-sm border border-border text-muted-foreground italic">{{ m.tipoValor }}</span>
+                      <span v-if="m.deviceType" class="text-[9px] px-1.5 py-0.5 rounded-sm bg-violet-500/10 text-violet-400">{{ m.deviceType }}</span>
+                    </div>
+                    <div class="font-mono text-[10px] text-muted-foreground truncate">{{ m.name }}</div>
+                    <div v-if="m.description" class="text-[11px] text-muted-foreground mt-0.5">{{ m.description }}</div>
                   </div>
-                  <div class="font-mono text-[10px] text-muted-foreground truncate">{{ m.name }}</div>
-                  <div v-if="m.description" class="text-[11px] text-muted-foreground mt-0.5">{{ m.description }}</div>
+
+                  <!-- per-signal action -->
+                  <div v-if="!approveReadOnly && m.kind === 'proceso'" class="shrink-0 flex items-center gap-2 pt-0.5">
+                    <template v-if="signalPlan[m.name]">
+                      <span v-if="signalPlan[m.name].status === 'catalog'"
+                        class="text-[9px] px-1.5 py-0.5 rounded-sm bg-blue-500/15 text-blue-400 font-bold uppercase tracking-wide">En catálogo</span>
+                      <span v-else
+                        class="text-[9px] px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-400 font-bold uppercase tracking-wide">Nueva</span>
+                      <label class="inline-flex items-center gap-1 text-[11px] cursor-pointer select-none"
+                        :class="signalPlan[m.name].codeTooLong ? 'opacity-40 cursor-not-allowed' : ''">
+                        <input type="checkbox" v-model="signalPlan[m.name].selected"
+                          :disabled="signalPlan[m.name].codeTooLong"
+                          class="h-3.5 w-3.5 accent-[color:var(--epm-bosque)]" />
+                        {{ signalPlan[m.name].status === 'catalog' ? 'Vincular' : 'Crear' }}
+                      </label>
+                    </template>
+                    <span v-else-if="approveForm.tipo_id"
+                      class="text-[9px] px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-500 font-bold uppercase tracking-wide inline-flex items-center gap-1">
+                      <CheckCircle2 class="h-3 w-3" />Mapeada
+                    </span>
+                  </div>
+                  <span v-else-if="!approveReadOnly && m.kind !== 'proceso'"
+                    class="shrink-0 text-[9px] text-muted-foreground italic pt-1">no aplica</span>
+                </div>
+
+                <!-- inline editor for a new señal -->
+                <div v-if="!approveReadOnly && signalPlan[m.name] && signalPlan[m.name].status === 'new' && signalPlan[m.name].selected"
+                  class="mt-2 ml-5 grid grid-cols-3 gap-2 rounded-sm bg-muted/30 border border-border p-2">
+                  <div class="grid gap-1">
+                    <Label class="text-[10px] text-muted-foreground">Variable *</Label>
+                    <Select v-model="signalPlan[m.name].tipovarId">
+                      <SelectTrigger class="rounded-sm h-7 text-xs"><SelectValue placeholder="— elegir —" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="tv in tipoVars" :key="tv.tipovar_id" :value="String(tv.tipovar_id)">{{ tv.nombre }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid gap-1">
+                    <Label class="text-[10px] text-muted-foreground">Unidad *</Label>
+                    <Select v-model="signalPlan[m.name].unidadId">
+                      <SelectTrigger class="rounded-sm h-7 text-xs"><SelectValue placeholder="— elegir —" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="u in unidades" :key="u.unidad_id" :value="String(u.unidad_id)">{{ u.simbolo }} · {{ u.nombre }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid gap-1">
+                    <Label class="text-[10px] text-muted-foreground">Tipo valor</Label>
+                    <Select v-model="signalPlan[m.name].tipoValor">
+                      <SelectTrigger class="rounded-sm h-7 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="Instantaneo">Instantáneo</SelectItem>
+                        <SelectItem value="Acumulado">Acumulado</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="col-span-3 text-[10px] text-muted-foreground">
+                    Se creará <span class="font-mono text-foreground">{{ signalPlan[m.name].code }}</span> en el catálogo y se añadirá a la plantilla del tipo.
+                  </div>
                 </div>
               </div>
             </div>
@@ -1771,10 +2032,12 @@ function tipoEquipoIcon(nombre: string) {
           v-if="!approveReadOnly"
           size="sm"
           class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm"
-          :disabled="!approveForm.planta_id || !approveForm.tipo_id"
+          :disabled="!approveForm.planta_id || !approveForm.tipo_id || !planValid"
           @click="submitApprove"
         >
-          <CheckCircle2 class="h-3.5 w-3.5 mr-1.5" /> Crear equipo · {{ reviewSummary.total }} señales
+          <CheckCircle2 class="h-3.5 w-3.5 mr-1.5" />
+          Crear equipo<span v-if="planSummary.willCreate || planSummary.willLink" class="font-normal opacity-90">
+            &nbsp;· +{{ planSummary.willCreate }} nuevas, {{ planSummary.willLink }} vinc.</span>
         </Button>
       </DialogFooter>
     </DialogContent>

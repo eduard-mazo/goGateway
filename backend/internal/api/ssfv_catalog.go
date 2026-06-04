@@ -1562,6 +1562,20 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 		TipoID       int    `json:"tipo_id"`
 		NombreEquipo string `json:"nombre_equipo"`
 		NombreTopic  string `json:"nombre_topic"`
+		// CreateSignals: metrics with no catalog entry. Each is inserted into
+		// ssfv.tbl_senales and linked to the tipo_equipo template so it is
+		// instantiated for this (and every future) equipo of the same type.
+		CreateSignals []struct {
+			CodigoSenal string  `json:"codigo_senal"`
+			Nombre      string  `json:"nombre"`
+			TipoVarID   int     `json:"tipavar_id"`
+			UnidadID    int     `json:"unidad_id"`
+			TipoValor   string  `json:"tipo_valor"`
+			Descripcion *string `json:"descripcion"`
+		} `json:"create_signals"`
+		// LinkSignals: existing catalog señal_ids to add to the tipo template
+		// (signal already exists but the type's plantilla didn't include it).
+		LinkSignals []int `json:"link_signals"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		errResp(w, http.StatusBadRequest, err.Error())
@@ -1607,6 +1621,68 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// ── New catalog signals (from NBIRTH metrics with no existing señal) ──
+	// Insert into ssfv.tbl_senales (strict: tipovar_id + unidad_id FKs required,
+	// tipo_valor CHECK, codigo_senal ≤20 chars) then attach to the tipo template.
+	// Idempotent via ON CONFLICT so re-approval never duplicates rows.
+	created := 0
+	for _, cs := range body.CreateSignals {
+		if cs.CodigoSenal == "" || cs.TipoVarID == 0 || cs.UnidadID == 0 {
+			continue // incomplete — skip rather than abort the whole approval
+		}
+		if len(cs.CodigoSenal) > 20 {
+			log.Printf("autodiscovery: skip signal %q — codigo_senal exceeds 20 chars", cs.CodigoSenal)
+			continue
+		}
+		tipoValor := cs.TipoValor
+		if tipoValor != "Instantaneo" && tipoValor != "Acumulado" {
+			tipoValor = "Instantaneo"
+		}
+		nombre := cs.Nombre
+		if nombre == "" {
+			nombre = cs.CodigoSenal
+		}
+		var senalID int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO ssfv.tbl_senales
+			    (tipovar_id, unidad_id, nombre, descripcion, tipo_valor, codigo_senal, es_indexada, activo)
+			VALUES ($1,$2,$3,$4,$5,$6,FALSE,TRUE)
+			ON CONFLICT (codigo_senal, tipovar_id) DO UPDATE SET
+			    nombre = EXCLUDED.nombre,
+			    activo = TRUE
+			RETURNING senal_id`,
+			cs.TipoVarID, cs.UnidadID, nombre, cs.Descripcion, tipoValor, cs.CodigoSenal).Scan(&senalID); err != nil {
+			log.Printf("autodiscovery: create signal %q: %v", cs.CodigoSenal, err)
+			continue
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+			VALUES ($1,$2,1)
+			ON CONFLICT (senal_id, tipo_id) DO NOTHING`, senalID, body.TipoID); err != nil {
+			log.Printf("autodiscovery: link new signal %d to tipo %d: %v", senalID, body.TipoID, err)
+			continue
+		}
+		created++
+	}
+
+	// ── Link existing catalog signals into the tipo template ──────────────
+	linked := 0
+	for _, senalID := range body.LinkSignals {
+		if senalID == 0 {
+			continue
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+			VALUES ($1,$2,1)
+			ON CONFLICT (senal_id, tipo_id) DO NOTHING`, senalID, body.TipoID); err != nil {
+			log.Printf("autodiscovery: link signal %d to tipo %d: %v", senalID, body.TipoID, err)
+			continue
+		}
+		linked++
+	}
+
+	// Instantiate the full tipo template (now including the just-linked signals)
+	// into ssfv.tbl_senales_x_equipo for this equipo. Idempotent.
 	if autoErr := h.autoInstanciarSenales(ctx, pool, equipoID, body.TipoID); autoErr != nil {
 		log.Printf("autodiscovery: auto-instanciar equipo %d: %v", equipoID, autoErr)
 	}
