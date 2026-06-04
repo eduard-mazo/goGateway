@@ -16,4 +16,7 @@ export default defineConfig({
       '/health': 'http://localhost:8081',
     },
   },
+  build: {
+    sourcemap: true,
+  },
 })

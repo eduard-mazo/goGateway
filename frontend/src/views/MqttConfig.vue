@@ -1,370 +1,502 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, nextTick } from 'vue'
+import { ref, onMounted, computed, reactive } from 'vue'
 import { toast } from 'vue-sonner'
-import { api, type MQTTConfig } from '@/api'
-import { t } from '@/i18n'
-import { useStatus } from '@/composables/useStatus'
-import StatusPill from '@/components/StatusPill.vue'
+import { api, type GatewaySignal, type Topic } from '@/api'
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { Button } from '@/components/ui/button'
 import {
-  Radio, RefreshCw, Save, Shield, Wifi, KeyRound, User, Zap,
-  Plus, X, Layers,
-} from 'lucide-vue-next'
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
+} from '@/components/ui/select'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from '@/components/ui/dialog'
+import { Plus, Pencil, Trash2, Layers, Database, Search, Radio, ArrowRight } from 'lucide-vue-next'
+import { useConfirm } from '@/composables/useConfirm'
 
-const { status } = useStatus()
+const { confirm } = useConfirm()
 
-const cfg = ref<MQTTConfig>({
-  id: 1, host: 'localhost', port: 1883, username: '', password: '',
-  client_id: 'goGateway', use_tls: false,
-  sparkplug_enabled: false, sp_group_id: 'goGateway', sp_host_id: 'goGateway-host',
-  sp_topics: '',
-})
-const saving = ref(false)
+const signals = ref<GatewaySignal[]>([])
+const topics = ref<Topic[]>([])
+const loading = ref(false)
+const search = ref('')
 
-// ── Sparkplug Group ID list ───────────────────────────────────────────────────
-const groupList   = ref<string[]>([])
-const groupInputs = ref<HTMLInputElement[]>([])
+const topicById = computed(() => Object.fromEntries(topics.value.map(t => [t.id, t])))
 
-function parseGroups(raw: string): string[] {
-  return raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean)
-}
-
-function syncGroups() {
-  cfg.value.sp_group_id = groupList.value.filter(s => s.trim()).join('\n')
-}
-
-function addGroup() {
-  groupList.value.push('')
-  nextTick(() => {
-    const last = groupInputs.value[groupList.value.length - 1]
-    last?.focus()
+const filtered = computed(() => {
+  const q = search.value.trim().toLowerCase()
+  if (!q) return signals.value
+  return signals.value.filter(s => {
+    const topic = topicById.value[s.topic_id]
+    return [s.name, s.json_key, s.metric_name, s.variable_type, s.unit, topic?.topic ?? '']
+      .some(v => v.toLowerCase().includes(q))
   })
-}
+})
 
-function removeGroup(i: number) {
-  groupList.value.splice(i, 1)
-  if (groupList.value.length === 0) groupList.value = ['']
-  syncGroups()
-}
+// Topics with no signals yet (for the onboarding quick-add row)
+const topicsWithSignals = computed(() => new Set(signals.value.map(s => s.topic_id)))
+const unseenTopics = computed(() => topics.value.filter(t => !topicsWithSignals.value.has(t.id)))
 
-function updateGroup(i: number, val: string) {
-  groupList.value[i] = val
-  syncGroups()
-}
-
-function onGroupKey(e: KeyboardEvent, i: number) {
-  if (e.key === 'Enter') {
-    e.preventDefault()
-    groupList.value.splice(i + 1, 0, '')
-    nextTick(() => groupInputs.value[i + 1]?.focus())
-  } else if (e.key === 'Backspace' && groupList.value[i] === '' && groupList.value.length > 1) {
-    e.preventDefault()
-    groupList.value.splice(i, 1)
-    syncGroups()
-    nextTick(() => groupInputs.value[Math.max(0, i - 1)]?.focus())
+function empty(): GatewaySignal {
+  return {
+    id: 0, topic_id: 0, name: '', json_key: '', metric_name: '',
+    quality_key: '', variable_type: '', characteristic: '', unit: '',
+    scale: 1.0, persist_to_db: false, enabled: true,
   }
 }
 
-// ── Load / save ───────────────────────────────────────────────────────────────
-async function load() {
+// ── Multi-select ─────────────────────────────────────────────────────────────
+const selectedSignals = reactive(new Set<number>())
+const allFilteredSelected = computed(() =>
+  filtered.value.length > 0 && filtered.value.every(s => selectedSignals.has(s.id))
+)
+function toggleSelectAllSignals() {
+  if (allFilteredSelected.value) filtered.value.forEach(s => selectedSignals.delete(s.id))
+  else filtered.value.forEach(s => selectedSignals.add(s.id))
+}
+function toggleSelectSignal(id: number) {
+  if (selectedSignals.has(id)) selectedSignals.delete(id)
+  else selectedSignals.add(id)
+}
+async function delSelectedSignals() {
+  const ids = [...selectedSignals]
+  const ok = await confirm({
+    title: 'Eliminar señales',
+    message: `Elimina ${ids.length} señal${ids.length === 1 ? '' : 'es'}. Los mapeos IEC-104 que las referencien quedarán sin signal_id.`,
+    variant: 'danger',
+    confirmText: `Eliminar ${ids.length}`,
+  })
+  if (!ok) return
   try {
-    cfg.value = (await api.get<MQTTConfig>('/mqtt-config')).data
-    const groups = parseGroups(cfg.value.sp_group_id || '')
-    groupList.value = groups.length > 0 ? groups : ['goGateway']
-  } catch (e: any) {
-    toast.error('Load failed: ' + (e?.message ?? e))
-  }
+    await Promise.all(ids.map(id => api.delete(`/gateway-signals/${id}`)))
+    ids.forEach(id => selectedSignals.delete(id))
+    await reload()
+    toast.success(`${ids.length} señal${ids.length === 1 ? '' : 'es'} eliminada${ids.length === 1 ? '' : 's'}`)
+  } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
+}
+
+const dialogOpen = ref(false)
+const editing = reactive<GatewaySignal>(empty())
+const isEdit = computed(() => editing.id > 0)
+
+function openCreate(presetTopicId = 0) {
+  Object.assign(editing, empty())
+  if (presetTopicId) editing.topic_id = presetTopicId
+  else if (topics.value.length === 1) editing.topic_id = topics.value[0].id
+  dialogOpen.value = true
+}
+
+function openEdit(s: GatewaySignal) {
+  Object.assign(editing, { ...s })
+  dialogOpen.value = true
+}
+
+function validate(): string | null {
+  if (!editing.topic_id) return 'Topic es requerido'
+  if (!editing.name.trim()) return 'Nombre es requerido'
+  if (!editing.json_key.trim() && !editing.metric_name.trim()) return 'JSON key o Metric name es requerido'
+  return null
 }
 
 async function save() {
-  syncGroups()
-  saving.value = true
+  const err = validate()
+  if (err) { toast.error(err); return }
+  if (editing.scale === 0) editing.scale = 1.0
   try {
-    cfg.value = (await api.put<MQTTConfig>('/mqtt-config', cfg.value)).data
-    const groups = parseGroups(cfg.value.sp_group_id || '')
-    groupList.value = groups.length > 0 ? groups : ['goGateway']
-    toast.success(t.mqtt.saved)
+    if (isEdit.value) {
+      await api.put(`/gateway-signals/${editing.id}`, editing)
+      toast.success(`Señal "${editing.name}" actualizada`)
+    } else {
+      await api.post('/gateway-signals', editing)
+      toast.success(`Señal "${editing.name}" creada`)
+    }
+    dialogOpen.value = false
+    await reload()
   } catch (e: any) {
-    toast.error(t.mqtt.saveFailed + (e?.response?.data?.error ?? e?.message ?? e))
-  } finally { saving.value = false }
+    toast.error(e?.response?.data?.error ?? e?.message ?? 'Error')
+  }
 }
 
-onMounted(load)
-
-const brokerState = computed<'ok' | 'warn' | 'fault' | 'idle'>(() => {
-  if (!status.value) return 'idle'
-  return status.value.mqtt.connected ? 'ok' : 'fault'
-})
-
-const brokerUri = computed(() => {
-  if (!cfg.value.host) return '—'
-  const scheme = cfg.value.use_tls ? 'ssl' : 'tcp'
-  return `${scheme}://${cfg.value.host}:${cfg.value.port || 1883}`
-})
-
-function fmtAgo(ts?: number | null) {
-  if (!ts) return '—'
-  const diff = (Date.now() - ts * 1000) / 1000
-  if (diff < 60) return `${Math.round(diff)}s ago`
-  if (diff < 3600) return `${Math.round(diff / 60)}m ago`
-  return `${Math.round(diff / 3600)}h ago`
+async function toggleEnabled(s: GatewaySignal) {
+  try {
+    await api.put(`/gateway-signals/${s.id}`, { ...s, enabled: !s.enabled })
+    await reload()
+  } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
 }
+
+async function togglePersist(s: GatewaySignal) {
+  try {
+    await api.put(`/gateway-signals/${s.id}`, { ...s, persist_to_db: !s.persist_to_db })
+    await reload()
+  } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
+}
+
+async function del(s: GatewaySignal) {
+  const ok = await confirm({
+    title: 'Eliminar señal',
+    message: 'Los mapeos IEC-104 que la referencian quedarán sin signal_id (no se eliminan).',
+    detail: `${s.name} · tópico #${s.topic_id}`,
+    variant: 'danger',
+    confirmText: 'Eliminar',
+  })
+  if (!ok) return
+  try {
+    await api.delete(`/gateway-signals/${s.id}`)
+    await reload()
+    toast.success('Señal eliminada')
+  } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
+}
+
+async function reload() {
+  loading.value = true
+  try {
+    const [sg, tp] = await Promise.all([
+      api.get<GatewaySignal[]>('/gateway-signals'),
+      api.get<Topic[]>('/topics'),
+    ])
+    signals.value = sg.data ?? []
+    topics.value = tp.data ?? []
+  } catch (e: any) { toast.error('Load: ' + (e?.message ?? e)) }
+  finally { loading.value = false }
+}
+
+onMounted(reload)
 </script>
 
 <template>
-  <div class="p-4 sm:p-6 lg:p-8 space-y-6 sm:space-y-8 max-w-5xl">
-
-    <!-- Hero / live broker status -->
-    <section class="card-soft overflow-hidden">
-      <div class="grid grid-cols-12 gap-6 p-8">
-        <div class="col-span-12 md:col-span-7">
-          <div class="flex items-center gap-3 mb-3">
-            <div class="grid place-items-center w-10 h-10 rounded-sm bg-[color:var(--epm-bosque)] text-white">
-              <Radio class="h-5 w-5" />
-            </div>
-            <span class="text-[11px] uppercase tracking-[0.26em] font-bold text-[color:var(--epm-bosque)]">
-              {{ t.mqtt.hero }}
-            </span>
-          </div>
-          <h1 class="mb-2">{{ t.mqtt.title }}</h1>
-          <div class="font-mono text-lg mt-2 text-[color:var(--epm-bosque)] font-bold break-all">
-            {{ status?.mqtt.broker || brokerUri }}
-          </div>
-          <p class="mt-3 text-sm text-muted-foreground max-w-xl">
-            {{ t.mqtt.desc }}
+  <div class="p-4 sm:p-6 lg:p-8 space-y-6">
+    <!-- Page header -->
+    <div class="flex items-start justify-between border-b border-border pb-5">
+      <div class="flex items-start gap-3">
+        <div class="grid place-items-center w-9 h-9 rounded-sm bg-[color:var(--epm-bosque)] text-white shrink-0">
+          <Layers class="h-4 w-4" />
+        </div>
+        <div>
+          <div class="text-[10px] uppercase tracking-[0.24em] font-bold text-[color:var(--epm-bosque)]">Paso 2 de 4</div>
+          <h1 class="mt-1 mb-1 text-2xl font-extrabold">Señales SSFV</h1>
+          <p class="text-sm text-muted-foreground">
+            Define señales lógicas desde los tópicos MQTT. Activa
+            <strong>Persistir en DB</strong> para enviar muestras al pipeline TSDB (TimescaleDB / VictoriaMetrics).
           </p>
         </div>
-        <div class="col-span-12 md:col-span-5 flex flex-col gap-3 md:items-end">
-          <StatusPill :state="brokerState" :label="brokerState === 'ok' ? t.status.connected : (brokerState === 'idle' ? t.status.idle : t.status.down)" />
-          <div class="chip font-mono text-xs">
-            <Wifi class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" />
-            {{ status?.mqtt.topics ?? 0 }} {{ t.mqtt.topics }}
-          </div>
-          <div class="chip font-mono text-xs">
-            <span class="h-2 w-2 rounded-sm bg-[color:var(--epm-citrico)]" />
-            {{ (status?.mqtt.messages ?? 0).toLocaleString() }} {{ t.mqtt.msgsIn }}
-          </div>
-          <div class="text-[11px] text-muted-foreground font-mono mt-1">
-            {{ t.mqtt.lastMsg }} {{ fmtAgo(status?.mqtt.last_msg_at) }}
+      </div>
+      <Button
+        class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm px-4"
+        @click="openCreate()"
+      >
+        <Plus class="h-4 w-4 mr-1" /> Nueva señal
+      </Button>
+    </div>
+
+    <!-- No topics configured at all -->
+    <div v-if="!topics.length" class="card-soft p-8 text-center space-y-3">
+      <Radio class="h-8 w-8 text-muted-foreground mx-auto" />
+      <p class="font-semibold">Sin tópicos MQTT configurados</p>
+      <p class="text-sm text-muted-foreground">
+        Ve al <strong>Paso 1 – Tópicos y Suscripciones</strong> y agrega al menos un tópico antes de definir señales.
+      </p>
+    </div>
+
+    <template v-else>
+      <!-- Onboarding prompt when no signals exist yet -->
+      <div v-if="!signals.length" class="card-soft overflow-hidden">
+        <div class="px-6 py-5 border-b border-border bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
+          <h3 class="font-bold text-sm flex items-center gap-2">
+            <ArrowRight class="h-4 w-4 text-[color:var(--epm-bosque)]" />
+            Empieza definiendo señales desde tus tópicos
+          </h3>
+          <p class="text-xs text-muted-foreground mt-1">
+            Cada señal extrae un campo del payload MQTT y lo normaliza para IEC-104 e histórico.
+          </p>
+        </div>
+        <div class="divide-y divide-border">
+          <div
+            v-for="t in topics"
+            :key="t.id"
+            class="flex items-center gap-3 px-6 py-3 hover:bg-muted/40 transition-colors"
+          >
+            <Radio class="h-4 w-4 text-muted-foreground shrink-0" />
+            <span class="flex-1 font-mono text-sm truncate">{{ t.topic }}</span>
+            <span
+              class="rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+              :class="t.payload_format === 'sparkplug'
+                ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'"
+            >{{ t.payload_format === 'sparkplug' ? 'SpB' : 'JSON' }}</span>
+            <Button
+              size="sm" variant="outline"
+              class="rounded-sm text-xs h-7 shrink-0"
+              @click="openCreate(t.id)"
+            >
+              <Plus class="h-3 w-3 mr-1" /> Agregar señal
+            </Button>
           </div>
         </div>
       </div>
-    </section>
 
-    <!-- Config form -->
-    <section class="card-soft overflow-hidden">
-      <div class="flex items-center justify-between px-6 py-5 border-b border-border">
-        <div>
-          <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">{{ t.mqtt.config }}</div>
-          <div class="font-sans text-lg font-extrabold tracking-tight mt-1">{{ t.mqtt.brokerConn }}</div>
-        </div>
-        <div class="text-xs text-muted-foreground">
-          {{ t.mqtt.topicsLive }} <span class="font-bold text-[color:var(--epm-bosque)]">{{ t.nav.devices }}</span>.
-        </div>
-      </div>
-
-      <div class="p-6 space-y-5">
-
-        <!-- Host + Port -->
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div class="sm:col-span-2 space-y-1.5">
-            <Label for="host" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.host }}</Label>
-            <Input id="host" v-model="cfg.host" placeholder="broker.local" class="rounded-sm" />
+      <!-- Signals table (shown once at least one signal exists) -->
+      <template v-else>
+        <!-- Toolbar -->
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="relative flex-1 min-w-[200px] max-w-md">
+            <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Input
+              v-model="search"
+              placeholder="Buscar señal, key, tópico…"
+              class="pl-8 rounded-sm font-mono text-xs"
+            />
           </div>
-          <div class="space-y-1.5">
-            <Label for="port" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.port }}</Label>
-            <Input id="port" v-model.number="cfg.port" type="number" class="rounded-sm" />
-          </div>
-        </div>
-
-        <!-- Credentials -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div class="space-y-1.5">
-            <Label for="user" class="text-[11px] uppercase tracking-[0.18em] font-bold inline-flex items-center gap-1.5">
-              <User class="h-3 w-3" /> {{ t.mqtt.username }}
-            </Label>
-            <Input id="user" v-model="cfg.username" autocomplete="off" class="rounded-sm" />
-          </div>
-          <div class="space-y-1.5">
-            <Label for="pwd" class="text-[11px] uppercase tracking-[0.18em] font-bold inline-flex items-center gap-1.5">
-              <KeyRound class="h-3 w-3" /> {{ t.mqtt.password }}
-            </Label>
-            <Input id="pwd" v-model="cfg.password" type="password" autocomplete="new-password" class="rounded-sm" />
+          <div class="flex items-center gap-2 ml-auto">
+            <span class="text-[11px] text-muted-foreground font-mono">
+              {{ filtered.length }} / {{ signals.length }} señales
+            </span>
+            <Button
+              v-if="selectedSignals.size > 0"
+              size="sm" variant="destructive"
+              class="rounded-sm h-7 text-xs"
+              @click="delSelectedSignals"
+            >
+              <Trash2 class="h-3.5 w-3.5 mr-1" /> Eliminar ({{ selectedSignals.size }})
+            </Button>
           </div>
         </div>
 
-        <!-- Client ID -->
-        <div class="space-y-1.5">
-          <Label for="cid" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.clientId }}</Label>
-          <Input id="cid" v-model="cfg.client_id" class="rounded-sm font-mono" />
-        </div>
-
-        <!-- TLS -->
-        <div class="flex items-center gap-3 pt-2 p-4 rounded-lg bg-[color:color-mix(in_srgb,var(--epm-citrico)_10%,transparent)] border border-[color:color-mix(in_srgb,var(--epm-bosque)_15%,transparent)]">
-          <Switch id="tls" v-model="cfg.use_tls" />
-          <div class="flex-1">
-            <Label for="tls" class="font-bold inline-flex items-center gap-1.5">
-              <Shield class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" /> {{ t.mqtt.tls }}
-            </Label>
-            <div class="text-xs text-muted-foreground mt-0.5">{{ t.mqtt.tlsDesc }}</div>
-          </div>
-        </div>
-
-        <!-- Sparkplug B -->
-        <div class="rounded-lg border border-[color:color-mix(in_srgb,var(--epm-bosque)_20%,transparent)] overflow-hidden">
-          <div class="flex items-center gap-3 px-4 py-3 bg-[color:color-mix(in_srgb,var(--epm-bosque)_6%,transparent)]">
-            <Switch id="sp" v-model="cfg.sparkplug_enabled" />
-            <div class="flex-1">
-              <Label for="sp" class="font-bold inline-flex items-center gap-1.5">
-                <Zap class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" /> {{ t.mqtt.sparkplug }}
-              </Label>
-              <div class="text-xs text-muted-foreground mt-0.5">{{ t.mqtt.sparkplugDesc }}</div>
-            </div>
-          </div>
-
-          <div v-if="cfg.sparkplug_enabled"
-               class="px-4 pb-4 pt-3 border-t border-[color:color-mix(in_srgb,var(--epm-bosque)_12%,transparent)] space-y-4">
-
-            <!-- Host ID -->
-            <div class="space-y-1.5">
-              <Label for="sp_host" class="text-[11px] uppercase tracking-[0.18em] font-bold">{{ t.mqtt.hostId }}</Label>
-              <Input id="sp_host" v-model="cfg.sp_host_id" placeholder="goGateway-host" class="rounded-sm font-mono" />
-              <p class="text-[11px] text-muted-foreground">
-                STATE topic: <span class="font-mono">STATE/{{ cfg.sp_host_id || '…' }}</span>
-              </p>
-            </div>
-
-            <!-- Group ID list -->
-            <div class="space-y-2">
-              <div class="flex items-center justify-between">
-                <Label class="text-[11px] uppercase tracking-[0.18em] font-bold inline-flex items-center gap-1.5">
-                  <Layers class="h-3 w-3 text-[color:var(--epm-citrico)]" />
-                  {{ t.mqtt.groupId }}
-                </Label>
-                <span class="text-[10px] font-mono text-muted-foreground">
-                  {{ groupList.filter(g => g.trim()).length }} grupo{{ groupList.filter(g => g.trim()).length !== 1 ? 's' : '' }}
-                </span>
-              </div>
-
-              <!-- Group rows -->
-              <div class="rounded-sm border border-border overflow-hidden bg-card">
-                <div class="flex items-center gap-0 px-0 py-1.5 border-b border-border bg-muted/40">
-                  <span class="w-8 shrink-0" />
-                  <span class="flex-1 text-[9px] uppercase tracking-[0.22em] font-bold text-muted-foreground px-2">
-                    ID de grupo Sparkplug B
-                  </span>
-                  <span class="flex-[1.4] text-[9px] uppercase tracking-[0.22em] font-bold text-muted-foreground px-2">
-                    Suscripción resultante
-                  </span>
-                  <span class="w-8 shrink-0" />
-                </div>
-
-                <div
-                  v-for="(gid, i) in groupList"
-                  :key="i"
-                  class="group-row group flex items-center border-b border-border/50 last:border-b-0
-                         focus-within:bg-[color:color-mix(in_srgb,var(--epm-bosque)_4%,transparent)]
-                         hover:bg-muted/20 transition-colors"
-                >
-                  <!-- Row index -->
-                  <span class="w-8 shrink-0 text-center text-[10px] font-mono tabular-nums
-                               text-[color:var(--epm-citrico)] opacity-60 select-none">
-                    {{ i + 1 }}
-                  </span>
-
-                  <!-- Editable group ID -->
-                  <input
-                    :ref="(el) => { if (el) groupInputs[i] = el as HTMLInputElement }"
-                    :value="gid"
-                    spellcheck="false"
-                    autocomplete="off"
-                    placeholder="goGateway"
-                    class="flex-1 min-w-0 bg-transparent py-2.5 pr-2 text-xs font-mono
-                           text-foreground placeholder:text-muted-foreground/35
-                           focus:outline-none"
-                    @input="updateGroup(i, ($event.target as HTMLInputElement).value)"
-                    @keydown="onGroupKey($event, i)"
-                  />
-
-                  <!-- Wildcard preview -->
-                  <span class="flex-[1.4] min-w-0 py-2.5 px-2 text-[11px] font-mono
-                               text-[color:var(--epm-bosque)] opacity-60 truncate select-none">
-                    spBv1.0/{{ gid.trim() || '…' }}/#
-                  </span>
-
-                  <!-- Delete button -->
-                  <button
-                    class="w-8 shrink-0 flex items-center justify-center py-2.5
-                           opacity-0 group-hover:opacity-100 focus-visible:opacity-100
-                           text-muted-foreground/50 hover:text-destructive transition-all"
-                    :title="`Eliminar grupo ${i + 1}`"
-                    :disabled="groupList.length === 1"
-                    @click="removeGroup(i)"
-                  >
-                    <X class="h-3 w-3" />
-                  </button>
-                </div>
-              </div>
-
-              <!-- Add group button -->
-              <button
-                class="add-btn flex items-center gap-1.5 text-xs font-medium
-                       text-[color:var(--epm-bosque)] hover:text-[color:var(--epm-bosque-deep)]
-                       transition-colors mt-1 px-0.5"
-                @click="addGroup"
-              >
-                <span class="grid place-items-center w-4 h-4 rounded-sm
-                             bg-[color:color-mix(in_srgb,var(--epm-bosque)_15%,transparent)]
-                             border border-[color:color-mix(in_srgb,var(--epm-bosque)_30%,transparent)]">
-                  <Plus class="h-2.5 w-2.5" />
-                </span>
-                Agregar grupo
-              </button>
-
-              <p class="text-[11px] text-muted-foreground leading-relaxed">
-                Cada grupo se suscribe como <span class="font-mono text-[color:var(--epm-bosque)]">spBv1.0/{groupID}/#</span>.
-                <span class="text-[color:var(--epm-citrico)] font-mono text-[10px]">Enter</span> = nuevo grupo ·
-                <span class="text-[color:var(--epm-citrico)] font-mono text-[10px]">Backspace</span> = elimina si vacío.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <!-- URI preview -->
-        <div class="font-mono text-[11px] text-muted-foreground border-t border-border pt-4">
-          {{ t.mqtt.uriPreview }} · <span class="text-[color:var(--epm-bosque)] font-bold">{{ brokerUri }}</span>
-        </div>
-      </div>
-
-      <!-- Footer actions -->
-      <div class="px-6 py-4 border-t border-border flex gap-2 bg-[color:color-mix(in_srgb,var(--epm-citrico)_5%,transparent)]">
-        <Button
-          :disabled="saving"
-          @click="save"
-          class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm px-6"
+        <!-- Quick-add strip for topics with no signal yet -->
+        <div
+          v-if="unseenTopics.length"
+          class="rounded-sm border border-dashed border-[color:var(--epm-citrico)] bg-[color:color-mix(in_srgb,var(--epm-citrico)_5%,transparent)] px-4 py-3 flex flex-wrap gap-2 items-center"
         >
-          <Save class="h-4 w-4 mr-2" /> {{ saving ? t.mqtt.saving : t.mqtt.save }}
-        </Button>
-        <Button variant="outline" @click="load" class="rounded-sm">
-          <RefreshCw class="h-4 w-4 mr-2" /> {{ t.mqtt.reload }}
-        </Button>
-      </div>
-    </section>
+          <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-[color:var(--epm-bosque)] shrink-0">
+            Tópicos sin señales:
+          </span>
+          <button
+            v-for="t in unseenTopics"
+            :key="t.id"
+            class="inline-flex items-center gap-1.5 font-mono text-xs rounded-sm border border-border bg-card px-2 py-0.5 hover:border-[color:var(--epm-bosque)] hover:text-[color:var(--epm-bosque)] transition-colors"
+            @click="openCreate(t.id)"
+          >
+            <Plus class="h-3 w-3" /> {{ t.topic }}
+          </button>
+        </div>
+
+        <Card class="card-soft">
+          <CardHeader class="pb-3">
+            <CardTitle>Señales definidas</CardTitle>
+            <CardDescription>
+              Cada señal normaliza un campo del payload MQTT hacia el pipeline interno.
+              La columna <strong>DB</strong> indica si los valores se envían al pipeline TSDB (TimescaleDB / VictoriaMetrics).
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="p-0">
+            <div class="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)]">
+                    <TableHead class="w-10 pl-4">
+                      <input
+                        type="checkbox"
+                        class="h-4 w-4 rounded-sm border border-border cursor-pointer accent-[color:var(--epm-bosque)]"
+                        :checked="allFilteredSelected"
+                        :indeterminate="selectedSignals.size > 0 && !allFilteredSelected"
+                        @change="toggleSelectAllSignals"
+                      />
+                    </TableHead>
+                    <TableHead class="pl-2 text-[10px] uppercase tracking-[0.2em] font-bold">Nombre</TableHead>
+                    <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Tópico</TableHead>
+                    <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Señal / Key</TableHead>
+                    <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Variable</TableHead>
+                    <TableHead class="text-right text-[10px] uppercase tracking-[0.2em] font-bold">Escala</TableHead>
+                    <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">Ud.</TableHead>
+                    <TableHead class="w-20 text-center text-[10px] uppercase tracking-[0.2em] font-bold">
+                      <span class="inline-flex items-center gap-1"><Database class="h-3 w-3" /> DB</span>
+                    </TableHead>
+                    <TableHead class="w-14 text-[10px] uppercase tracking-[0.2em] font-bold">On</TableHead>
+                    <TableHead class="w-20 pr-6 text-right text-[10px] uppercase tracking-[0.2em] font-bold">Acc.</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow v-if="!filtered.length">
+                    <TableCell colspan="10" class="text-center text-muted-foreground py-8 text-sm">
+                      {{ search ? 'Sin coincidencias.' : 'Sin señales.' }}
+                    </TableCell>
+                  </TableRow>
+                  <TableRow
+                    v-for="s in filtered"
+                    :key="s.id"
+                    class="data-row border-b border-border/60"
+                    :class="selectedSignals.has(s.id) ? 'bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]' : ''"
+                  >
+                    <TableCell class="pl-4">
+                      <input
+                        type="checkbox"
+                        class="h-4 w-4 rounded-sm border border-border cursor-pointer accent-[color:var(--epm-bosque)]"
+                        :checked="selectedSignals.has(s.id)"
+                        @change="toggleSelectSignal(s.id)"
+                      />
+                    </TableCell>
+                    <TableCell class="pl-2 font-semibold text-sm">{{ s.name }}</TableCell>
+                    <TableCell class="font-mono text-xs text-muted-foreground truncate max-w-[180px]">
+                      {{ topicById[s.topic_id]?.topic ?? `#${s.topic_id}` }}
+                    </TableCell>
+                    <TableCell class="font-mono text-xs">
+                      <template v-if="s.metric_name">
+                        <span class="text-blue-600 dark:text-blue-400">{{ s.metric_name }}</span>
+                        <span class="text-[10px] text-muted-foreground ml-1">spB</span>
+                      </template>
+                      <template v-else>{{ s.json_key }}</template>
+                    </TableCell>
+                    <TableCell class="text-xs text-muted-foreground">{{ s.variable_type || '—' }}</TableCell>
+                    <TableCell class="text-right font-mono text-xs tabular-nums">{{ s.scale }}</TableCell>
+                    <TableCell class="text-xs text-muted-foreground">{{ s.unit || '—' }}</TableCell>
+                    <TableCell class="text-center">
+                      <button
+                        type="button"
+                        class="inline-flex items-center justify-center gap-1 rounded-sm px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors border w-14"
+                        :class="s.persist_to_db
+                          ? 'bg-[color:color-mix(in_srgb,var(--epm-bosque)_12%,transparent)] border-[color:var(--epm-bosque)] text-[color:var(--epm-bosque)]'
+                          : 'border-border text-muted-foreground hover:border-[color:var(--epm-bosque)] hover:text-[color:var(--epm-bosque)]'"
+                        :title="s.persist_to_db ? 'Click para desactivar pipeline TSDB' : 'Click para activar pipeline TSDB'"
+                        @click="togglePersist(s)"
+                      >
+                        <Database class="h-3 w-3 shrink-0" />
+                        {{ s.persist_to_db ? 'Sí' : 'No' }}
+                      </button>
+                    </TableCell>
+                    <TableCell>
+                      <Switch :model-value="s.enabled" @update:model-value="() => toggleEnabled(s)" />
+                    </TableCell>
+                    <TableCell class="pr-6 text-right whitespace-nowrap">
+                      <Button variant="ghost" size="icon" @click="openEdit(s)"><Pencil class="h-4 w-4" /></Button>
+                      <Button variant="ghost" size="icon" @click="del(s)" class="text-[color:var(--destructive)]"><Trash2 class="h-4 w-4" /></Button>
+                    </TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      </template>
+    </template>
+
+    <!-- ── Create / Edit dialog ──────────────────────────────────────────── -->
+    <Dialog v-model:open="dialogOpen">
+      <DialogContent class="!max-w-lg sm:!max-w-xl p-0 overflow-hidden">
+        <!-- Accent header -->
+        <div class="px-6 pt-6 pb-4 border-b border-border bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)]">
+          <DialogHeader class="text-left space-y-1">
+            <DialogTitle class="text-lg font-extrabold tracking-tight flex items-center gap-2">
+              <Layers class="h-4 w-4 text-[color:var(--epm-bosque)]" />
+              {{ isEdit ? `Editar señal #${editing.id}` : 'Nueva señal SSFV' }}
+            </DialogTitle>
+            <DialogDescription class="text-xs">
+              Define la señal lógica: tópico fuente, campo del payload y si se envía al pipeline TSDB.
+            </DialogDescription>
+          </DialogHeader>
+        </div>
+
+        <!-- Body -->
+        <div class="px-6 py-5 grid grid-cols-6 gap-x-4 gap-y-4">
+          <!-- Topic selector -->
+          <div class="col-span-6 space-y-1.5">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Tópico fuente</Label>
+            <Select v-model="editing.topic_id">
+              <SelectTrigger class="w-full font-mono text-xs">
+                <SelectValue placeholder="Selecciona un tópico…" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="t in topics" :key="t.id" :value="t.id" class="font-mono text-xs">
+                  <span
+                    class="mr-2 inline-block rounded-sm px-1.5 py-0.5 text-[9px] font-bold uppercase"
+                    :class="t.payload_format === 'sparkplug'
+                      ? 'bg-blue-100 text-blue-700'
+                      : 'bg-emerald-100 text-emerald-700'"
+                  >{{ t.payload_format === 'sparkplug' ? 'SpB' : 'JSON' }}</span>
+                  {{ t.topic }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <!-- Name -->
+          <div class="col-span-6 space-y-1.5">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Nombre de la señal</Label>
+            <Input v-model="editing.name" placeholder="Potencia activa INV-1" />
+          </div>
+
+          <!-- JSON key / Sparkplug metric -->
+          <div class="col-span-3 space-y-1.5">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">
+              JSON key
+              <span class="ml-1 normal-case font-normal text-muted-foreground tracking-normal">modo JSON</span>
+            </Label>
+            <Input v-model="editing.json_key" placeholder="P" class="font-mono" />
+          </div>
+          <div class="col-span-3 space-y-1.5">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">
+              Metric name
+              <span class="ml-1 normal-case font-normal text-muted-foreground tracking-normal">Sparkplug B</span>
+            </Label>
+            <Input v-model="editing.metric_name" placeholder="outputs/power" class="font-mono" />
+          </div>
+
+          <!-- Quality key + variable type -->
+          <div class="col-span-3 space-y-1.5">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">
+              Quality key
+              <span class="ml-1 normal-case font-normal text-muted-foreground tracking-normal">opcional</span>
+            </Label>
+            <Input v-model="editing.quality_key" placeholder="quality" class="font-mono" />
+          </div>
+          <div class="col-span-3 space-y-1.5">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Tipo de variable</Label>
+            <Input v-model="editing.variable_type" placeholder="Potencia activa" />
+          </div>
+
+          <!-- Unit + Scale -->
+          <div class="col-span-3 space-y-1.5">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Unidad</Label>
+            <Input v-model="editing.unit" placeholder="kW, A, V…" />
+          </div>
+          <div class="col-span-3 space-y-1.5">
+            <Label class="text-[11px] uppercase tracking-[0.18em] font-bold">Escala</Label>
+            <Input v-model.number="editing.scale" type="number" step="0.001" />
+          </div>
+
+          <!-- Persist to DB — prominent -->
+          <div class="col-span-6 flex items-center justify-between rounded-sm border border-border px-4 py-3 bg-muted/30">
+            <div>
+              <div class="font-semibold text-sm flex items-center gap-2">
+                <Database class="h-4 w-4 text-[color:var(--epm-bosque)]" />
+                Persistir en pipeline TSDB
+              </div>
+              <p class="text-xs text-muted-foreground mt-0.5">
+                Envía cada muestra al pipeline TSDB (TimescaleDB / VictoriaMetrics). Desactiva si solo necesitas reenvío IEC-104.
+              </p>
+            </div>
+            <Switch id="persist" v-model="editing.persist_to_db" />
+          </div>
+
+          <!-- Enabled -->
+          <div class="col-span-6 flex items-center gap-3">
+            <Switch id="en" v-model="editing.enabled" />
+            <Label for="en" class="text-sm">Habilitada</Label>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="px-6 pb-6 pt-4 border-t border-border flex justify-end gap-2">
+          <Button variant="outline" class="rounded-sm" @click="dialogOpen = false">Cancelar</Button>
+          <Button
+            class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm"
+            @click="save"
+          >
+            {{ isEdit ? 'Guardar cambios' : 'Crear señal' }}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
-
-<style scoped>
-/* Left accent bar on focused group row */
-.group-row:focus-within {
-  box-shadow: inset 2px 0 0 0 var(--epm-bosque);
-}
-
-/* Add button hover: icon background pulses to citric */
-.add-btn:hover span:first-child {
-  background-color: color-mix(in srgb, var(--epm-citrico) 20%, transparent);
-  border-color: color-mix(in srgb, var(--epm-citrico) 40%, transparent);
-}
-</style>

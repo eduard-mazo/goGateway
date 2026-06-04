@@ -42,6 +42,13 @@ func NewSSFVMappingCache() *SSFVMappingCache {
 
 // Reload loads all active signal-equipo mappings from the ssfv schema.
 // Safe to call repeatedly; replaces the map atomically.
+//
+// Two passes:
+//  1. Signal routing map  — equipo+señal rows used for value dispatch.
+//  2. Known-topics set    — ALL active equipos, including those with no
+//     signals yet. Equipos absent from the set are silently ignored by
+//     IsTopic(); including them ensures their metrics appear in "Descartados"
+//     instead of being dropped.
 func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 	if pool == nil {
 		return nil
@@ -49,6 +56,7 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	// Pass 1: signal routing entries.
 	rows, err := pool.Query(ctx, `
 		SELECT
 		    sxe.equisenal_id,
@@ -85,13 +93,36 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 		newData[key] = m
 		newTopics[m.NombreTopic] = struct{}{}
 	}
+	rows.Close()
+
+	// Pass 2: add every active equipo to the known-topics set even when it has
+	// no signal instances (e.g. just approved from autodiscovery, or its
+	// tipo_equipo has an empty junction table). This guarantees IsTopic()
+	// returns true for all configured equipment so misses are visible.
+	equipoRows, err := pool.Query(ctx, `
+		SELECT e.nombre_topic
+		FROM ssfv.tbl_equipo e
+		JOIN ssfv.tbl_planta p ON p.planta_id = e.planta_id
+		WHERE e.estado = 1 AND p.estado = 1`)
+	if err != nil {
+		log.Printf("ssfv mapping reload equipos: %v", err)
+	} else {
+		defer equipoRows.Close()
+		for equipoRows.Next() {
+			var t string
+			if err := equipoRows.Scan(&t); err == nil {
+				newTopics[t] = struct{}{}
+			}
+		}
+	}
 
 	c.mu.Lock()
 	c.data = newData
 	c.topics = newTopics
 	c.mu.Unlock()
 
-	log.Printf("ssfv: mapping cache loaded (%d entries, %d topics)", len(newData), len(newTopics))
+	log.Printf("ssfv: mapping cache loaded (%d signal entries, %d equipos known)",
+		len(newData), len(newTopics))
 	return nil
 }
 

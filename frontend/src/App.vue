@@ -3,8 +3,7 @@ import { computed, ref, onMounted, watch } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Toaster } from '@/components/ui/sonner'
 import {
-  Gauge, Radio, Server, Table2, History as HistoryIcon, Cpu,
-  Database, Sun as SunIcon, Activity, Users,
+  Radio, Server, Layers, Activity, Users, Database, Zap,
   PanelLeftClose, PanelLeftOpen, Moon, Sun, Menu, X, WifiOff,
 } from 'lucide-vue-next'
 import { useStatus } from '@/composables/useStatus'
@@ -18,16 +17,12 @@ const { status, errorCount, isStale } = useStatus()
 const { role } = useAuth()
 
 const baseNav = [
-  { to: '/', label: t.nav.overview, icon: Gauge },
-  { to: '/mappings', label: t.nav.mappings, icon: Table2 },
-  { to: '/devices', label: t.nav.devices, icon: Cpu },
-  { to: '/mqtt', label: t.nav.mqtt, icon: Radio },
-  { to: '/nats', label: t.nav.nats, icon: Database },
-  { to: '/iec104', label: t.nav.iec104, icon: Server },
-  { to: '/history', label: t.nav.history, icon: HistoryIcon },
-  { to: '/tsdb', label: t.nav.tsdb, icon: Database },
-  { to: '/ssfv', label: 'Plantas Solares', icon: SunIcon },
-  { to: '/broker-monitor', label: 'Monitor Broker', icon: Activity },
+  { to: '/subscriptions', label: 'Tópicos y Suscripciones', icon: Radio },
+  { to: '/signals',       label: 'Señales SSFV',            icon: Layers },
+  { to: '/iec104',        label: t.nav.iec104,               icon: Server },
+  { to: '/tsdb',          label: 'Pipeline TSDB',            icon: Database },
+  { to: '/nats',          label: 'NATS JetStream',           icon: Zap },
+  { to: '/monitor',       label: 'Monitor',                  icon: Activity },
 ]
 
 const nav = computed(() => {
@@ -287,11 +282,7 @@ function fmtBuildTime(bt?: string) {
         class="flex-1 min-h-0 overflow-auto"
         role="main"
       >
-        <RouterView v-slot="{ Component }">
-          <transition name="fade" mode="out-in">
-            <component :is="Component" />
-          </transition>
-        </RouterView>
+        <RouterView :key="route.path" />
       </main>
     </div>
 

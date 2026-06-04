@@ -1,0 +1,21 @@
+{
+  "_comment": "Decoded NBIRTH. Topic: spBv1.0/plant-floor/NBIRTH/dnp3-gw. Declares every NODE metric with name+alias+datatype so NDATA can be alias-only. datatype codes: 7=UInt32 8=UInt64 10=Double 11=Boolean 12=String.",
+  "topic": "spBv1.0/plant-floor/NBIRTH/dnp3-gw",
+  "timestamp": 1733220000000,
+  "seq": 0,
+  "metrics": [
+    { "name": "bdSeq", "alias": 0, "datatype": 8, "value": 0 },
+
+    { "name": "Feeder1/Voltage",  "alias": 1, "datatype": 10, "value": 0,     "_source": "dnp3 analog (index 0)" },
+    { "name": "Feeder1/Breaker",  "alias": 2, "datatype": 11, "value": false, "_source": "dnp3 binary (index 0)" },
+    { "name": "Feeder1/Energy",   "alias": 3, "datatype": 7,  "value": 0,     "_source": "dnp3 counter, no scale (index 0)" },
+
+    { "name": "Pump1/Pressure",   "alias": 4, "datatype": 10, "value": 0,     "_source": "modbus holding_register (node-scoped mapping, no deviceId)" },
+
+    { "name": "System/CPU/Usage_pct",     "alias": 5, "datatype": 10, "value": 0 },
+    { "name": "System/Memory/Used_pct",   "alias": 6, "datatype": 10, "value": 0 },
+    { "name": "System/Temperature/CPU_C", "alias": 7, "datatype": 10, "value": 0 },
+    { "name": "System/Power/Supply_V",    "alias": 8, "datatype": 10, "value": 0, "_source": "ICR build only" },
+    { "name": "System/Device/Serial",     "alias": 9, "datatype": 12, "value": "", "_source": "ICR build only (string identity)" }
+  ]
+}

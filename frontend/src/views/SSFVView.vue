@@ -502,12 +502,24 @@ async function fetchMonitoreo() {
 }
 
 // ─── Auto-Discovery ───────────────────────────────────────────────────────────
+interface MetricMetaItem {
+  name: string
+  engUnit?: string
+  tipo_variable?: string
+  tipo_valor?: string
+  description?: string
+  device_topic?: string
+  device_type?: string
+}
+
 interface AutodiscEntity {
   id: number
   group_id: string
   node_id: string
   device_id: string
   metric_names: string[]
+  metric_meta: MetricMetaItem[]
+  node_properties: Record<string, string>
   status: 'pending' | 'approved' | 'rejected'
   first_seen: string
   last_seen: string
@@ -518,6 +530,13 @@ const autoPendingCount   = computed(() => autoEntities.value.filter(e => e.statu
 const approveDialog      = ref(false)
 const approveTarget      = ref<AutodiscEntity | null>(null)
 const approveForm        = reactive({ planta_id: '', tipo_id: '', nombre_equipo: '', nombre_topic: '' })
+
+// Derived: unique device types detected in the approve target's metric_meta
+const approveDetectedTypes = computed(() => {
+  const meta = approveTarget.value?.metric_meta ?? []
+  const types = [...new Set(meta.map(m => m.device_type).filter(Boolean))]
+  return types as string[]
+})
 
 async function fetchAutodiscovered() {
   try {
@@ -531,9 +550,16 @@ function openApprove(e: AutodiscEntity) {
   const defaultTopic = e.device_id
     ? `${e.group_id}/${e.node_id}/${e.device_id}`
     : `${e.group_id}/${e.node_id}`
+
+  // Try to pre-fill tipo_id from node_properties.entity_type or first metric_meta device_type
+  const suggestedType = e.node_properties?.entity_type
+    || e.metric_meta?.[0]?.device_type
+    || ''
+  const matched = tipoEquipos.value.find(t => t.nombre === suggestedType)
+
   Object.assign(approveForm, {
     planta_id: '',
-    tipo_id: '',
+    tipo_id:   matched ? String(matched.tipo_id) : '',
     nombre_equipo: e.device_id || e.node_id,
     nombre_topic: defaultTopic,
   })
@@ -571,21 +597,53 @@ async function rejectEntity(e: AutodiscEntity) {
   } catch (err: any) { toast.error(err.response?.data?.error ?? 'Error') }
 }
 
+async function resetEntity(e: AutodiscEntity) {
+  try {
+    await api.post(`/ssfv/autodiscovered/${e.id}/reset`)
+    toast.success('Entidad restablecida — lista para re-asignación')
+    await fetchAutodiscovered()
+  } catch (err: any) { toast.error(err.response?.data?.error ?? 'Error restableciendo') }
+}
+
+async function deleteAutodiscoveredEntity(e: AutodiscEntity) {
+  const ok = await confirm({
+    title: 'Eliminar registro rechazado',
+    message: '¿Eliminar definitivamente esta entrada? No se puede deshacer.',
+    detail: e.device_id ? `${e.node_id}/${e.device_id}` : e.node_id,
+    variant: 'danger',
+    confirmText: 'Eliminar',
+  })
+  if (!ok) return
+  try {
+    await api.delete(`/ssfv/autodiscovered/${e.id}`)
+    toast.success('Registro eliminado')
+    await fetchAutodiscovered()
+  } catch (err: any) { toast.error(err.response?.data?.error ?? 'Error eliminando') }
+}
+
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 onMounted(async () => {
-  await fetchStatus()
-  if (status.value?.connected) {
-    await Promise.all([fetchCatalogs(), fetchPlantas(), fetchAutodiscovered()])
+  try {
+    await fetchStatus()
+    if (status.value?.connected) {
+      await Promise.all([fetchCatalogs(), fetchPlantas(), fetchAutodiscovered()])
+    }
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error ?? e?.message ?? 'Error cargando SSFV')
   }
 })
 
 watch(tab, async (t) => {
   if (!status.value?.connected) return
-  if (t === 'plantas')    await Promise.all([fetchPlantas(), fetchCatalogs()])
-  if (t === 'catalogo')   await Promise.all([fetchSenales(), fetchCatalogs()])
-  if (t === 'tipos')      await fetchCatalogs()
-  if (t === 'estado')     await Promise.all([fetchStatus(), fetchMissed()])
-  if (t === 'pendientes') await Promise.all([fetchAutodiscovered(), fetchCatalogs()])
+  try {
+    if (t === 'plantas')    await Promise.all([fetchPlantas(), fetchCatalogs()])
+    if (t === 'catalogo')   await Promise.all([fetchSenales(), fetchCatalogs()])
+    if (t === 'tipos')      await fetchCatalogs()
+    if (t === 'estado')     await Promise.all([fetchStatus(), fetchMissed()])
+    if (t === 'pendientes') await Promise.all([fetchAutodiscovered(), fetchCatalogs()])
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error ?? e?.message ?? 'Error cargando datos')
+  }
 })
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1279,6 +1337,25 @@ function tipoEquipoIcon(nombre: string) {
                     <XCircle class="h-3.5 w-3.5 mr-1" /> Rechazar
                   </Button>
                 </div>
+                <div v-else class="flex justify-end gap-1.5">
+                  <Button
+                    size="sm" variant="ghost"
+                    class="h-7 px-2 text-xs rounded-sm text-muted-foreground hover:text-foreground"
+                    title="Restablecer a pendiente para re-asignar planta o tipo"
+                    @click="resetEntity(e)"
+                  >
+                    <RefreshCw class="h-3 w-3 mr-1" /> Re-asignar
+                  </Button>
+                  <Button
+                    v-if="e.status === 'rejected'"
+                    size="sm" variant="ghost"
+                    class="h-7 px-2 text-xs rounded-sm text-destructive hover:text-destructive"
+                    title="Eliminar definitivamente este registro rechazado"
+                    @click="deleteAutodiscoveredEntity(e)"
+                  >
+                    <Trash2 class="h-3 w-3" />
+                  </Button>
+                </div>
               </TableCell>
             </TableRow>
             <TableRow v-if="!autoEntities.length">
@@ -1305,15 +1382,22 @@ function tipoEquipoIcon(nombre: string) {
           <Scan class="h-4 w-4" /> Aprobar entidad descubierta
         </DialogTitle>
         <DialogDescription v-if="approveTarget">
-          {{ approveTarget.device_id
+          <span class="font-mono">{{ approveTarget.device_id
             ? `${approveTarget.group_id}/${approveTarget.node_id}/${approveTarget.device_id}`
-            : `${approveTarget.group_id}/${approveTarget.node_id}` }}
+            : `${approveTarget.group_id}/${approveTarget.node_id}` }}</span>
           — {{ approveTarget.metric_names.length }} métricas detectadas
         </DialogDescription>
       </DialogHeader>
       <div class="px-6 py-4 space-y-4">
+
+        <!-- Detected device types from metadata -->
+        <div v-if="approveDetectedTypes.length" class="rounded-sm bg-muted/40 border border-border px-3 py-2 text-[11px]">
+          <span class="text-muted-foreground">Tipo(s) detectado(s): </span>
+          <span v-for="(t, i) in approveDetectedTypes" :key="t" class="font-semibold">{{ t }}{{ i < approveDetectedTypes.length - 1 ? ', ' : '' }}</span>
+        </div>
+
         <div class="grid gap-1.5">
-          <Label>Planta *</Label>
+          <Label>Planta * <span class="text-[10px] text-muted-foreground font-normal">(selecciona dónde asignar este equipo)</span></Label>
           <Select v-model="approveForm.planta_id">
             <SelectTrigger class="rounded-sm"><SelectValue placeholder="Seleccionar planta…" /></SelectTrigger>
             <SelectContent>
@@ -1335,11 +1419,12 @@ function tipoEquipoIcon(nombre: string) {
           <Input v-model="approveForm.nombre_equipo" class="rounded-sm h-8" />
         </div>
         <div class="grid gap-1.5">
-          <Label>Nombre topic MQTT</Label>
+          <Label>Nombre topic MQTT <span class="text-[10px] text-muted-foreground font-normal">(clave de enrutamiento en el caché)</span></Label>
           <Input v-model="approveForm.nombre_topic" class="rounded-sm h-8 font-mono text-xs" />
         </div>
         <p class="text-[11px] text-muted-foreground">
-          Se creará el equipo y se auto-instanciarán las señales del tipo seleccionado.
+          Se creará el equipo en la planta seleccionada y se auto-instanciarán las señales del tipo elegido.
+          El nodo recibirá un NCMD Rebirth para comenzar a enviar datos inmediatamente.
         </p>
       </div>
       <DialogFooter class="px-6 pb-5 gap-2">

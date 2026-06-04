@@ -7,6 +7,8 @@
 /goGateway-linux-ppc64le
 /goGateway-ppc64le.tar
 /backend/bin/
+/backend/gateway
+/backend/goGateway
 
 # Dev container data volume (make dev-container)
 /dev-data/

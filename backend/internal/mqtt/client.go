@@ -157,6 +157,7 @@ func (m *Manager) reload() error {
 		}
 		if m.autoDisc != nil {
 			m.spHandler.SetAutoDiscovery(m.autoDisc)
+			m.autoDisc.SetRebirthFn(m.publishRebirth)
 		}
 		m.cfg = worker.MQTTConfigSnapshot{
 			SpGroupID: cfg.SpGroupID,

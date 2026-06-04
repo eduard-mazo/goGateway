@@ -30,7 +30,7 @@ func (h *TopicHandler) notify() {
 
 func (h *TopicHandler) list(w http.ResponseWriter, r *http.Request) {
 	var out []models.Topic
-	if err := h.DB.Select(&out, `SELECT id,device_id,topic,qos,enabled FROM topics ORDER BY id`); err != nil {
+	if err := h.DB.Select(&out, `SELECT id,device_id,topic,qos,enabled,payload_format FROM topics ORDER BY id`); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -43,8 +43,11 @@ func (h *TopicHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	res, err := h.DB.Exec(`INSERT INTO topics(device_id,topic,qos,enabled) VALUES(?,?,?,?)`,
-		t.DeviceID, t.Topic, t.QoS, t.Enabled)
+	if t.PayloadFormat == "" {
+		t.PayloadFormat = "json"
+	}
+	res, err := h.DB.Exec(`INSERT INTO topics(device_id,topic,qos,enabled,payload_format) VALUES(?,?,?,?,?)`,
+		t.DeviceID, t.Topic, t.QoS, t.Enabled, t.PayloadFormat)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -65,8 +68,11 @@ func (h *TopicHandler) update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if _, err := h.DB.Exec(`UPDATE topics SET device_id=?,topic=?,qos=?,enabled=? WHERE id=?`,
-		t.DeviceID, t.Topic, t.QoS, t.Enabled, id); err != nil {
+	if t.PayloadFormat == "" {
+		t.PayloadFormat = "json"
+	}
+	if _, err := h.DB.Exec(`UPDATE topics SET device_id=?,topic=?,qos=?,enabled=?,payload_format=? WHERE id=?`,
+		t.DeviceID, t.Topic, t.QoS, t.Enabled, t.PayloadFormat, id); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}

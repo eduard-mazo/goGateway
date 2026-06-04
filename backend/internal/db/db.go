@@ -15,7 +15,7 @@ var schema string
 
 // Open opens SQLite file, applies schema (idempotent), returns handle.
 func Open(path string) (*sqlx.DB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=auto_vacuum(INCREMENTAL)", path)
 	db, err := sqlx.Connect("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -129,26 +129,28 @@ func migrate(db *sqlx.DB) error {
 		}
 	}
 
-	// history: rename signal_key → signal_path (legacy migration).
-	// Then truncate: history is no longer written — TimescaleDB is the sole
-	// time-series store. DELETE runs every startup; on an empty table it's a no-op.
-	var hasHistory int
-	if err := db.Get(&hasHistory, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='history'`); err != nil {
+	// topics: add payload_format column (per-topic JSON vs Sparkplug B selector).
+	var hasTopics int
+	if err := db.Get(&hasTopics, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='topics'`); err != nil {
 		return err
 	}
-	if hasHistory > 0 {
-		var hasSignalKey int
-		if err := db.Get(&hasSignalKey, `SELECT COUNT(*) FROM pragma_table_info('history') WHERE name='signal_key'`); err != nil {
+	if hasTopics > 0 {
+		var hasPayloadFmt int
+		if err := db.Get(&hasPayloadFmt, `SELECT COUNT(*) FROM pragma_table_info('topics') WHERE name='payload_format'`); err != nil {
 			return err
 		}
-		if hasSignalKey > 0 {
-			if _, err := db.Exec(`ALTER TABLE history RENAME COLUMN signal_key TO signal_path`); err != nil {
-				return fmt.Errorf("rename history.signal_key: %w", err)
+		if hasPayloadFmt == 0 {
+			if _, err := db.Exec(`ALTER TABLE topics ADD COLUMN payload_format TEXT NOT NULL DEFAULT 'json'`); err != nil {
+				return fmt.Errorf("add topics.payload_format: %w", err)
 			}
 		}
-		if _, err := db.Exec(`DELETE FROM history`); err != nil {
-			return fmt.Errorf("truncate history: %w", err)
-		}
+	}
+
+	// history: table is retired — TimescaleDB is the sole time-series store.
+	// DROP is idempotent and reclaims pages without leaving freelist bloat.
+	// Prior versions used DELETE every startup, which inflated the DB to 114MB.
+	if _, err := db.Exec(`DROP TABLE IF EXISTS history`); err != nil {
+		return fmt.Errorf("drop history: %w", err)
 	}
 
 	// mqtt_config: add Sparkplug B columns.
@@ -196,6 +198,33 @@ func migrate(db *sqlx.DB) error {
 				if _, err := db.Exec(`ALTER TABLE signal_mappings ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
 					return fmt.Errorf("add signal_mappings.%s: %w", col.name, err)
 				}
+			}
+		}
+
+		// signal_mappings: add signal_id FK linking to gateway_signals (nullable).
+		var hasSignalID int
+		if err := db.Get(&hasSignalID, `SELECT COUNT(*) FROM pragma_table_info('signal_mappings') WHERE name='signal_id'`); err != nil {
+			return err
+		}
+		if hasSignalID == 0 {
+			if _, err := db.Exec(`ALTER TABLE signal_mappings ADD COLUMN signal_id INTEGER REFERENCES gateway_signals(id) ON DELETE SET NULL`); err != nil {
+				return fmt.Errorf("add signal_mappings.signal_id: %w", err)
+			}
+		}
+	}
+
+	// autodiscovered_entities: add metric_meta and node_properties columns.
+	for _, col := range []struct{ name, def string }{
+		{"metric_meta", "TEXT NOT NULL DEFAULT '[]'"},
+		{"node_properties", "TEXT NOT NULL DEFAULT '{}'"},
+	} {
+		var has int
+		if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('autodiscovered_entities') WHERE name=?`, col.name); err != nil {
+			return err
+		}
+		if has == 0 {
+			if _, err := db.Exec(`ALTER TABLE autodiscovered_entities ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
+				return fmt.Errorf("add autodiscovered_entities.%s: %w", col.name, err)
 			}
 		}
 	}

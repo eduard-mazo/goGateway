@@ -202,9 +202,10 @@ watch(search, q => {
 
 function empty(): SignalMapping {
   return {
-    id: 0, server_id: 0, topic_id: 0, device_name: '', variable_type: '', characteristic: '',
+    id: 0, server_id: 0, topic_id: 0, signal_id: null,
+    device_name: '', variable_type: '', characteristic: '',
     json_key: '', quality_key: '', metric_name: '', iec104_type: 'M_ME_TF_1', ioa: 0, unit: '', scale: 1.0, enabled: true,
-    business: '', company: '',
+    business: '', company: '', deadband_abs: 0, deadband_pct: 0,
   }
 }
 

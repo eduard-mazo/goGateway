@@ -1,0 +1,8 @@
+{
+  "_comment": "Decoded NDEATH. Topic: spBv1.0/plant-floor/NDEATH/dnp3-gw. Registered as the MQTT Last-Will and also published on graceful shutdown. Carries only bdSeq, which must match the bdSeq of the NBIRTH it terminates so the consumer can pair them.",
+  "topic": "spBv1.0/plant-floor/NDEATH/dnp3-gw",
+  "timestamp": 1733220900000,
+  "metrics": [
+    { "name": "bdSeq", "datatype": 8, "value": 0 }
+  ]
+}

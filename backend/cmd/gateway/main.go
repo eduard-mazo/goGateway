@@ -196,6 +196,7 @@ func main() {
 		IEC104:    iecMgr,
 		TSDBMgr:   tsdbMgr,
 		BrokerMon: brokerMon,
+		AutoDisc:  autoDisc,
 		StartedAt: startedAt,
 		AuthCfg:   authCfg,
 	})

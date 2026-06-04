@@ -13,6 +13,7 @@ import (
 	"goGateway/internal/mqtt"
 	"goGateway/internal/tsdb"
 	"goGateway/internal/web"
+	"goGateway/internal/worker"
 )
 
 // Deps wire handlers to their notifiers.
@@ -29,6 +30,7 @@ type Deps struct {
 	IEC104    iec104.Server
 	TSDBMgr   *tsdb.Manager
 	BrokerMon *BrokerMonitor
+	AutoDisc  *worker.AutoDiscoveryService
 	StartedAt time.Time
 
 	// AuthCfg configures JWT signing and token lifetimes.
@@ -96,6 +98,10 @@ func NewRouter(d Deps) http.Handler {
 			ssfvApiH := NewSSFVHandler(d.TSDBMgr)
 			ssfvApiH.SetReloader(d.NotifySSFV)
 			ssfvApiH.SetDB(d.DB)
+			if d.AutoDisc != nil {
+				// Wire rebirth so operator approval triggers NCMD Rebirth immediately.
+				ssfvApiH.SetRebirthFn(d.AutoDisc.TriggerRebirth)
+			}
 			r.Route("/ssfv", ssfvApiH.Mount)
 		})
 	})

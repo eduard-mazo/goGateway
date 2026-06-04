@@ -110,7 +110,8 @@ func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) int {
 
 	if h.autoDisc != nil {
 		names := collectMetricNames(p.Metrics)
-		go h.autoDisc.OnBIRTH(topic.GroupID, topic.EdgeNodeID, "", names)
+		meta := collectMetricMeta(p.Metrics)
+		go h.autoDisc.OnBIRTH(topic.GroupID, topic.EdgeNodeID, "", names, meta, p.Properties)
 	}
 
 	ts := msToTime(p.Timestamp)
@@ -198,7 +199,8 @@ func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) int {
 
 	if h.autoDisc != nil {
 		names := collectMetricNames(p.Metrics)
-		go h.autoDisc.OnBIRTH(topic.GroupID, topic.EdgeNodeID, topic.DeviceID, names)
+		meta := collectMetricMeta(p.Metrics)
+		go h.autoDisc.OnBIRTH(topic.GroupID, topic.EdgeNodeID, topic.DeviceID, names, meta, p.Properties)
 	}
 
 	ts := msToTime(p.Timestamp)
@@ -376,6 +378,28 @@ func collectMetricNames(metrics []sparkplug.Metric) []string {
 		if m.Name != "" {
 			out = append(out, m.Name)
 		}
+	}
+	return out
+}
+
+// collectMetricMeta builds MetricMeta entries from per-metric PropertySets.
+// Only metrics with a non-empty Name are included (NBIRTH always carries names).
+func collectMetricMeta(metrics []sparkplug.Metric) []MetricMeta {
+	out := make([]MetricMeta, 0, len(metrics))
+	for _, m := range metrics {
+		if m.Name == "" {
+			continue
+		}
+		mm := MetricMeta{Name: m.Name}
+		if m.Properties != nil {
+			mm.EngUnit = m.Properties["engUnit"]
+			mm.TipoVariable = m.Properties["tipo_variable"]
+			mm.TipoValor = m.Properties["tipo_valor"]
+			mm.Description = m.Properties["description"]
+			mm.DeviceTopic = m.Properties["device_topic"]
+			mm.DeviceType = m.Properties["device_type"]
+		}
+		out = append(out, mm)
 	}
 	return out
 }

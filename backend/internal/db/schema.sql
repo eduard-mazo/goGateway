@@ -260,15 +260,17 @@ CREATE TABLE IF NOT EXISTS calculated_signals (
 -- rejects. Approved/rejected rows are preserved for auditing; only pending rows
 -- are updated when the same node re-announces itself via NBIRTH/DBIRTH.
 CREATE TABLE IF NOT EXISTS autodiscovered_entities (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id     TEXT    NOT NULL,
-    node_id      TEXT    NOT NULL,
-    device_id    TEXT    NOT NULL DEFAULT '', -- empty for NBIRTH, set for DBIRTH
-    metric_names TEXT    NOT NULL DEFAULT '[]', -- JSON array of metric name strings
-    status       TEXT    NOT NULL DEFAULT 'pending'
-                         CHECK (status IN ('pending', 'approved', 'rejected')),
-    first_seen   DATETIME DEFAULT CURRENT_TIMESTAMP,
-    last_seen    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id         TEXT    NOT NULL,
+    node_id          TEXT    NOT NULL,
+    device_id        TEXT    NOT NULL DEFAULT '', -- empty for NBIRTH, set for DBIRTH
+    metric_names     TEXT    NOT NULL DEFAULT '[]', -- JSON array of metric name strings
+    metric_meta      TEXT    NOT NULL DEFAULT '[]', -- JSON array of {name,engUnit,tipo_variable,tipo_valor,description}
+    node_properties  TEXT    NOT NULL DEFAULT '{}', -- JSON object from Payload.Properties (entity_type, fiware_entity_id, …)
+    status           TEXT    NOT NULL DEFAULT 'pending'
+                             CHECK (status IN ('pending', 'approved', 'rejected')),
+    first_seen       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen        DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (group_id, node_id, device_id)
 );
 CREATE INDEX IF NOT EXISTS idx_autodisc_status ON autodiscovered_entities(status);

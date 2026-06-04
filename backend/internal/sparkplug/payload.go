@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	"goGateway/internal/iec104"
@@ -39,9 +40,10 @@ const (
 
 // Payload is a decoded Sparkplug B protobuf payload.
 type Payload struct {
-	Timestamp uint64   // milliseconds since Unix epoch (UTC)
-	Seq       uint64   // 0–255 wrapping sequence number
-	Metrics   []Metric
+	Timestamp  uint64            // milliseconds since Unix epoch (UTC)
+	Seq        uint64            // 0–255 wrapping sequence number
+	Metrics    []Metric
+	Properties map[string]string // field 9: node-level PropertySet (entity_type, fiware_entity_id, …)
 }
 
 // Metric is one decoded entry from a Sparkplug B payload.
@@ -57,6 +59,7 @@ type Metric struct {
 	IsTransient  bool
 	IsNull       bool
 	StringValue  string
+	Properties   map[string]string // field 9: per-metric PropertySet (engUnit, tipo_variable, …)
 
 	// numeric storage — set by the oneof fields 10–14
 	uintVal  uint64
@@ -306,6 +309,16 @@ func parsePayload(data []byte, p *Payload) error {
 				break
 			}
 			p.Seq, pos, err = parseVarint(data, pos)
+		case 9: // properties (PropertySet, length-delimited)
+			if wt != wireLenDel {
+				pos, err = skipField(data, pos, wt)
+				break
+			}
+			var raw []byte
+			raw, pos, err = parseLenDelim(data, pos)
+			if err == nil {
+				p.Properties = parsePropertySetStrings(raw)
+			}
 		default:
 			pos, err = skipField(data, pos, wt)
 		}
@@ -390,8 +403,18 @@ func parseMetric(data []byte, m *Metric) error {
 			if err == nil {
 				m.IsNull = v != 0
 			}
-		case 8, 9: // metadata, properties — skip (not used for dispatch)
+		case 8: // metadata — skip
 			pos, err = skipField(data, pos, wt)
+		case 9: // properties (PropertySet)
+			if wt != wireLenDel {
+				pos, err = skipField(data, pos, wt)
+				break
+			}
+			var raw []byte
+			raw, pos, err = parseLenDelim(data, pos)
+			if err == nil {
+				m.Properties = parsePropertySetStrings(raw)
+			}
 		case 10: // int_value (uint32 → stored as uint64)
 			if wt != wireVarint {
 				pos, err = skipField(data, pos, wt)
@@ -464,6 +487,150 @@ func parseMetric(data []byte, m *Metric) error {
 		}
 	}
 	return nil
+}
+
+// parsePropertySetStrings decodes a Sparkplug B PropertySet message and returns
+// a map of key → string value. Non-string PropertyValues are silently skipped.
+//
+// Wire layout (from sparkplug_b.proto):
+//
+//	message PropertySet {
+//	    repeated string        keys   = 1;  // parallel arrays, same index
+//	    repeated PropertyValue values = 2;
+//	}
+//	message PropertyValue {
+//	    uint32 type         = 1;
+//	    ...
+//	    string string_value = 8;  // field 8 inside PropertyValue
+//	}
+func parsePropertySetStrings(data []byte) map[string]string {
+	var keys []string
+	var vals []string // one entry per PropertyValue, "" if not a string
+
+	pos := 0
+	for pos < len(data) {
+		fn, wt, np, err := parseTag(data, pos)
+		if err != nil {
+			break
+		}
+		pos = np
+		switch fn {
+		case 1: // key (string)
+			if wt != wireLenDel {
+				pos, _ = skipField(data, pos, wt)
+				continue
+			}
+			raw, np2, e := parseLenDelim(data, pos)
+			if e != nil {
+				break
+			}
+			pos = np2
+			keys = append(keys, string(raw))
+		case 2: // PropertyValue (length-delimited sub-message)
+			if wt != wireLenDel {
+				pos, _ = skipField(data, pos, wt)
+				continue
+			}
+			raw, np2, e := parseLenDelim(data, pos)
+			if e != nil {
+				break
+			}
+			pos = np2
+			vals = append(vals, parsePropertyValueString(raw))
+		default:
+			pos, _ = skipField(data, pos, wt)
+		}
+	}
+
+	if len(keys) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(keys))
+	for i, k := range keys {
+		if i < len(vals) {
+			m[k] = vals[i]
+		} else {
+			m[k] = ""
+		}
+	}
+	return m
+}
+
+// parsePropertyValueString extracts a PropertyValue's value as a string,
+// reading whichever typed value field is present and stringifying it:
+//
+//	int_value    (3, uint32)  → decimal       e.g. "192"
+//	long_value   (4, uint64)  → decimal
+//	float_value  (5, 32-bit)  → shortest float
+//	double_value (6, 64-bit)  → shortest float
+//	boolean_value(7, varint)  → "true" / "false"
+//	string_value (8, string)  → as-is
+//
+// Producers (e.g. the goMqttDnp3 gateway) carry numeric metadata such as the
+// SCADA `quality` code and `dnp3.*` flags as typed PropertyValues, not strings;
+// reading only string_value (field 8) silently dropped them. Returns "" when the
+// value is null/absent.
+func parsePropertyValueString(data []byte) string {
+	pos := 0
+	for pos < len(data) {
+		fn, wt, np, err := parseTag(data, pos)
+		if err != nil {
+			break
+		}
+		pos = np
+		switch fn {
+		case 3, 4: // int_value / long_value (varint)
+			if wt != wireVarint {
+				pos, _ = skipField(data, pos, wt)
+				continue
+			}
+			v, _, e := parseVarint(data, pos)
+			if e != nil {
+				return ""
+			}
+			return strconv.FormatUint(v, 10)
+		case 5: // float_value (32-bit fixed)
+			if wt != wire32bit || pos+4 > len(data) {
+				pos, _ = skipField(data, pos, wt)
+				continue
+			}
+			bits := binary.LittleEndian.Uint32(data[pos:])
+			return strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32)
+		case 6: // double_value (64-bit fixed)
+			if wt != wire64bit || pos+8 > len(data) {
+				pos, _ = skipField(data, pos, wt)
+				continue
+			}
+			bits := binary.LittleEndian.Uint64(data[pos:])
+			return strconv.FormatFloat(math.Float64frombits(bits), 'g', -1, 64)
+		case 7: // boolean_value (varint)
+			if wt != wireVarint {
+				pos, _ = skipField(data, pos, wt)
+				continue
+			}
+			v, _, e := parseVarint(data, pos)
+			if e != nil {
+				return ""
+			}
+			if v != 0 {
+				return "true"
+			}
+			return "false"
+		case 8: // string_value
+			if wt != wireLenDel {
+				pos, _ = skipField(data, pos, wt)
+				continue
+			}
+			raw, _, e := parseLenDelim(data, pos)
+			if e != nil {
+				return ""
+			}
+			return string(raw)
+		default: // type (1), is_null (2), property_set (9), …
+			pos, _ = skipField(data, pos, wt)
+		}
+	}
+	return ""
 }
 
 // ─── Encoder helpers ─────────────────────────────────────────────────────────

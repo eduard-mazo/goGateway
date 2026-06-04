@@ -68,6 +68,26 @@ export interface Topic {
   topic: string
   qos: number
   enabled: boolean
+  payload_format: string  // 'json' | 'sparkplug'
+}
+
+// GatewaySignal = normalisation layer (Menu 2). One logical measurement per topic stream.
+// persist_to_db=true records values to local SQLite history; signal_mappings row
+// (signal_id FK) exposes it via IEC-104 (Menu 3).
+export interface GatewaySignal {
+  id: number
+  topic_id: number
+  name: string
+  json_key: string
+  metric_name: string
+  quality_key: string
+  variable_type: string
+  characteristic: string
+  unit: string
+  scale: number
+  persist_to_db: boolean
+  enabled: boolean
+  created_at?: string
 }
 
 export interface MQTTConfig {
@@ -113,6 +133,7 @@ export interface SignalMapping {
   id: number
   server_id: number
   topic_id: number
+  signal_id: number | null  // links to gateway_signals row (Menu 2 → Menu 3 workflow)
   device_name: string
   variable_type: string
   characteristic: string
@@ -126,6 +147,8 @@ export interface SignalMapping {
   enabled: boolean
   business: string
   company: string
+  deadband_abs: number
+  deadband_pct: number
 }
 
 export interface History {
@@ -283,6 +306,45 @@ export interface SSFVFrontera {
   tipo_conexion?: string
   activo: boolean
   planta_nombre?: string
+}
+
+export interface SSFVTipoEquipo {
+  tipo_id?: number
+  nombre: string
+  descripcion?: string
+  activo: boolean
+}
+
+export interface SSFVTipoVariable {
+  tipovar_id?: number
+  nombre: string
+  descripcion?: string
+  activo: boolean
+}
+
+export interface SSFVUnidad {
+  unidad_id?: number
+  simbolo: string
+  nombre: string
+  magnitud: string
+  activo: boolean
+}
+
+export interface SSFVSenalXTipo {
+  senaltipo_id?: number
+  senal_id: number
+  tipo_id: number
+  num_canales: number
+  // joined
+  senal_nombre?: string
+  codigo_senal?: string
+  tipo_nombre?: string
+}
+
+export interface SSFVMissedSignal {
+  signal_path: string
+  count: number
+  last_seen: string
 }
 
 export interface SSFVCatalogItem {
