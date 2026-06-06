@@ -351,31 +351,6 @@ export interface SSFVCatalogItem {
   [key: string]: unknown
 }
 
-// ─── Host telemetry (gateway System/* metrics) ───────────────────────────────
-
-export interface SSFVHostNode {
-  node_topic: string
-  metricas: number
-  last_seen: string
-}
-
-export interface SSFVHostMetric {
-  node_topic: string
-  categoria: string        // CPU, Memory, Disk, Network, Host…
-  subkey: string           // interface / mount; '' for scalars
-  metrica: string          // Usage_pct, Rx_MB…
-  valor: number | null
-  calidad: string
-  timestamp_utc: string
-}
-
-export interface SSFVHostIface {
-  iface_id?: number
-  nombre: string
-  descripcion?: string | null
-  activo: boolean
-}
-
 // ─── Auth / User Management ───────────────────────────────────────────────────
 
 export interface User {
