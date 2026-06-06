@@ -214,17 +214,27 @@ func migrate(db *sqlx.DB) error {
 	}
 
 	// autodiscovered_entities: add metric_meta and node_properties columns.
-	for _, col := range []struct{ name, def string }{
-		{"metric_meta", "TEXT NOT NULL DEFAULT '[]'"},
-		{"node_properties", "TEXT NOT NULL DEFAULT '{}'"},
-	} {
-		var has int
-		if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('autodiscovered_entities') WHERE name=?`, col.name); err != nil {
-			return err
-		}
-		if has == 0 {
-			if _, err := db.Exec(`ALTER TABLE autodiscovered_entities ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
-				return fmt.Errorf("add autodiscovered_entities.%s: %w", col.name, err)
+	// Guard with table-existence check: on a fresh DB the table does not exist
+	// yet at migrate() time — schema.sql creates it with both columns already
+	// present, so there is nothing to do. (Without this guard the ALTER fails
+	// with "no such table: autodiscovered_entities" and aborts startup.)
+	var hasAutodisc int
+	if err := db.Get(&hasAutodisc, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='autodiscovered_entities'`); err != nil {
+		return err
+	}
+	if hasAutodisc > 0 {
+		for _, col := range []struct{ name, def string }{
+			{"metric_meta", "TEXT NOT NULL DEFAULT '[]'"},
+			{"node_properties", "TEXT NOT NULL DEFAULT '{}'"},
+		} {
+			var has int
+			if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('autodiscovered_entities') WHERE name=?`, col.name); err != nil {
+				return err
+			}
+			if has == 0 {
+				if _, err := db.Exec(`ALTER TABLE autodiscovered_entities ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
+					return fmt.Errorf("add autodiscovered_entities.%s: %w", col.name, err)
+				}
 			}
 		}
 	}

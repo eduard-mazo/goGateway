@@ -89,6 +89,20 @@ func (s *NodeSession) AdvanceSeq(incoming uint64) bool {
 	return true
 }
 
+// SyncSeq unconditionally sets the node's last-seen sequence number.
+// Sparkplug B maintains ONE seq counter per EoN node, shared across NBIRTH,
+// NDATA, DBIRTH, DDATA and DDEATH. DBIRTH is a sequenced message published in
+// the birth burst right after NBIRTH; rather than strict-validating it (which
+// would false-trigger rebirths on benign NBIRTH/DBIRTH delivery races), the
+// caller syncs the node seq forward to the DBIRTH's value so the following
+// NDATA/DDATA validate against the correct expected value. A genuinely lost
+// DBIRTH still surfaces as a gap on the next AdvanceSeq → rebirth.
+func (s *NodeSession) SyncSeq(seq uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seq = seq
+}
+
 // ResolveName returns the metric name for a given alias.
 // If the metric has an explicit Name, it is returned directly.
 // Falls back to the alias map seeded from the last NBIRTH.

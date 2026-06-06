@@ -48,8 +48,6 @@ type SSFVAdapter struct {
 	missRing  [missRingCap]MissedSignal
 	missHead  int
 	missCount int
-
-	hostIfaces atomic.Value // map[string]bool — allowed network interfaces
 }
 
 // NewSSFVAdapter opens a pgxpool to the ssfv schema on the given DSN, runs
@@ -89,38 +87,7 @@ func NewSSFVAdapter(ctx context.Context, dsn string) (*SSFVAdapter, error) {
 		cache:       newSSFVCache(pool),
 		rateTracker: newRateTracker(10 * time.Second),
 	}
-	a.hostIfaces.Store(map[string]bool{})
-	a.ReloadHostIfaces(ctx)
 	return a, nil
-}
-
-// ReloadHostIfaces refreshes the allowlist of network interfaces whose host
-// metrics are persisted. Call after cfg_host_iface mutations (NotifySSFV).
-func (a *SSFVAdapter) ReloadHostIfaces(ctx context.Context) {
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	rows, err := a.pool.Query(ctx2,
-		`SELECT nombre FROM ssfv.cfg_host_iface WHERE activo = TRUE`)
-	if err != nil {
-		log.Printf("ssfv: reload host ifaces: %v", err)
-		return
-	}
-	defer rows.Close()
-	set := make(map[string]bool)
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err == nil {
-			set[n] = true
-		}
-	}
-	a.hostIfaces.Store(set)
-}
-
-// IfaceAllowed reports whether a network interface is on the persistence
-// allowlist. Non-network host metrics never call this (always stored).
-func (a *SSFVAdapter) IfaceAllowed(iface string) bool {
-	set, _ := a.hostIfaces.Load().(map[string]bool)
-	return set[iface]
 }
 
 func (a *SSFVAdapter) Name() string { return "ssfv" }
@@ -145,15 +112,7 @@ func (a *SSFVAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 	rows := make([]row, 0, len(batch))
 	dropped := int64(0)
 
-	// Host telemetry points (Tags["host_metric"]=="1") are routed to
-	// ssfv.tbl_metricas_host, keyed by full path — never to tbl_valores.
-	hostBatch := make([]DataPoint, 0)
-
 	for _, p := range batch {
-		if p.Tags["host_metric"] == "1" {
-			hostBatch = append(hostBatch, p)
-			continue
-		}
 		// IEC-104 history DataPoints (from HistoryLogger) carry no "equipo" tag.
 		// These are expected noise — skip silently, do NOT count as SSFV misses.
 		if p.Tags["equipo"] == "" {
@@ -189,12 +148,6 @@ func (a *SSFVAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 
 	a.skippedCount.Add(dropped)
 
-	if len(hostBatch) > 0 {
-		if err := a.writeHostBatch(ctx, hostBatch); err != nil {
-			return err
-		}
-	}
-
 	if len(rows) == 0 {
 		return nil
 	}
@@ -225,70 +178,6 @@ func (a *SSFVAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 	n := tag.RowsAffected()
 	a.writeCount.Add(n)
 	a.bytesEst.Add(n * 60)
-	a.rateTracker.record(n)
-	return nil
-}
-
-// writeHostBatch persists host-telemetry points into ssfv.tbl_metricas_host.
-// Points carry categoria/subkey/metrica/node tags set by the worker. In-batch
-// dedup on the PK tuple collapses redundant samples; ON CONFLICT DO NOTHING
-// keeps the write idempotent under at-least-once delivery and WAL replay.
-func (a *SSFVAdapter) writeHostBatch(ctx context.Context, batch []DataPoint) error {
-	type hkey struct {
-		ts                       int64
-		node, cat, sub, met      string
-	}
-	seen := make(map[hkey]struct{}, len(batch))
-
-	tss  := make([]time.Time, 0, len(batch))
-	nodes := make([]string, 0, len(batch))
-	cats := make([]string, 0, len(batch))
-	subs := make([]string, 0, len(batch))
-	mets := make([]string, 0, len(batch))
-	vals := make([]float64, 0, len(batch))
-	cals := make([]string, 0, len(batch))
-
-	for _, p := range batch {
-		cat := p.Tags["categoria"]
-		met := p.Tags["metrica"]
-		if cat == "" || met == "" {
-			continue
-		}
-		node := p.Tags["node"]
-		sub := p.Tags["subkey"]
-		k := hkey{p.Timestamp.UnixNano(), node, cat, sub, met}
-		if _, dup := seen[k]; dup {
-			continue
-		}
-		seen[k] = struct{}{}
-		tss = append(tss, p.Timestamp)
-		nodes = append(nodes, node)
-		cats = append(cats, cat)
-		subs = append(subs, sub)
-		mets = append(mets, met)
-		vals = append(vals, primaryValue(p.Fields))
-		cals = append(cals, qualityFromTags(p.Tags))
-	}
-	if len(tss) == 0 {
-		return nil
-	}
-
-	tag, err := a.pool.Exec(ctx, `
-		INSERT INTO ssfv.tbl_metricas_host
-		    (timestamp_utc, node_topic, categoria, subkey, metrica, valor, calidad)
-		SELECT unnest($1::timestamptz[]), unnest($2::text[]), unnest($3::text[]),
-		       unnest($4::text[]),        unnest($5::text[]), unnest($6::numeric[]),
-		       unnest($7::text[])
-		ON CONFLICT (timestamp_utc, node_topic, categoria, subkey, metrica) DO NOTHING`,
-		tss, nodes, cats, subs, mets, vals, cals)
-	if err != nil {
-		a.errorCount.Add(1)
-		a.lastErrMsg.Store(err.Error())
-		return fmt.Errorf("ssfv write host metrics: %w", err)
-	}
-	n := tag.RowsAffected()
-	a.writeCount.Add(n)
-	a.bytesEst.Add(n * 48)
 	a.rateTracker.record(n)
 	return nil
 }

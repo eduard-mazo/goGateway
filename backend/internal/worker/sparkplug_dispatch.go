@@ -194,8 +194,13 @@ func (h *SparkplugHandler) handleDBIRTH(topic sparkplug.Topic, raw []byte) int {
 	}
 
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
-	session := h.registry.Session(key).Device(topic.DeviceID)
+	nodeSession := h.registry.Session(key)
+	session := nodeSession.Device(topic.DeviceID)
 	session.SetBirth(p)
+	// DBIRTH consumes a node-level sequence number (Sparkplug uses one seq per
+	// EoN node across NBIRTH/NDATA/DBIRTH/DDATA). Sync it forward so subsequent
+	// NDATA/DDATA validate against the right expected value.
+	nodeSession.SyncSeq(p.Seq)
 
 	if h.autoDisc != nil {
 		names := collectMetricNames(p.Metrics)
@@ -242,9 +247,12 @@ func (h *SparkplugHandler) handleDDATA(topic sparkplug.Topic, raw []byte) int {
 	}
 
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
-	devSession := h.registry.Session(key).Device(topic.DeviceID)
+	nodeSession := h.registry.Session(key)
+	devSession := nodeSession.Device(topic.DeviceID)
 
-	if !devSession.AdvanceSeq(p.Seq) {
+	// Validate against the NODE seq (one counter per EoN node), not a per-device
+	// counter. The device session is used only for alias→name resolution.
+	if !nodeSession.AdvanceSeq(p.Seq) {
 		log.Printf("sparkplug: DDATA out-of-sequence from %s/%s/%s (got %d) — requesting rebirth",
 			topic.GroupID, topic.EdgeNodeID, topic.DeviceID, p.Seq)
 		if h.rebirthFn != nil {
@@ -282,36 +290,41 @@ func (h *SparkplugHandler) dispatchMetric(
 	m *sparkplug.Metric,
 	ts time.Time,
 ) bool {
-	// Host telemetry intercept: edge-node System/* metrics (CPU/Memory/Disk/
-	// Network/…) describe the gateway machine, not a plant signal. Route them to
-	// ssfv.tbl_metricas_host and stop — they are never IEC-104 nor catalog signals.
-	if h.ssfvHandler != nil && isHostMetric(metricName) {
-		node := topic.GroupID + "/" + topic.EdgeNodeID
-		val, _ := m.Float64()
-		h.ssfvHandler.HandleHostMetric(node, metricName, val, ts)
-		return true
-	}
-
-	// SSFV intercept: always write to TimescaleDB when the metric matches a known
-	// SSFV topic. Execution continues so an IEC-104 mapping can also be served
-	// (dual routing). Only signals that have a signal_mappings entry reach IEC-104.
+	// SSFV intercept: write to TimescaleDB (ssfv.tbl_valores) when the metric
+	// resolves to a registered catalog signal. Execution continues so an IEC-104
+	// mapping can also be served (dual routing). Only signals that have a
+	// signal_mappings entry reach IEC-104.
+	//
+	// System/host metrics (CPU/Memory/Disk/Network/…) use the SAME catalog gating
+	// as plant signals: the edge node itself is the host "station"
+	// (topic = group/node) and the signal code is the System path with its prefix
+	// stripped (e.g. "CPU/Usage_pct"). Register them on that station to persist
+	// them to tbl_valores; unregistered host metrics land in Descartados and are
+	// not written — identical to process signals.
 	ssfvHandled := false
 	var ssfvTopic string // the SSFV equipment topic attempted (for log suppression)
 	if h.ssfvHandler != nil {
-		parts := strings.Split(metricName, "/")
 		var mqttTopic, code string
-		if len(parts) >= 2 {
-			// Full UNS path embedded in metric name: "EPM_SSFV/Sede30/INV_1/OSV"
-			mqttTopic = strings.Join(parts[:len(parts)-1], "/")
-			code = parts[len(parts)-1]
-		} else {
-			// Simple metric name ("cycle"): use the Sparkplug node/device topic.
-			if isDevice && topic.DeviceID != "" {
-				mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID + "/" + topic.DeviceID
+		switch {
+		case isHostMetric(metricName):
+			// Host station = the edge node; code = System path (prefix stripped).
+			mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
+			code = strings.TrimPrefix(metricName, "System/")
+		default:
+			parts := strings.Split(metricName, "/")
+			if len(parts) >= 2 {
+				// Full UNS path embedded in metric name: "EPM_SSFV/Sede30/INV_1/OSV"
+				mqttTopic = strings.Join(parts[:len(parts)-1], "/")
+				code = parts[len(parts)-1]
 			} else {
-				mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
+				// Simple metric name ("cycle"): use the Sparkplug node/device topic.
+				if isDevice && topic.DeviceID != "" {
+					mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID + "/" + topic.DeviceID
+				} else {
+					mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
+				}
+				code = metricName
 			}
-			code = metricName
 		}
 		ssfvTopic = mqttTopic
 		val, _ := m.Float64()

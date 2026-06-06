@@ -87,6 +87,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Route("/iec104-servers", (&IEC104ServersHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
 			r.Route("/mappings", (&MappingHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)
 			r.Route("/history", (&HistoryHandler{DB: d.DB}).Mount)
+			r.Route("/sparkplug", (&SparkplugDecodeHandler{}).Mount)
 			r.Route("/status", (&StatusHandler{DB: d.DB, MQTT: d.MQTT, IEC104: d.IEC104, StartedAt: d.StartedAt}).Mount)
 			r.Route("/tsdb-config", (&TSDBConfigHandler{DB: d.DB, Notify: d.NotifyTSDB}).Mount)
 			tsdbH := tsdb.NewHandler(d.TSDBMgr)
