@@ -167,6 +167,11 @@ func migrate(db *sqlx.DB) error {
 			{"sp_group_id", "TEXT NOT NULL DEFAULT 'goGateway'"},
 			{"sp_host_id", "TEXT NOT NULL DEFAULT 'goGateway-host'"},
 			{"sp_topics", "TEXT NOT NULL DEFAULT ''"},
+			{"qos", "INTEGER NOT NULL DEFAULT 1"},
+			{"tls_ca_file", "TEXT NOT NULL DEFAULT ''"},
+			{"tls_cert_file", "TEXT NOT NULL DEFAULT ''"},
+			{"tls_key_file", "TEXT NOT NULL DEFAULT ''"},
+			{"tls_insecure", "INTEGER NOT NULL DEFAULT 0"},
 		} {
 			var has int
 			if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('mqtt_config') WHERE name=?`, col.name); err != nil {

@@ -22,7 +22,8 @@ func (h *MQTTConfigHandler) Mount(r chi.Router) {
 func (h *MQTTConfigHandler) get(w http.ResponseWriter, r *http.Request) {
 	var c models.MQTTConfig
 	if err := h.DB.Get(&c, `SELECT id,host,port,username,password,client_id,use_tls,
-	                               sparkplug_enabled,sp_group_id,sp_host_id,sp_topics
+	                               sparkplug_enabled,sp_group_id,sp_host_id,sp_topics,qos,
+	                               tls_ca_file,tls_cert_file,tls_key_file,tls_insecure
 	                          FROM mqtt_config WHERE id=1`); err != nil {
 		writeErr(w, 500, "failed to load MQTT config")
 		return
@@ -50,10 +51,12 @@ func (h *MQTTConfigHandler) update(w http.ResponseWriter, r *http.Request) {
 	_, err := h.DB.Exec(
 		`UPDATE mqtt_config
 		    SET host=?,port=?,username=?,password=?,client_id=?,use_tls=?,
-		        sparkplug_enabled=?,sp_group_id=?,sp_host_id=?,sp_topics=?
+		        sparkplug_enabled=?,sp_group_id=?,sp_host_id=?,sp_topics=?,qos=?,
+		        tls_ca_file=?,tls_cert_file=?,tls_key_file=?,tls_insecure=?
 		  WHERE id=1`,
 		c.Host, c.Port, c.Username, c.Password, c.ClientID, c.UseTLS,
-		c.SparkplugEnabled, c.SpGroupID, c.SpHostID, c.SpTopics,
+		c.SparkplugEnabled, c.SpGroupID, c.SpHostID, c.SpTopics, c.QoS,
+		c.CAFile, c.CertFile, c.KeyFile, c.TLSInsecure,
 	)
 	if err != nil {
 		writeErr(w, 400, err.Error())

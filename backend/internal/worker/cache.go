@@ -159,13 +159,15 @@ type MQTTConfigSnapshot struct {
 	SpGroupID string
 	SpHostID  string
 	SpTopics  string // newline/comma-separated extra MQTT topic patterns
+	SpQoS     byte   // MQTT subscribe QoS for Sparkplug/extra topics (0 or 1)
 }
 
 // LoadMQTTConfig = helper to read singleton config (all columns).
 func LoadMQTTConfig(db *sqlx.DB) (models.MQTTConfig, error) {
 	var c models.MQTTConfig
 	err := db.Get(&c, `SELECT id,host,port,username,password,client_id,use_tls,
-	                          sparkplug_enabled,sp_group_id,sp_host_id,sp_topics
+	                          sparkplug_enabled,sp_group_id,sp_host_id,sp_topics,qos,
+	                          tls_ca_file,tls_cert_file,tls_key_file,tls_insecure
 	                     FROM mqtt_config WHERE id=1`)
 	return c, err
 }

@@ -118,6 +118,14 @@ type MQTTConfig struct {
 	SpGroupID        string `db:"sp_group_id"       json:"sp_group_id"`
 	SpHostID         string `db:"sp_host_id"        json:"sp_host_id"`
 	SpTopics         string `db:"sp_topics"          json:"sp_topics"`
+	QoS              int    `db:"qos"               json:"qos"`
+
+	// TLS (used when UseTLS). CAFile enables a private/self-signed broker CA;
+	// CertFile+KeyFile enable mutual TLS; TLSInsecure skips verification.
+	CAFile      string `db:"tls_ca_file"   json:"tls_ca_file"`
+	CertFile    string `db:"tls_cert_file" json:"tls_cert_file"`
+	KeyFile     string `db:"tls_key_file"  json:"tls_key_file"`
+	TLSInsecure bool   `db:"tls_insecure"  json:"tls_insecure"`
 }
 
 // Topic = MQTT subscription bound to a device.

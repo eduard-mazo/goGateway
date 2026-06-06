@@ -3,8 +3,11 @@ package mqtt
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +16,7 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/jmoiron/sqlx"
 
+	"goGateway/internal/models"
 	"goGateway/internal/sparkplug"
 	"goGateway/internal/worker"
 )
@@ -49,6 +53,28 @@ type Manager struct {
 	// ssfvHits is the count of metrics forwarded to SSFV (sparkplug messages only).
 	// nil = disabled. Set via SetMonitorHook before Start().
 	monitorHook func(topic, kind string, payload []byte, ssfvHits int)
+
+	// dispatch is a lock-free snapshot of the three handler pointers read on the
+	// per-message hot path (onMessage). It is refreshed under mu whenever any of
+	// them changes, so onMessage never takes mu — decoupling message processing
+	// from config reloads (which hold mu while disconnecting the broker).
+	dispatch atomic.Pointer[dispatchSnapshot]
+}
+
+// dispatchSnapshot is the immutable set of handlers onMessage needs.
+type dispatchSnapshot struct {
+	sp   *worker.SparkplugHandler
+	ssfv *worker.SSFVHandler
+	hook func(topic, kind string, payload []byte, ssfvHits int)
+}
+
+// refreshDispatch publishes a fresh hot-path snapshot. Caller must hold m.mu.
+func (m *Manager) refreshDispatch() {
+	m.dispatch.Store(&dispatchSnapshot{
+		sp:   m.spHandler,
+		ssfv: m.ssfvHandler,
+		hook: m.monitorHook,
+	})
 }
 
 // MQTTConfigSnapshot is a copy of the config values the manager needs outside
@@ -85,6 +111,7 @@ func NewManager(db *sqlx.DB, cache *worker.MappingCache, d worker.Dispatcher) *M
 func (m *Manager) SetSSFVHandler(h *worker.SSFVHandler) {
 	m.mu.Lock()
 	m.ssfvHandler = h
+	m.refreshDispatch()
 	m.mu.Unlock()
 }
 
@@ -103,6 +130,7 @@ func (m *Manager) SetAutoDiscovery(a *worker.AutoDiscoveryService) {
 func (m *Manager) SetMonitorHook(fn func(topic, kind string, payload []byte, ssfvHits int)) {
 	m.mu.Lock()
 	m.monitorHook = fn
+	m.refreshDispatch()
 	m.mu.Unlock()
 }
 
@@ -163,12 +191,14 @@ func (m *Manager) reload() error {
 			SpGroupID: cfg.SpGroupID,
 			SpHostID:  cfg.SpHostID,
 			SpTopics:  cfg.SpTopics,
+			SpQoS:     spQoS(cfg.QoS),
 		}
 	} else {
 		m.registry = nil
 		m.spHandler = nil
-		m.cfg = worker.MQTTConfigSnapshot{SpTopics: cfg.SpTopics}
+		m.cfg = worker.MQTTConfigSnapshot{SpTopics: cfg.SpTopics, SpQoS: spQoS(cfg.QoS)}
 	}
+	m.refreshDispatch() // publish the new handler set to the lock-free hot path
 
 	scheme := "tcp"
 	if cfg.UseTLS {
@@ -183,12 +213,34 @@ func (m *Manager) reload() error {
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
-		SetKeepAlive(5 * time.Second).
+		SetMaxReconnectInterval(60 * time.Second). // cap auto-reconnect backoff
+		SetConnectTimeout(15 * time.Second).
+		// Keepalive loosened from 5s: under a burst the single in-order message
+		// handler can briefly stall; a tight keepalive would then read the link
+		// as dead → disconnect → mass re-subscribe/rebirth. 30s + a ping timeout
+		// still detects genuinely dead links promptly.
+		SetKeepAlive(30 * time.Second).
+		SetPingTimeout(10 * time.Second).
+		SetWriteTimeout(10 * time.Second). // a Publish on a half-open socket can't hang forever
+		// Deep inbound buffer so a rebirth burst across many nodes is absorbed
+		// rather than back-pressuring the network read loop into a keepalive miss.
+		SetMessageChannelDepth(4096).
+		// Order matters: Sparkplug sequence tracking requires in-order, single
+		// goroutine delivery. Do NOT enable concurrent handlers.
+		SetOrderMatters(true).
 		SetOnConnectHandler(m.onConnect).
 		SetConnectionLostHandler(m.onConnectionLost)
 
 	if cfg.Username != "" {
 		opts.SetUsername(cfg.Username).SetPassword(cfg.Password)
+	}
+
+	if cfg.UseTLS {
+		tlsCfg, terr := buildTLSConfig(cfg)
+		if terr != nil {
+			return fmt.Errorf("mqtt tls config: %w", terr)
+		}
+		opts.SetTLSConfig(tlsCfg)
 	}
 
 	// Sparkplug B: register LWT as "STATE/{hostID}" = "OFFLINE", retained, QoS 1.
@@ -254,7 +306,7 @@ func (m *Manager) onConnectSparkplug(c paho.Client, cfg worker.MQTTConfigSnapsho
 		wildcard := sparkplug.WildcardFor(gid)
 		log.Printf("mqtt sparkplug connected, subscribing %s", wildcard)
 		wc := wildcard
-		subTok := c.Subscribe(wc, 0, func(_ paho.Client, msg paho.Message) {
+		subTok := c.Subscribe(wc, cfg.SpQoS, func(_ paho.Client, msg paho.Message) {
 			m.onMessage(msg.Topic(), msg.Payload())
 		})
 		go func() {
@@ -317,11 +369,12 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 	m.messages.Add(1)
 	m.lastMsg.Store(time.Now().UnixNano())
 
-	m.mu.Lock()
-	spHandler := m.spHandler
-	ssfvHandler := m.ssfvHandler
-	hook := m.monitorHook
-	m.mu.Unlock()
+	var spHandler *worker.SparkplugHandler
+	var ssfvHandler *worker.SSFVHandler
+	var hook func(topic, kind string, payload []byte, ssfvHits int)
+	if snap := m.dispatch.Load(); snap != nil {
+		spHandler, ssfvHandler, hook = snap.sp, snap.ssfv, snap.hook
+	}
 
 	if spHandler != nil {
 		t, ok := sparkplug.ParseTopic(topic)
@@ -369,7 +422,9 @@ func (m *Manager) publishRebirth(groupID, nodeID string) {
 	}
 	topic := fmt.Sprintf("%s/%s/NCMD/%s", sparkplug.Namespace, groupID, nodeID)
 	payload := sparkplug.EncodeNCMDRebirth()
-	tok := c.Publish(topic, 0, false, payload)
+	// QoS 1: a dropped rebirth leaves the node out-of-sync until the next gap
+	// re-triggers it. Reliable delivery is worth the small overhead.
+	tok := c.Publish(topic, 1, false, payload)
 	go func() {
 		tok.Wait()
 		if err := tok.Error(); err != nil {
@@ -391,7 +446,7 @@ func (m *Manager) subscribeExtra(c paho.Client, cfg worker.MQTTConfigSnapshot) {
 	log.Printf("mqtt: subscribing %d extra topic(s)", len(patterns))
 	for _, pat := range patterns {
 		p := pat
-		tok := c.Subscribe(p, 0, func(_ paho.Client, msg paho.Message) {
+		tok := c.Subscribe(p, cfg.SpQoS, func(_ paho.Client, msg paho.Message) {
 			m.onMessage(msg.Topic(), msg.Payload())
 		})
 		go func() {
@@ -404,6 +459,46 @@ func (m *Manager) subscribeExtra(c paho.Client, cfg worker.MQTTConfigSnapshot) {
 		m.subs[p] = struct{}{}
 		m.mu.Unlock()
 	}
+}
+
+// spQoS clamps the configured MQTT QoS to the Sparkplug B range. Sparkplug
+// forbids QoS 2; any value ≥1 maps to QoS 1, everything else to QoS 0.
+func spQoS(q int) byte {
+	if q >= 1 {
+		return 1
+	}
+	return 0
+}
+
+// buildTLSConfig assembles a *tls.Config from the stored MQTT config. It
+// supports a custom CA (private/self-signed brokers — the norm in OT networks),
+// an optional client certificate (mutual TLS), and an explicit insecure escape
+// hatch. With no CA file it uses the system root pool. crypto/tls is pure Go, so
+// this works in the fully-static edge builds too.
+func buildTLSConfig(cfg models.MQTTConfig) (*tls.Config, error) {
+	t := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: cfg.TLSInsecure, //nolint:gosec // operator opt-in for self-signed brokers
+	}
+	if cfg.CAFile != "" {
+		pem, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read ca file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("ca file %s: no certificates parsed", cfg.CAFile)
+		}
+		t.RootCAs = pool
+	}
+	if cfg.CertFile != "" && cfg.KeyFile != "" {
+		crt, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert/key: %w", err)
+		}
+		t.Certificates = []tls.Certificate{crt}
+	}
+	return t, nil
 }
 
 // parseTopicList splits a newline/comma-separated topic pattern string,
