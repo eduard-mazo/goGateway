@@ -509,6 +509,8 @@ interface MetricMetaItem {
   tipo_variable?: string
   tipo_valor?: string
   description?: string
+  uns_code?: string       // producer-declared FIWARE attribute (→ codigo_senal)
+  uns_instance?: string   // producer-declared entity instance/channel (→ nombre_instancia)
   device_topic?: string
   device_type?: string
 }
@@ -575,6 +577,8 @@ interface ReviewMetric {
   tipoValor?: string
   description?: string
   deviceType?: string
+  unsCode?: string        // producer-declared attribute (→ codigo_senal)
+  unsInstance?: string    // producer-declared instance/channel (→ nombre_instancia)
   kind: MetricKind
 }
 
@@ -594,6 +598,8 @@ function buildReviewMetrics(e: AutodiscEntity): ReviewMetric[] {
       tipoValor:    m?.tipo_valor || undefined,
       description:  m?.description || undefined,
       deviceType:   m?.device_type || undefined,
+      unsCode:      m?.uns_code || undefined,
+      unsInstance:  m?.uns_instance || undefined,
       kind: metricKind(name),
     }
   })
@@ -723,6 +729,7 @@ async function loadTemplateCodes(tipoId: number) {
 interface PlanEntry {
   name: string
   code: string
+  instance: string            // nombre_instancia (FIWARE channel); 'default' = flat
   status: 'catalog' | 'new'   // 'mapped' entries are omitted (no action needed)
   selected: boolean
   senalId?: number            // catalog → existing señal to link into template
@@ -753,19 +760,25 @@ function rebuildSignalPlan() {
   if (!approveTarget.value) return
   for (const m of buildReviewMetrics(approveTarget.value)) {
     if (m.kind !== 'proceso') continue // only plant process signals are catalog señales
-    const code = signalCode(m.name)
+    // Prefer the producer-declared FIWARE decomposition (uns/*); fall back to
+    // deriving from the metric name for producers that don't send it.
+    const code = m.unsCode || signalCode(m.name)
+    const instance = m.unsInstance || 'default'
+    const channelized = instance !== 'default'
     const base = indexedBase(code)
-    const covered = templateCodes.value.has(code) || (!!base && templateCodes.value.has(base))
+    // A channelized signal is bound per-equipo with its instance, so it always
+    // goes through the create path (never the type-template/link path).
+    const covered = !channelized && (templateCodes.value.has(code) || (!!base && templateCodes.value.has(base)))
     if (covered) continue // already mapped by the tipo template
-    const hit = catalogByCode.value.get(code) || (base ? catalogByCode.value.get(base) : undefined)
+    const hit = channelized ? undefined : (catalogByCode.value.get(code) || (base ? catalogByCode.value.get(base) : undefined))
     if (hit) {
       signalPlan[m.name] = {
-        name: m.name, code, status: 'catalog', selected: true, senalId: hit.senal_id,
+        name: m.name, code, instance, status: 'catalog', selected: true, senalId: hit.senal_id,
         nombre: hit.nombre, tipovarId: '', unidadId: '', tipoValor: '', codeTooLong: false,
       }
     } else {
       signalPlan[m.name] = {
-        name: m.name, code, status: 'new', selected: code.length <= 20,
+        name: m.name, code, instance, status: 'new', selected: code.length <= 20,
         nombre: m.description || code,
         tipovarId: matchTipoVar(m.tipoVariable),
         unidadId:  matchUnidad(m.engUnit),
@@ -855,12 +868,13 @@ async function submitApprove() {
   const createSignals = planEntries.value
     .filter(e => e.selected && e.status === 'new')
     .map(e => ({
-      codigo_senal: e.code,
-      nombre:       e.nombre || e.code,
-      tipavar_id:   Number(e.tipovarId),
-      unidad_id:    Number(e.unidadId),
-      tipo_valor:   e.tipoValor || 'Instantaneo',
-      descripcion:  e.nombre || null,
+      codigo_senal:     e.code,
+      nombre_instancia: e.instance,
+      nombre:           e.nombre || e.code,
+      tipavar_id:       Number(e.tipovarId),
+      unidad_id:        Number(e.unidadId),
+      tipo_valor:       e.tipoValor || 'Instantaneo',
+      descripcion:      e.nombre || null,
     }))
   const linkSignals = planEntries.value
     .filter(e => e.selected && e.status === 'catalog' && e.senalId)
@@ -2024,7 +2038,10 @@ function tipoEquipoIcon(nombre: string) {
                     </Select>
                   </div>
                   <div class="col-span-3 text-[10px] text-muted-foreground">
-                    Se creará <span class="font-mono text-foreground">{{ signalPlan[m.name].code }}</span> en el catálogo y se añadirá a la plantilla del tipo.
+                    Se creará <span class="font-mono text-foreground">{{ signalPlan[m.name].code }}</span>
+                    <span v-if="signalPlan[m.name].instance !== 'default'">
+                      · instancia <span class="font-mono text-[color:var(--epm-citrico)]">{{ signalPlan[m.name].instance }}</span> (se vincula a este equipo)</span>
+                    <span v-else> y se añadirá a la plantilla del tipo</span>.
                   </div>
                 </div>
               </div>

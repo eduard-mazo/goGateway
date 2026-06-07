@@ -435,6 +435,8 @@ func collectMetricMeta(metrics []sparkplug.Metric) []MetricMeta {
 			mm.TipoVariable = m.Properties["tipo_variable"]
 			mm.TipoValor = m.Properties["tipo_valor"]
 			mm.Description = m.Properties["description"]
+			mm.UnsCode = m.Properties["uns/code"]
+			mm.UnsInstance = m.Properties["uns/instance"]
 			mm.DeviceTopic = m.Properties["device_topic"]
 			mm.DeviceType = m.Properties["device_type"]
 		}

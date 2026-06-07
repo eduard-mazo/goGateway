@@ -16,6 +16,11 @@ type MetricMeta struct {
 	TipoVariable string `json:"tipo_variable,omitempty"`
 	TipoValor    string `json:"tipo_valor,omitempty"`
 	Description  string `json:"description,omitempty"`
+	// UnsCode / UnsInstance carry the producer-declared FIWARE decomposition
+	// (contract §5.1) so the approve UI pre-fills codigo_senal / nombre_instancia
+	// instead of making the operator type them.
+	UnsCode     string `json:"uns_code,omitempty"`
+	UnsInstance string `json:"uns_instance,omitempty"`
 	// DeviceTopic is the lookup key used by SSFVMappingCache (e.g. "EPM/SSFV/EPM/Sede30/INV_1").
 	// Non-empty for solar/UNS multi-device nodes; empty for single-entity nodes (valve).
 	DeviceTopic string `json:"device_topic,omitempty"`
