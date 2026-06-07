@@ -307,9 +307,15 @@ func (h *SparkplugHandler) dispatchMetric(
 		var mqttTopic, code string
 		switch {
 		case isHostMetric(metricName):
-			// Host station = the edge node; code = System path (prefix stripped).
+			// Host station = the edge node. FIWARE/UNS channelization (C2): split
+			// the System path into attribute + instance, then build a unique match
+			// token. Scalars (CPU/Usage_pct) yield the bare attribute — identical
+			// to the old prefix-strip — so flat host metrics stay backward
+			// compatible; channelized ones (Network/docker0/Rx_MB) become
+			// "Network/Rx_MB@docker0", which fits nombre_instancia and is unique.
 			mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
-			code = strings.TrimPrefix(metricName, "System/")
+			ref := parseFiwareSignal(metricName, false)
+			code = MatchToken(ref.Codigo, ref.Instance)
 		default:
 			parts := strings.Split(metricName, "/")
 			if len(parts) >= 2 {

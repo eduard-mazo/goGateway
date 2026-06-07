@@ -1539,12 +1539,15 @@ func (h *SSFVHandler) listAutodiscovered(w http.ResponseWriter, r *http.Request)
 	jsonResp(w, http.StatusOK, out)
 }
 
-// Catalog identity column limits — keep in sync with the ssfv schema
-// (migration 0007, widened by 0013). A code that exceeds these is quarantined
-// and reported to the operator, never silently dropped.
+// Catalog identity column limits — kept in sync with the ssfv schema
+// (migration 0007). FIWARE/UNS channelization keeps real codes well under these
+// (codigo_senal "Network/RxRate_kbps"=19, token "…@docker0"=27); anything that
+// still overflows is quarantined and reported, never silently dropped.
+// (Widening these columns is blocked by dependent views — a separate task that
+// must drop/recreate them; not needed while channelized codes fit.)
 const (
-	codigoSenalMax     = 128 // ssfv.tbl_senales.codigo_senal
-	nombreInstanciaMax = 128 // ssfv.tbl_senales_x_equipo.nombre_instancia
+	codigoSenalMax     = 20 // ssfv.tbl_senales.codigo_senal       VARCHAR(20)
+	nombreInstanciaMax = 30 // ssfv.tbl_senales_x_equipo.nombre_instancia VARCHAR(30)
 )
 
 // rejectedSignal is one quarantined create_signals entry returned to the
@@ -1555,20 +1558,25 @@ type rejectedSignal struct {
 	Reason          string `json:"reason"`
 }
 
-// validateCreateSignal enforces required fields and length constraints. It
-// returns a non-empty reason when the signal must be quarantined.
-func validateCreateSignal(codigo string, tipoVarID, unidadID int) string {
+// validateCreateSignal enforces required fields and length constraints and
+// computes the catalog match token (→ nombre_instancia). It returns the token
+// and a non-empty reason when the signal must be quarantined.
+func validateCreateSignal(codigo, instancia string, tipoVarID, unidadID int) (token, reason string) {
+	codigo = strings.TrimSpace(codigo)
+	token = worker.MatchToken(codigo, strings.TrimSpace(instancia))
 	switch {
-	case strings.TrimSpace(codigo) == "":
-		return "codigo_senal is required"
+	case codigo == "":
+		return token, "codigo_senal is required"
 	case tipoVarID == 0:
-		return "tipavar_id is required"
+		return token, "tipavar_id is required"
 	case unidadID == 0:
-		return "unidad_id is required"
+		return token, "unidad_id is required"
 	case len(codigo) > codigoSenalMax:
-		return fmt.Sprintf("codigo_senal is %d chars (max %d)", len(codigo), codigoSenalMax)
+		return token, fmt.Sprintf("codigo_senal is %d chars (max %d)", len(codigo), codigoSenalMax)
+	case len(token) > nombreInstanciaMax:
+		return token, fmt.Sprintf("nombre_instancia token is %d chars (max %d)", len(token), nombreInstanciaMax)
 	}
-	return ""
+	return token, ""
 }
 
 func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Request) {
@@ -1606,6 +1614,10 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 			UnidadID    int     `json:"unidad_id"`
 			TipoValor   string  `json:"tipo_valor"`
 			Descripcion *string `json:"descripcion"`
+			// NombreInstancia is the FIWARE entity instance / channel (e.g.
+			// "docker0"). Empty/"default" ⇒ a flat signal. Non-default ⇒ the
+			// signal is bound to THIS equipo with match token "codigo@instance".
+			NombreInstancia string `json:"nombre_instancia"`
 		} `json:"create_signals"`
 		// LinkSignals: existing catalog señal_ids to add to the tipo template
 		// (signal already exists but the type's plantilla didn't include it).
@@ -1664,8 +1676,9 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 	for _, cs := range body.CreateSignals {
 		// Fail loud: quarantine invalid signals instead of silently skipping so
 		// a partial approval is never reported as a clean 200.
-		if reason := validateCreateSignal(cs.CodigoSenal, cs.TipoVarID, cs.UnidadID); reason != "" {
-			rejected = append(rejected, rejectedSignal{CodigoSenal: cs.CodigoSenal, Reason: reason})
+		token, reason := validateCreateSignal(cs.CodigoSenal, cs.NombreInstancia, cs.TipoVarID, cs.UnidadID)
+		if reason != "" {
+			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, reason})
 			continue
 		}
 		tipoValor := cs.TipoValor
@@ -1686,15 +1699,31 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 			    activo = TRUE
 			RETURNING senal_id`,
 			cs.TipoVarID, cs.UnidadID, nombre, cs.Descripcion, tipoValor, cs.CodigoSenal).Scan(&senalID); err != nil {
-			rejected = append(rejected, rejectedSignal{CodigoSenal: cs.CodigoSenal, Reason: "db insert: " + err.Error()})
+			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db insert: " + err.Error()})
 			continue
 		}
-		if _, err := pool.Exec(ctx, `
-			INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
-			VALUES ($1,$2,1)
-			ON CONFLICT (senal_id, tipo_id) DO NOTHING`, senalID, body.TipoID); err != nil {
-			rejected = append(rejected, rejectedSignal{CodigoSenal: cs.CodigoSenal, Reason: "db link: " + err.Error()})
-			continue
+
+		if token == cs.CodigoSenal {
+			// Flat signal: link to the tipo template so all equipos of this type
+			// inherit it; autoInstanciarSenales binds nombre_instancia = codigo.
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+				VALUES ($1,$2,1) ON CONFLICT (senal_id, tipo_id) DO NOTHING`, senalID, body.TipoID); err != nil {
+				rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db link: " + err.Error()})
+				continue
+			}
+		} else {
+			// Channelized signal: instance is specific to THIS equipo, not the
+			// type. Bind it directly with the match token "codigo@instance".
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
+				SELECT $1,$2,$3,TRUE
+				WHERE NOT EXISTS (SELECT 1 FROM ssfv.tbl_senales_x_equipo
+				                  WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia=$4)`,
+				senalID, equipoID, token, token); err != nil {
+				rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db instance bind: " + err.Error()})
+				continue
+			}
 		}
 		created++
 	}

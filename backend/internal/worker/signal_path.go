@@ -66,6 +66,21 @@ func parseFiwareSignal(metricName string, isDevice bool) signalRef {
 	return signalRef{Codigo: strings.Join(parts[1:], "/"), Instance: parts[0]}
 }
 
+// MatchToken builds the catalog match key (→ nombre_instancia) from the FIWARE
+// attribute (codigo) and entity instance (C2 backward-safe encoding).
+//
+// A "default"/empty instance yields the bare codigo, so flat signals match
+// exactly as before (no migration, JSON path untouched). A real instance is
+// appended as "codigo@instance" to make the key unique per channel — e.g.
+// Network/Rx_MB on docker0 → "Network/Rx_MB@docker0". codigo_senal still stores
+// the clean attribute; nombre_instancia stores this token.
+func MatchToken(codigo, instance string) string {
+	if instance == "" || instance == instanceDefault {
+		return codigo
+	}
+	return codigo + "@" + instance
+}
+
 // splitClean splits on '/' and drops empty segments — robust against leading,
 // trailing, and doubled slashes ("//a/", "/a//b").
 func splitClean(s string) []string {
