@@ -102,9 +102,41 @@ Every NDATA/DDATA value metric carries a `PropertySet`. **Values are typed**
 | `dnp3.restart` | `Boolean` (7) | Restart bit set. |
 | `dnp3.comm_lost` | `Boolean` (7) | Comm-lost bit set. |
 | `engUnit` | `String` (8) | Engineering unit, when configured (e.g. `V`, `kWh`, `degC`). |
+| `uns/code` | `String` (8) | **UNS Attribute** — the canonical signal code (→ consumer catalog `codigo_senal`). Declared in NBIRTH/DBIRTH (and echoed on data). |
+| `uns/instance` | `String` (8) | **UNS entity instance / channel** (→ consumer `nombre_instancia`). `default` when the metric has no instance dimension. |
 
 PropertyValue value-field numbers: `int_value`=3, `long_value`=4,
 `float_value`=5, `double_value`=6, `boolean_value`=7, `string_value`=8.
+
+### 5.1 UNS / FIWARE decomposition (`uns/*`) — universal
+
+A Sparkplug metric name is a flat string; the **producer** knows its true
+structure and declares it explicitly via `uns/code` + `uns/instance` so any
+consumer maps it to an **Entity → Attribute** model deterministically, **without
+parsing the name**. This is protocol- and domain-agnostic (Modbus, DNP3, System,
+any). The **Entity** is the MQTT topic node (`…/NDATA/node`) or device
+(`…/DDATA/node/device`); `uns/instance` is the sub-channel *within* that entity;
+`uns/code` is the attribute.
+
+| Metric name (example) | `uns/code` | `uns/instance` |
+|---|---|---|
+| `tank_level` (Modbus node) | `tank_level` | `default` |
+| `Energy_kWh` (device) | `Energy_kWh` | `default` |
+| `System/CPU/Usage_pct` | `CPU/Usage_pct` | `default` |
+| `System/Disk/root/Used_pct` | `Disk/Used_pct` | `root` |
+| `System/Network/eth0/Rx_MB` | `Network/Rx_MB` | `eth0` |
+| `Feeder1/Voltage` (device sub-component) | `Voltage` | `Feeder1` |
+
+**Producer rules (goMqttDnp3):** Modbus/DNP3 mappings take `uns/code` from the
+config `signalCode` (default = `metricName`) and `uns/instance` from `instance`
+(default `default`). System metrics derive them natively from the path
+(`Category[/Instance]/Attribute`). `bdSeq` and other session metrics carry no
+`uns/*`.
+
+**Consumer rules (goGateway):** seed `alias → {uns/code, uns/instance}` from the
+BIRTH and resolve data by alias. When `uns/*` is absent (legacy/3rd-party
+producer) fall back to parsing the name. The match identity is
+`(entity, uns/code, uns/instance)`.
 
 > **Producer note (Modbus):** Modbus reads have no rich quality model — a
 > successful read sets `quality=192` / `dnp3.online=true`; the other `dnp3.*`
