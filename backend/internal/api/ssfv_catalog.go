@@ -1539,6 +1539,38 @@ func (h *SSFVHandler) listAutodiscovered(w http.ResponseWriter, r *http.Request)
 	jsonResp(w, http.StatusOK, out)
 }
 
+// Catalog identity column limits — keep in sync with the ssfv schema
+// (migration 0007, widened by 0013). A code that exceeds these is quarantined
+// and reported to the operator, never silently dropped.
+const (
+	codigoSenalMax     = 128 // ssfv.tbl_senales.codigo_senal
+	nombreInstanciaMax = 128 // ssfv.tbl_senales_x_equipo.nombre_instancia
+)
+
+// rejectedSignal is one quarantined create_signals entry returned to the
+// operator so a partial approval never looks like a clean success.
+type rejectedSignal struct {
+	CodigoSenal     string `json:"codigo_senal"`
+	NombreInstancia string `json:"nombre_instancia,omitempty"`
+	Reason          string `json:"reason"`
+}
+
+// validateCreateSignal enforces required fields and length constraints. It
+// returns a non-empty reason when the signal must be quarantined.
+func validateCreateSignal(codigo string, tipoVarID, unidadID int) string {
+	switch {
+	case strings.TrimSpace(codigo) == "":
+		return "codigo_senal is required"
+	case tipoVarID == 0:
+		return "tipavar_id is required"
+	case unidadID == 0:
+		return "unidad_id is required"
+	case len(codigo) > codigoSenalMax:
+		return fmt.Sprintf("codigo_senal is %d chars (max %d)", len(codigo), codigoSenalMax)
+	}
+	return ""
+}
+
 func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if h.db == nil {
@@ -1628,12 +1660,12 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 	// tipo_valor CHECK, codigo_senal ≤20 chars) then attach to the tipo template.
 	// Idempotent via ON CONFLICT so re-approval never duplicates rows.
 	created := 0
+	rejected := make([]rejectedSignal, 0)
 	for _, cs := range body.CreateSignals {
-		if cs.CodigoSenal == "" || cs.TipoVarID == 0 || cs.UnidadID == 0 {
-			continue // incomplete — skip rather than abort the whole approval
-		}
-		if len(cs.CodigoSenal) > 20 {
-			log.Printf("autodiscovery: skip signal %q — codigo_senal exceeds 20 chars", cs.CodigoSenal)
+		// Fail loud: quarantine invalid signals instead of silently skipping so
+		// a partial approval is never reported as a clean 200.
+		if reason := validateCreateSignal(cs.CodigoSenal, cs.TipoVarID, cs.UnidadID); reason != "" {
+			rejected = append(rejected, rejectedSignal{CodigoSenal: cs.CodigoSenal, Reason: reason})
 			continue
 		}
 		tipoValor := cs.TipoValor
@@ -1654,14 +1686,14 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 			    activo = TRUE
 			RETURNING senal_id`,
 			cs.TipoVarID, cs.UnidadID, nombre, cs.Descripcion, tipoValor, cs.CodigoSenal).Scan(&senalID); err != nil {
-			log.Printf("autodiscovery: create signal %q: %v", cs.CodigoSenal, err)
+			rejected = append(rejected, rejectedSignal{CodigoSenal: cs.CodigoSenal, Reason: "db insert: " + err.Error()})
 			continue
 		}
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
 			VALUES ($1,$2,1)
 			ON CONFLICT (senal_id, tipo_id) DO NOTHING`, senalID, body.TipoID); err != nil {
-			log.Printf("autodiscovery: link new signal %d to tipo %d: %v", senalID, body.TipoID, err)
+			rejected = append(rejected, rejectedSignal{CodigoSenal: cs.CodigoSenal, Reason: "db link: " + err.Error()})
 			continue
 		}
 		created++
@@ -1701,7 +1733,20 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 		go h.rebirthFn(groupID, nodeID)
 	}
 
-	jsonResp(w, http.StatusOK, map[string]any{"equipo_id": equipoID})
+	resp := map[string]any{
+		"equipo_id": equipoID,
+		"created":   created,
+		"linked":    linked,
+		"rejected":  rejected,
+	}
+	switch {
+	case len(rejected) == 0:
+		jsonResp(w, http.StatusOK, resp) // clean
+	case created+linked > 0:
+		jsonResp(w, http.StatusMultiStatus, resp) // 207 — partial: operator sees what dropped
+	default:
+		jsonResp(w, http.StatusBadRequest, resp) // 400 — every requested signal was rejected
+	}
 }
 
 func (h *SSFVHandler) rejectAutodiscovered(w http.ResponseWriter, r *http.Request) {
