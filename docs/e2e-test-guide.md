@@ -10,9 +10,14 @@ gateway, running the four-iteration test (baseline → approve station → add m
 second edge), checking each step in the UI, and enabling TLS (including on the
 ICR-3232 edge).
 
-> Related: [`sparkplug-contract.md`](sparkplug-contract.md) (wire format),
-> [`ARCHITECTURE_goGateway.md`](ARCHITECTURE_goGateway.md),
+> Related: [`sparkplug-contract.md`](sparkplug-contract.md) (wire format +
+> §5.1 UNS `uns/*` decomposition), [`deploy-c1-cutover.md`](deploy-c1-cutover.md)
+> (C1 migration runbook), [`ARCHITECTURE_goGateway.md`](ARCHITECTURE_goGateway.md),
 > and goMqttModbus `ARCHITECTURE.md`.
+>
+> Current as of the UNS/C1 refactor: producers declare `uns/code` + `uns/instance`;
+> the catalog matches on the composite `(entity, codigo_senal, nombre_instancia)`;
+> approvals pre-fill from `uns/*` and fail loud (HTTP 207) on bad signals.
 
 ---
 
@@ -286,35 +291,43 @@ curl -s -X POST "http://localhost:8091/api/ssfv/autodiscovered/$MID/approve" \
      {"codigo_senal":"Energy_kWh","nombre":"Energia","tipavar_id":6,"unidad_id":3,"tipo_valor":"Acumulado"},
      {"codigo_senal":"Relay1","nombre":"Rele","tipavar_id":10,"unidad_id":3,"tipo_valor":"Instantaneo"}]}'
 
-# host station = the edge node itself: register two System signals.
-# NB: the code is the System path with the "System/" prefix stripped (≤20 chars).
-curl -s -X POST "http://localhost:8091/api/ssfv/autodiscovered/$NID/approve" \
+# host station = the edge node itself. UNS/FIWARE split (sparkplug-contract.md
+# §5.1): codigo_senal = the Attribute (uns/code), nombre_instancia = the channel
+# (uns/instance). A flat metric omits nombre_instancia (→ "default"); a
+# channelized one (per-interface, per-mount) sets it. From the UI the approve
+# dialog PRE-FILLS both from the producer's uns/* — you just confirm.
+curl -s -w ' [HTTP %{http_code}]' -X POST "http://localhost:8091/api/ssfv/autodiscovered/$NID/approve" \
   -H 'Content-Type: application/json' -d '{
    "planta_id":1,"tipo_id":2,"nombre_equipo":"edge-1-host","nombre_topic":"plant-floor/edge-1",
    "create_signals":[
-     {"codigo_senal":"CPU/Usage_pct","nombre":"CPU","tipavar_id":5,"unidad_id":3,"tipo_valor":"Instantaneo"},
-     {"codigo_senal":"Memory/Used_pct","nombre":"RAM","tipavar_id":5,"unidad_id":3,"tipo_valor":"Instantaneo"}]}'
+     {"codigo_senal":"CPU/Usage_pct","nombre":"CPU","tipavar_id":5,"unidad_id":3},
+     {"codigo_senal":"Network/Rx_MB","nombre":"NetRx","tipavar_id":5,"unidad_id":3,"nombre_instancia":"docker0"}]}'
 
 sleep 6
-TS "SELECT e.nombre_topic AS station, s.codigo_senal AS signal, count(*) rows,
-           round(min(v.valor)::numeric,2) minv, round(max(v.valor)::numeric,2) maxv
+TS "SELECT e.nombre_topic AS station, s.codigo_senal AS attribute, sxe.nombre_instancia AS channel,
+           count(*) rows, round(max(v.valor)::numeric,2) maxv
     FROM ssfv.tbl_valores v
-    JOIN ssfv.tbl_senales_x_equipo se ON se.equisenal_id=v.equisenal_id
-    JOIN ssfv.tbl_senales s ON s.senal_id=se.senal_id
-    JOIN ssfv.tbl_equipo e  ON e.equipo_id=se.equipo_id
-    GROUP BY 1,2 ORDER BY 1,2;"
+    JOIN ssfv.tbl_senales_x_equipo sxe ON sxe.equisenal_id=v.equisenal_id
+    JOIN ssfv.tbl_senales s ON s.senal_id=sxe.senal_id
+    JOIN ssfv.tbl_equipo e  ON e.equipo_id=sxe.equipo_id
+    GROUP BY 1,2,3 ORDER BY 1,2;"
 ```
 
-**Expected:** only the four registered signals appear in `tbl_valores`, with real
-values (CPU%, RAM%, Energy, Relay). The unregistered node metric `tank_level` is
-**not** present.
+**Expected:** only the registered signals appear in `tbl_valores`. The flat
+`CPU/Usage_pct` binds with `nombre_instancia='default'`; the **channelized**
+`Network/Rx_MB` binds with `nombre_instancia='docker0'` — and it persists (this
+was impossible before C1). The unregistered node metric `tank_level` is **not**
+present.
 
 > `tipavar_id` / `unidad_id` are FKs into the seeded `ssfv.tbl_tipo_variable` /
 > `ssfv.tbl_unidades`. List them with
 > `TS "SELECT tipovar_id,nombre FROM ssfv.tbl_tipo_variable;"` and
 > `TS "SELECT unidad_id,nombre FROM ssfv.tbl_unidades;"`.
-> `codigo_senal` is `VARCHAR(20)` — long paths (e.g. `Network/docker0/RxRate_kbps`)
-> won't fit and stay in Descartados.
+>
+> **Fail-loud approval:** a signal that violates a constraint (e.g. a
+> `codigo_senal` over 20 chars) is **not** silently dropped — the response is
+> **HTTP 207 Multi-Status** with `rejected:[{codigo_senal, reason}]` so you see
+> exactly what didn't register.
 
 ### Iteration 3 — the device adds a new metric
 
@@ -411,10 +424,12 @@ Walkthrough:
    Open **SSFV → Pendientes**: `edge-1` (node) and `meter-01` (device) are listed
    `pending`. **TSDB** view shows the pipeline healthy but no plant writes yet.
 2. **Iteration 2** — in **Pendientes**, click **Approve** on `meter-01`: choose
-   *Planta* = EPM Sede 30, *Tipo* = Medidor, and add signals `Energy_kWh` /
-   `Relay1` (units/variable types from the dropdowns). Repeat for the node
-   (`edge-1`) to register `CPU/Usage_pct` / `Memory/Used_pct`. The entity moves to
-   `approved`; **Catálogo** now lists the señales and values begin to persist.
+   *Planta* = EPM Sede 30, *Tipo* = Medidor. Each signal's **`codigo_senal` and
+   `nombre_instancia` are pre-filled** from the producer's `uns/*` properties
+   (sparkplug-contract.md §5.1) — you confirm rather than type. Repeat for the
+   node (`edge-1`): channelized System metrics show their channel, e.g.
+   `Network/Rx_MB` *· instancia `docker0` (se vincula a este equipo)*. The entity
+   moves to `approved`; **Catálogo** lists the señales and values begin to persist.
 3. **Iteration 3** — after adding `Power_kW`, open **SSFV → Estado**: the
    Descartados list shows `plant-floor/edge-1/meter-01/Power_kW` (received but not
    registered → not stored). Approve it to start persisting.
