@@ -37,6 +37,35 @@ A metric is a **device** metric iff its `SignalMapping.deviceId` is non-empty
 independent of protocol — Modbus and DNP3 mappings can be either. **System/host
 telemetry is always node-scoped.**
 
+### 1.1 Infrastructure hierarchy (group → node → device → signal)
+
+The Sparkplug namespace **is** the infrastructure model; the consumer catalog
+mirrors it 1:1:
+
+```
+group_id        ↔  Planta            (ssfv.tbl_planta.broker_base = the group, one segment)
+ └─ edge_node   ↔  Nodo              (the edge gateway; the segment after the group)
+     ├─ node-level metrics  →  System + node process signals   (NDATA)
+     └─ device_id ↔ Device   →  device signals                 (DDATA)
+         (signals)           →  ssfv.tbl_senales_x_equipo (codigo_senal + nombre_instancia)
+```
+
+**Rules (binding):**
+- A **Planta maps to at most one `group_id`**. `tbl_planta.broker_base` holds the
+  **group** (a single topic segment, e.g. `plant-floor`).
+- An **Entity** (catalog `tbl_equipo`, `nombre_topic`) is either a **node**
+  (`{group}/{node}` — carries its System + node process signals) or a **device**
+  (`{group}/{node}/{device}`).
+- **Prefix invariant:** `equipo.nombre_topic` MUST start with its planta's
+  `broker_base` (the group). Enforced in the consumer at the API (422) and the DB
+  (trigger, migration 0014).
+- The **node level is implicit** in the topic: `node = first segment of
+  nombre_topic after the group`. (Opción A — no separate node table.)
+
+The producer is already conformant: `sparkplug.groupId` = Planta, `nodeId` =
+Nodo, `deviceId` = Device. Optionally it may declare the Planta in node
+properties (`planta` / `planta_id`) for auto-provisioning.
+
 ---
 
 ## 2. Session rules (sequence, bdSeq, aliases)

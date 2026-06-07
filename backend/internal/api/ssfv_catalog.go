@@ -228,6 +228,12 @@ func (h *SSFVHandler) createPlanta(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Planta = group (contract §1.1): broker_base must be a single segment.
+	if reason := validateBrokerBase(body.BrokerBase); reason != "" {
+		errResp(w, http.StatusBadRequest, reason)
+		return
+	}
+	body.BrokerBase = strings.TrimSpace(body.BrokerBase)
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -522,6 +528,12 @@ func (h *SSFVHandler) createEquipo(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+
+	// Prefix invariant (contract §1.1): nombre_topic must be under the group.
+	if reason := h.topicUnderPlanta(ctx, body.PlantaID, body.NombreTopic); reason != "" {
+		errResp(w, http.StatusUnprocessableEntity, reason)
+		return
+	}
 
 	// Insert equipo.
 	var id int
@@ -1585,6 +1597,39 @@ func validateCreateSignal(codigo, instancia string, tipoVarID, unidadID int) (in
 	return instance, ""
 }
 
+// validateBrokerBase enforces that a planta's broker_base is the Sparkplug group
+// (sparkplug-contract.md §1.1): one non-empty topic segment — no '/', no spaces.
+// Returns a non-empty rejection reason on failure.
+func validateBrokerBase(b string) string {
+	b = strings.TrimSpace(b)
+	switch {
+	case b == "":
+		return "broker_base (group) es obligatorio"
+	case strings.ContainsAny(b, "/ \t"):
+		return "broker_base debe ser un único segmento (el group_id de Sparkplug), sin '/' ni espacios"
+	}
+	return ""
+}
+
+// topicUnderPlanta returns a rejection reason if nombreTopic does not start with
+// the planta's broker_base (the group) — the prefix invariant of §1.1. The DB
+// trigger (migration 0014) is the backstop; this gives the operator a clear 422.
+func (h *SSFVHandler) topicUnderPlanta(ctx context.Context, plantaID int, nombreTopic string) string {
+	pool := h.pool()
+	if pool == nil {
+		return ""
+	}
+	var base string
+	if err := pool.QueryRow(ctx,
+		`SELECT broker_base FROM ssfv.tbl_planta WHERE planta_id=$1`, plantaID).Scan(&base); err != nil {
+		return "" // planta missing → the FK / NOT NULL constraint surfaces it
+	}
+	if nombreTopic != base && !strings.HasPrefix(nombreTopic, base+"/") {
+		return fmt.Sprintf("nombre_topic %q debe empezar por el group (broker_base) de la planta: %q", nombreTopic, base)
+	}
+	return ""
+}
+
 func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if h.db == nil {
@@ -1655,6 +1700,13 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+
+	// Prefix invariant (contract §1.1): the entity topic must be under the
+	// planta's group. Reject loudly before creating the equipo.
+	if reason := h.topicUnderPlanta(ctx, body.PlantaID, body.NombreTopic); reason != "" {
+		errResp(w, http.StatusUnprocessableEntity, reason)
+		return
+	}
 
 	var equipoID int
 	err = pool.QueryRow(ctx, `

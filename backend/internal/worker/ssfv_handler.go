@@ -19,8 +19,8 @@ import (
 type EquiSenalMapping struct {
 	EquisenalID int64
 	NombreTopic string
-	GroupID     string // split_part(broker_base, '/', 2)
-	NodeID      string // split_part(broker_base, '/', 4)
+	GroupID     string // = planta.broker_base (the Sparkplug group; contract §1.1)
+	NodeID      string // first segment of nombre_topic after the group prefix
 	DeviceID    string // last segment of nombre_topic
 	EsAlarma    bool
 }
@@ -63,8 +63,10 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 		    s.codigo_senal,
 		    sxe.nombre_instancia,
 		    e.nombre_topic,
-		    split_part(p.broker_base, '/', 2) AS group_id,
-		    split_part(p.broker_base, '/', 4) AS node_id,
+		    -- Contract §1.1: group = planta.broker_base; node = the first segment of
+		    -- nombre_topic after the group prefix; device = the last segment.
+		    p.broker_base AS group_id,
+		    split_part(substring(e.nombre_topic FROM char_length(p.broker_base) + 2), '/', 1) AS node_id,
 		    reverse(split_part(reverse(e.nombre_topic), '/', 1)) AS device_id,
 		    (s.codigo_senal LIKE 'AL%' OR s.codigo_senal LIKE 'EF%' OR s.codigo_senal LIKE 'EV%') AS es_alarma
 		FROM ssfv.tbl_senales_x_equipo sxe
