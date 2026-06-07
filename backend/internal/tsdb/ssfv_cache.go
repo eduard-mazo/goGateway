@@ -23,10 +23,15 @@ func newSSFVCache(pool *pgxpool.Pool) *SSFVCache {
 	return &SSFVCache{pool: pool}
 }
 
-// Resolve returns the equisenal_id for a signal_path, or (0, false) if not found.
-// The lookup matches "nombre_topic/nombre_instancia" against signal_path.
-func (c *SSFVCache) Resolve(ctx context.Context, signalPath string) (int, bool) {
-	if v, ok := c.cache.Load(signalPath); ok {
+// Resolve returns the equisenal_id for a metric, or (0, false) if not found.
+// C1 composite identity: (entity nombre_topic, codigo_senal, nombre_instancia) —
+// the FIWARE Entity → Attribute → channel model.
+func (c *SSFVCache) Resolve(ctx context.Context, entity, codigo, instance string) (int, bool) {
+	if instance == "" {
+		instance = "default"
+	}
+	key := entity + "\x00" + codigo + "\x00" + instance
+	if v, ok := c.cache.Load(key); ok {
 		id := v.(int)
 		return id, id != equiSenalNotFound
 	}
@@ -36,15 +41,16 @@ func (c *SSFVCache) Resolve(ctx context.Context, signalPath string) (int, bool) 
 		SELECT sxe.equisenal_id
 		FROM ssfv.tbl_equipo e
 		JOIN ssfv.tbl_senales_x_equipo sxe ON sxe.equipo_id = e.equipo_id
-		WHERE e.nombre_topic || '/' || sxe.nombre_instancia = $1
+		JOIN ssfv.tbl_senales          s   ON s.senal_id   = sxe.senal_id
+		WHERE e.nombre_topic = $1 AND s.codigo_senal = $2 AND sxe.nombre_instancia = $3
 		  AND sxe.activo = TRUE
-		LIMIT 1`, signalPath).Scan(&id)
+		LIMIT 1`, entity, codigo, instance).Scan(&id)
 
 	if err != nil {
-		c.cache.Store(signalPath, equiSenalNotFound)
+		c.cache.Store(key, equiSenalNotFound)
 		return 0, false
 	}
-	c.cache.Store(signalPath, id)
+	c.cache.Store(key, id)
 	return id, true
 }
 

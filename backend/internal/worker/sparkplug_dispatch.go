@@ -304,46 +304,47 @@ func (h *SparkplugHandler) dispatchMetric(
 	ssfvHandled := false
 	var ssfvTopic string // the SSFV equipment topic attempted (for log suppression)
 	if h.ssfvHandler != nil {
-		var mqttTopic, code string
+		// C1 composite identity (entity, codigo, instance) — FIWARE Entity →
+		// Attribute → channel. Produced from the producer-declared uns/* when
+		// present, else from name parsing (fallbacks).
+		var entity, codigo, instance string
+		nodeEntity := topic.GroupID + "/" + topic.EdgeNodeID
+		devEntity := nodeEntity
+		if isDevice && topic.DeviceID != "" {
+			devEntity = nodeEntity + "/" + topic.DeviceID
+		}
 		switch {
 		case m.Properties["uns/code"] != "":
-			// Producer-DECLARED UNS decomposition (Phase 1+, sparkplug-contract
-			// §5.1): deterministic, no name parsing. Entity = node or node/device;
-			// the match token is uns/code[@uns/instance]. Universal across
-			// protocols. Reading a nil map is safe (yields "").
-			if isDevice && topic.DeviceID != "" {
-				mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID + "/" + topic.DeviceID
-			} else {
-				mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
-			}
-			code = MatchToken(m.Properties["uns/code"], m.Properties["uns/instance"])
+			// Producer-DECLARED UNS decomposition (Phase 1, contract §5.1):
+			// deterministic, no name parsing. Universal across protocols.
+			entity = devEntity
+			codigo = m.Properties["uns/code"]
+			instance = m.Properties["uns/instance"]
 		case isHostMetric(metricName):
-			// FALLBACK for producers without uns/*: parse the System path into
-			// attribute + instance and build the same match token. Scalars
-			// (CPU/Usage_pct) yield the bare attribute — backward compatible;
-			// channelized (Network/docker0/Rx_MB) → "Network/Rx_MB@docker0".
-			mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
+			// FALLBACK: parse the System path (Category[/Instance]/Attribute).
+			entity = nodeEntity
 			ref := parseFiwareSignal(metricName, false)
-			code = MatchToken(ref.Codigo, ref.Instance)
+			codigo, instance = ref.Codigo, ref.Instance
 		default:
 			parts := strings.Split(metricName, "/")
 			if len(parts) >= 2 {
-				// Full UNS path embedded in metric name: "EPM_SSFV/Sede30/INV_1/OSV"
-				mqttTopic = strings.Join(parts[:len(parts)-1], "/")
-				code = parts[len(parts)-1]
+				// FALLBACK: full UNS path embedded in the name
+				// ("EPM_SSFV/Sede30/INV_1/OSV") → entity = path, attribute = leaf.
+				entity = strings.Join(parts[:len(parts)-1], "/")
+				codigo = parts[len(parts)-1]
 			} else {
-				// Simple metric name ("cycle"): use the Sparkplug node/device topic.
-				if isDevice && topic.DeviceID != "" {
-					mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID + "/" + topic.DeviceID
-				} else {
-					mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
-				}
-				code = metricName
+				// Simple metric name on the node/device entity.
+				entity = devEntity
+				codigo = metricName
 			}
+			instance = "default"
 		}
-		ssfvTopic = mqttTopic
+		if instance == "" {
+			instance = "default"
+		}
+		ssfvTopic = entity
 		val, _ := m.Float64()
-		ssfvHandled = h.ssfvHandler.HandleMetric(mqttTopic, code, val, ts)
+		ssfvHandled = h.ssfvHandler.HandleMetric(entity, codigo, instance, val, ts)
 	}
 
 	var nodeBase string

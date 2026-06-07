@@ -1,0 +1,2 @@
+-- Rollback of 013: cannot reliably restore the original per-row instance
+-- (information is lost — all flats became 'default'). No-op; runner applies *.up only.

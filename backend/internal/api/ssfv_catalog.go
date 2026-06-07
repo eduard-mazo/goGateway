@@ -596,15 +596,18 @@ func (h *SSFVHandler) autoInstanciarSenales(ctx context.Context, pool *pgxpool.P
 			// indice_canal IS NULL. Use WHERE NOT EXISTS to guarantee idempotency.
 			// $3 and $4 carry the same value; split avoids 42P08 (inconsistent
 			// type inference when the same parameter appears in SELECT and WHERE).
+			// C1: a flat (non-indexed) signal binds with nombre_instancia='default';
+			// the attribute lives in codigo_senal. (Indexed signals above use the
+			// channel name as the instance.)
 			_, err := pool.Exec(ctx, `
 				INSERT INTO ssfv.tbl_senales_x_equipo
 				    (senal_id, equipo_id, nombre_instancia, activo)
-				SELECT $1,$2,$3,TRUE
+				SELECT $1,$2,'default',TRUE
 				WHERE NOT EXISTS (
 				    SELECT 1 FROM ssfv.tbl_senales_x_equipo
-				    WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia=$4
+				    WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia='default'
 				)`,
-				s.senalID, equipoID, s.codigoSenal, s.codigoSenal)
+				s.senalID, equipoID)
 			if err != nil {
 				log.Printf("ssfv: insert sxe %s: %v", s.codigoSenal, err)
 			}
@@ -1561,22 +1564,25 @@ type rejectedSignal struct {
 // validateCreateSignal enforces required fields and length constraints and
 // computes the catalog match token (→ nombre_instancia). It returns the token
 // and a non-empty reason when the signal must be quarantined.
-func validateCreateSignal(codigo, instancia string, tipoVarID, unidadID int) (token, reason string) {
+func validateCreateSignal(codigo, instancia string, tipoVarID, unidadID int) (instance, reason string) {
 	codigo = strings.TrimSpace(codigo)
-	token = worker.MatchToken(codigo, strings.TrimSpace(instancia))
+	instance = strings.TrimSpace(instancia)
+	if instance == "" {
+		instance = "default"
+	}
 	switch {
 	case codigo == "":
-		return token, "codigo_senal is required"
+		return instance, "codigo_senal is required"
 	case tipoVarID == 0:
-		return token, "tipavar_id is required"
+		return instance, "tipavar_id is required"
 	case unidadID == 0:
-		return token, "unidad_id is required"
+		return instance, "unidad_id is required"
 	case len(codigo) > codigoSenalMax:
-		return token, fmt.Sprintf("codigo_senal is %d chars (max %d)", len(codigo), codigoSenalMax)
-	case len(token) > nombreInstanciaMax:
-		return token, fmt.Sprintf("nombre_instancia token is %d chars (max %d)", len(token), nombreInstanciaMax)
+		return instance, fmt.Sprintf("codigo_senal is %d chars (max %d)", len(codigo), codigoSenalMax)
+	case len(instance) > nombreInstanciaMax:
+		return instance, fmt.Sprintf("nombre_instancia is %d chars (max %d)", len(instance), nombreInstanciaMax)
 	}
-	return token, ""
+	return instance, ""
 }
 
 func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Request) {
@@ -1676,7 +1682,7 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 	for _, cs := range body.CreateSignals {
 		// Fail loud: quarantine invalid signals instead of silently skipping so
 		// a partial approval is never reported as a clean 200.
-		token, reason := validateCreateSignal(cs.CodigoSenal, cs.NombreInstancia, cs.TipoVarID, cs.UnidadID)
+		instance, reason := validateCreateSignal(cs.CodigoSenal, cs.NombreInstancia, cs.TipoVarID, cs.UnidadID)
 		if reason != "" {
 			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, reason})
 			continue
@@ -1703,9 +1709,9 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		if token == cs.CodigoSenal {
-			// Flat signal: link to the tipo template so all equipos of this type
-			// inherit it; autoInstanciarSenales binds nombre_instancia = codigo.
+		if instance == "default" {
+			// Flat signal (C1 instance "default"): link to the tipo template so all
+			// equipos of this type inherit it; autoInstanciarSenales binds it.
 			if _, err := pool.Exec(ctx, `
 				INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
 				VALUES ($1,$2,1) ON CONFLICT (senal_id, tipo_id) DO NOTHING`, senalID, body.TipoID); err != nil {
@@ -1713,14 +1719,14 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 		} else {
-			// Channelized signal: instance is specific to THIS equipo, not the
-			// type. Bind it directly with the match token "codigo@instance".
+			// Channelized signal: the instance is specific to THIS equipo, not the
+			// type. Bind it directly with nombre_instancia = the pure instance (C1).
 			if _, err := pool.Exec(ctx, `
 				INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
 				SELECT $1,$2,$3,TRUE
 				WHERE NOT EXISTS (SELECT 1 FROM ssfv.tbl_senales_x_equipo
 				                  WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia=$4)`,
-				senalID, equipoID, token, token); err != nil {
+				senalID, equipoID, instance, instance); err != nil {
 				rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db instance bind: " + err.Error()})
 				continue
 			}

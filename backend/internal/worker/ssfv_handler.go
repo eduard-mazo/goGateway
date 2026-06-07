@@ -60,6 +60,7 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 	rows, err := pool.Query(ctx, `
 		SELECT
 		    sxe.equisenal_id,
+		    s.codigo_senal,
 		    sxe.nombre_instancia,
 		    e.nombre_topic,
 		    split_part(p.broker_base, '/', 2) AS group_id,
@@ -83,13 +84,14 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 
 	for rows.Next() {
 		var m EquiSenalMapping
-		var nombreInstancia string
-		if err := rows.Scan(&m.EquisenalID, &nombreInstancia, &m.NombreTopic,
+		var codigoSenal, nombreInstancia string
+		if err := rows.Scan(&m.EquisenalID, &codigoSenal, &nombreInstancia, &m.NombreTopic,
 			&m.GroupID, &m.NodeID, &m.DeviceID, &m.EsAlarma); err != nil {
 			log.Printf("ssfv mapping scan: %v", err)
 			continue
 		}
-		key := m.NombreTopic + "\x00" + nombreInstancia
+		// C1 composite key: entity \x00 codigo_senal \x00 nombre_instancia.
+		key := m.NombreTopic + "\x00" + codigoSenal + "\x00" + nombreInstancia
 		newData[key] = m
 		newTopics[m.NombreTopic] = struct{}{}
 	}
@@ -126,11 +128,15 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 	return nil
 }
 
-// Lookup returns the mapping for a (topic, jsonKey) pair.
-func (c *SSFVMappingCache) Lookup(topic, jsonKey string) (EquiSenalMapping, bool) {
+// Lookup returns the mapping for the C1 composite identity
+// (entity, codigo_senal, nombre_instancia).
+func (c *SSFVMappingCache) Lookup(entity, codigo, instance string) (EquiSenalMapping, bool) {
+	if instance == "" {
+		instance = "default"
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	m, ok := c.data[topic+"\x00"+jsonKey]
+	m, ok := c.data[entity+"\x00"+codigo+"\x00"+instance]
 	return m, ok
 }
 
@@ -219,20 +225,23 @@ func (h *SSFVHandler) IsKnownTopic(topic string) bool {
 	return h.cache.IsTopic(topic)
 }
 
-// HandleMetric processes a single decoded metric from a Sparkplug B NDATA message.
-// topic = MQTT equipment topic (e.g. "EPM_SSFV/Sede30/INV_1"), code = signal code.
-// Returns true if the signal is known to the SSFV catalog.
-func (h *SSFVHandler) HandleMetric(topic, code string, value float64, ts time.Time) bool {
-	mapping, ok := h.cache.Lookup(topic, code)
+// HandleMetric processes a single decoded metric value against the SSFV catalog
+// using the C1 composite identity (entity, codigo, instance). Writes to
+// ssfv.tbl_valores on a catalog hit; an unregistered signal on a known entity is
+// quarantined to Descartados. Returns true on a catalog hit.
+func (h *SSFVHandler) HandleMetric(entity, codigo, instance string, value float64, ts time.Time) bool {
+	if instance == "" {
+		instance = "default"
+	}
+	mapping, ok := h.cache.Lookup(entity, codigo, instance)
 	if !ok {
-		// If the equipment topic IS configured but this specific signal is not,
-		// record it as an actionable miss (appears in Descartados tab).
-		if h.cache.IsTopic(topic) {
+		// Entity exists but this signal/instance is unregistered → actionable miss.
+		if h.cache.IsTopic(entity) {
 			h.mu.RLock()
 			fn := h.missFn
 			h.mu.RUnlock()
 			if fn != nil {
-				fn(topic+"/"+code, topic)
+				fn(entity+"/"+codigo+"@"+instance, entity)
 			}
 		}
 		return false
@@ -244,14 +253,15 @@ func (h *SSFVHandler) HandleMetric(topic, code string, value float64, ts time.Ti
 	h.mu.RUnlock()
 
 	if mapping.EsAlarma && alarmMgr != nil {
-		alarmMgr.Process(mapping.EquisenalID, value, ts, alarmType(code))
+		alarmMgr.Process(mapping.EquisenalID, value, ts, alarmType(codigo))
 	}
 	if pipe != nil {
 		pipe.Push(tsdb.DataPoint{ //nolint:errcheck
-			Measurement: code,
+			Measurement: codigo,
 			Tags: map[string]string{
-				"signal_path": topic + "/" + code,
-				"equipo":      topic,
+				"equipo":    entity,
+				"codigo":    codigo,
+				"instancia": instance,
 			},
 			Fields:    map[string]float64{"value": value},
 			Timestamp: ts,
@@ -298,14 +308,13 @@ func (h *SSFVHandler) Handle(topic string, payload []byte) bool {
 			continue
 		}
 
-		// Try exact match first (e.g. "AP", "AL_COM"), then indexed base code.
-		mapping, ok := h.cache.Lookup(topic, key)
+		// C1: map the JSON key to (codigo, instance). A flat key is its own code
+		// with the default instance; an indexed key ("IDC_1") splits into its base
+		// code ("IDC_x") + the channel as the instance.
+		codigo, instance := jsonSignalParts(key)
+		mapping, ok := h.cache.Lookup(topic, codigo, instance)
 		if !ok {
-			baseCode, _ := resolveIndexedSignal(key)
-			if baseCode != key {
-				continue // indexed signal not in cache (no mapping for this instance)
-			}
-			continue
+			continue // not in cache for this equipo/instance
 		}
 
 		if mapping.EsAlarma && alarmMgr != nil {
@@ -314,10 +323,11 @@ func (h *SSFVHandler) Handle(topic string, payload []byte) bool {
 
 		if pipe != nil {
 			pipe.Push(tsdb.DataPoint{ //nolint:errcheck
-				Measurement: key,
+				Measurement: codigo,
 				Tags: map[string]string{
-					"signal_path": topic + "/" + key,
-					"equipo":      topic,
+					"equipo":    topic,
+					"codigo":    codigo,
+					"instancia": instance,
 				},
 				Fields:    map[string]float64{"value": value},
 				Timestamp: ts,
@@ -325,6 +335,17 @@ func (h *SSFVHandler) Handle(topic string, payload []byte) bool {
 		}
 	}
 	return true
+}
+
+// jsonSignalParts maps a JSON field key to the C1 composite (codigo, instance).
+// An indexed key ("IDC_1") → base code "IDC_x" + channel instance "IDC_1";
+// a flat key ("AP") → code "AP" + instance "default".
+func jsonSignalParts(jsonKey string) (codigo, instance string) {
+	base, idx := resolveIndexedSignal(jsonKey)
+	if idx > 0 {
+		return base, jsonKey
+	}
+	return jsonKey, "default"
 }
 
 // resolveIndexedSignal converts "IDC_1" → ("IDC_x", 1), non-indexed → (key, 0).
