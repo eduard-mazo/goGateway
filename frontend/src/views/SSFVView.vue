@@ -754,12 +754,24 @@ function matchUnidad(simbolo?: string): string {
   return adim?.unidad_id ? String(adim.unidad_id) : ''
 }
 
+// includeSystem: when on, the gateway's own System/* host telemetry (CPU,
+// memory, disk, network…) is offered for registration as catalog señales too —
+// each channelized metric carries its instance (e.g. Network/Rx_MB @ docker0).
+// Off by default so a node's plant signals stay the focus.
+const includeSystem = ref(false)
+
+// isRegistrable decides which metric kinds become catalog señales: always plant
+// 'proceso' signals; 'sistema' (host telemetry) only when the operator opts in.
+function isRegistrable(kind: MetricKind): boolean {
+  return kind === 'proceso' || (includeSystem.value && kind === 'sistema')
+}
+
 // Recompute the plan from the current target + catalog + template selection.
 function rebuildSignalPlan() {
   for (const k of Object.keys(signalPlan)) delete signalPlan[k]
   if (!approveTarget.value) return
   for (const m of buildReviewMetrics(approveTarget.value)) {
-    if (m.kind !== 'proceso') continue // only plant process signals are catalog señales
+    if (!isRegistrable(m.kind)) continue
     // Prefer the producer-declared FIWARE decomposition (uns/*); fall back to
     // deriving from the metric name for producers that don't send it.
     const code = m.unsCode || signalCode(m.name)
@@ -789,15 +801,19 @@ function rebuildSignalPlan() {
   }
 }
 
-const procesoCount = computed(() =>
-  approveTarget.value ? buildReviewMetrics(approveTarget.value).filter(m => m.kind === 'proceso').length : 0)
+// How many metrics are eligible to become señales given the current toggle.
+const registrableCount = computed(() =>
+  approveTarget.value ? buildReviewMetrics(approveTarget.value).filter(m => isRegistrable(m.kind)).length : 0)
+// How many host (sistema) metrics exist — drives the "include system" toggle.
+const sistemaCount = computed(() =>
+  approveTarget.value ? buildReviewMetrics(approveTarget.value).filter(m => m.kind === 'sistema').length : 0)
 const planEntries = computed(() => Object.values(signalPlan))
 const planSummary = computed(() => {
   const e = planEntries.value
   const cat = e.filter(x => x.status === 'catalog')
   const nw  = e.filter(x => x.status === 'new')
   return {
-    mapped:     procesoCount.value - e.length,
+    mapped:     Math.max(0, registrableCount.value - e.length),
     catalog:    cat.length,
     new:        nw.length,
     willCreate: nw.filter(x => x.selected).length,
@@ -814,6 +830,8 @@ watch(() => approveForm.tipo_id, async (v) => {
   await loadTemplateCodes(Number(v) || 0)
   rebuildSignalPlan()
 })
+// Re-plan when the operator toggles host-metric inclusion.
+watch(includeSystem, () => { if (!approveReadOnly.value) rebuildSignalPlan() })
 
 function openInspect(e: AutodiscEntity) {
   approveTarget.value = e
@@ -833,6 +851,7 @@ async function openApprove(e: AutodiscEntity) {
   approveTarget.value = e
   approveReadOnly.value = false
   metricSearch.value = ''
+  includeSystem.value = false
   const defaultTopic = e.device_id
     ? `${e.group_id}/${e.node_id}/${e.device_id}`
     : `${e.group_id}/${e.node_id}`
@@ -880,7 +899,9 @@ async function submitApprove() {
     .filter(e => e.selected && e.status === 'catalog' && e.senalId)
     .map(e => e.senalId as number)
   try {
-    await api.post(`/ssfv/autodiscovered/${approveTarget.value.id}/approve`, {
+    // 207 Multi-Status (partial) is a 2xx, so axios resolves it — inspect the body
+    // for `rejected[]` so the operator sees exactly what didn't register.
+    const res = await api.post(`/ssfv/autodiscovered/${approveTarget.value.id}/approve`, {
       planta_id:      Number(approveForm.planta_id),
       tipo_id:        Number(approveForm.tipo_id),
       nombre_equipo:  approveForm.nombre_equipo,
@@ -888,10 +909,15 @@ async function submitApprove() {
       create_signals: createSignals,
       link_signals:   linkSignals,
     })
-    const extra = createSignals.length || linkSignals.length
-      ? ` · ${createSignals.length} nueva(s), ${linkSignals.length} vinculada(s)`
-      : ''
-    toast.success('Equipo creado y señales instanciadas' + extra)
+    const created = res.data?.created ?? createSignals.length
+    const rejected: { codigo_senal: string; reason: string }[] = res.data?.rejected ?? []
+    if (rejected.length) {
+      toast.warning(`Aprobado parcial · ${created} creada(s), ${rejected.length} rechazada(s): ` +
+        rejected.map(r => `${r.codigo_senal} (${r.reason})`).join(' · '))
+    } else {
+      toast.success(`Equipo creado · ${created} nueva(s), ${linkSignals.length} vinculada(s). ` +
+        `Las señales aparecen en «Catálogo» y al expandir el equipo en «Plantas».`)
+    }
     approveDialog.value = false
     await Promise.all([fetchAutodiscovered(), fetchSenales()])
   } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error aprobando') }
@@ -1908,6 +1934,19 @@ function tipoEquipoIcon(nombre: string) {
             </div>
           </div>
 
+          <!-- include host (System/*) metrics as señales -->
+          <label v-if="!approveReadOnly && sistemaCount > 0"
+            class="flex items-center justify-between gap-3 rounded-sm border border-sky-500/30 bg-sky-500/5 px-3 py-2 cursor-pointer select-none">
+            <span class="flex items-center gap-2 text-[11px]">
+              <Cog class="h-3.5 w-3.5 text-sky-400" />
+              <span class="font-semibold text-foreground">Registrar métricas de Sistema</span>
+              <span class="text-muted-foreground">— telemetría del host (CPU, memoria, disco, red) como
+                señales en <span class="font-mono">{{ approveForm.nombre_topic }}</span>
+                · <span class="font-semibold text-sky-400">{{ sistemaCount }}</span> disponible(s)</span>
+            </span>
+            <Switch v-model="includeSystem" />
+          </label>
+
           <!-- signal provisioning plan -->
           <div v-if="!approveReadOnly" class="rounded-sm border border-border bg-muted/30 px-3 py-2 text-[11px]">
             <div v-if="!approveForm.tipo_id" class="text-muted-foreground inline-flex items-center gap-1.5">
@@ -1967,8 +2006,9 @@ function tipoEquipoIcon(nombre: string) {
                       <span v-if="m.tipoVariable" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-muted border border-border text-muted-foreground">
                         <Tag class="h-2.5 w-2.5" />{{ m.tipoVariable }}
                       </span>
-                      <span v-if="m.engUnit" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_15%,transparent)] text-foreground font-semibold">
-                        <Ruler class="h-2.5 w-2.5" />{{ m.engUnit }}
+                      <span v-if="m.engUnit" class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_15%,transparent)] text-foreground font-semibold"
+                        title="Unidad de referencia (cosmética) — etiqueta para el operador; no escala ni altera el valor almacenado.">
+                        <Ruler class="h-2.5 w-2.5" />{{ m.engUnit }} <span class="opacity-50 font-normal not-italic">ref.</span>
                       </span>
                       <span v-if="m.tipoValor" class="text-[9px] px-1.5 py-0.5 rounded-sm border border-border text-muted-foreground italic">{{ m.tipoValor }}</span>
                       <span v-if="m.deviceType" class="text-[9px] px-1.5 py-0.5 rounded-sm bg-violet-500/10 text-violet-400">{{ m.deviceType }}</span>
@@ -1977,29 +2017,32 @@ function tipoEquipoIcon(nombre: string) {
                     <div v-if="m.description" class="text-[11px] text-muted-foreground mt-0.5">{{ m.description }}</div>
                   </div>
 
-                  <!-- per-signal action -->
-                  <div v-if="!approveReadOnly && m.kind === 'proceso'" class="shrink-0 flex items-center gap-2 pt-0.5">
-                    <template v-if="signalPlan[m.name]">
-                      <span v-if="signalPlan[m.name].status === 'catalog'"
-                        class="text-[9px] px-1.5 py-0.5 rounded-sm bg-blue-500/15 text-blue-400 font-bold uppercase tracking-wide">En catálogo</span>
-                      <span v-else
-                        class="text-[9px] px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-400 font-bold uppercase tracking-wide">Nueva</span>
-                      <label class="inline-flex items-center gap-1 text-[11px] cursor-pointer select-none"
-                        :class="signalPlan[m.name].codeTooLong ? 'opacity-40 cursor-not-allowed' : ''">
-                        <input type="checkbox" v-model="signalPlan[m.name].selected"
-                          :disabled="signalPlan[m.name].codeTooLong"
-                          class="h-3.5 w-3.5 accent-[color:var(--epm-bosque)]" />
-                        {{ signalPlan[m.name].status === 'catalog' ? 'Vincular' : 'Crear' }}
-                      </label>
-                    </template>
-                    <span v-else-if="approveForm.tipo_id"
-                      class="text-[9px] px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-500 font-bold uppercase tracking-wide inline-flex items-center gap-1">
-                      <CheckCircle2 class="h-3 w-3" />Mapeada
-                    </span>
+                  <!-- per-signal action: a plan entry exists for every registrable
+                       metric (plant 'proceso', plus 'sistema' when the toggle is on) -->
+                  <div v-if="!approveReadOnly && signalPlan[m.name]" class="shrink-0 flex items-center gap-2 pt-0.5">
+                    <span v-if="signalPlan[m.name].status === 'catalog'"
+                      class="text-[9px] px-1.5 py-0.5 rounded-sm bg-blue-500/15 text-blue-400 font-bold uppercase tracking-wide">En catálogo</span>
+                    <span v-else
+                      class="text-[9px] px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-400 font-bold uppercase tracking-wide">Nueva</span>
+                    <span v-if="signalPlan[m.name].instance !== 'default'"
+                      class="text-[9px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_18%,transparent)] text-foreground font-mono"
+                      :title="'Canal / instancia: ' + signalPlan[m.name].instance">⌗ {{ signalPlan[m.name].instance }}</span>
+                    <label class="inline-flex items-center gap-1 text-[11px] cursor-pointer select-none"
+                      :class="signalPlan[m.name].codeTooLong ? 'opacity-40 cursor-not-allowed' : ''">
+                      <input type="checkbox" v-model="signalPlan[m.name].selected"
+                        :disabled="signalPlan[m.name].codeTooLong"
+                        class="h-3.5 w-3.5 accent-[color:var(--epm-bosque)]" />
+                      {{ signalPlan[m.name].status === 'catalog' ? 'Vincular' : 'Crear' }}
+                    </label>
                   </div>
+                  <span v-else-if="!approveReadOnly && m.kind === 'proceso' && approveForm.tipo_id"
+                    class="shrink-0 text-[9px] px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-500 font-bold uppercase tracking-wide inline-flex items-center gap-1">
+                    <CheckCircle2 class="h-3 w-3" />Mapeada
+                  </span>
                   <span v-else-if="!approveReadOnly && m.kind === 'sistema'"
-                    class="shrink-0 text-[9px] text-sky-400 inline-flex items-center gap-1 pt-1"
-                    title="Telemetría del host (System/*) — regístrala como señal en la estación del nodo para persistirla en tbl_valores">
+                    class="shrink-0 text-[9px] text-sky-400 inline-flex items-center gap-1 pt-1 cursor-pointer"
+                    title="Telemetría del host. Activa «Registrar métricas de Sistema» arriba para crearla como señal."
+                    @click="includeSystem = true">
                     <Cog class="h-3 w-3" /> host
                   </span>
                   <span v-else-if="!approveReadOnly && m.kind !== 'proceso'"
