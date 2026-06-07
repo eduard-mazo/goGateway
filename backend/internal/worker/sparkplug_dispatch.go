@@ -306,13 +306,22 @@ func (h *SparkplugHandler) dispatchMetric(
 	if h.ssfvHandler != nil {
 		var mqttTopic, code string
 		switch {
+		case m.Properties["uns/code"] != "":
+			// Producer-DECLARED UNS decomposition (Phase 1+, sparkplug-contract
+			// §5.1): deterministic, no name parsing. Entity = node or node/device;
+			// the match token is uns/code[@uns/instance]. Universal across
+			// protocols. Reading a nil map is safe (yields "").
+			if isDevice && topic.DeviceID != "" {
+				mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID + "/" + topic.DeviceID
+			} else {
+				mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
+			}
+			code = MatchToken(m.Properties["uns/code"], m.Properties["uns/instance"])
 		case isHostMetric(metricName):
-			// Host station = the edge node. FIWARE/UNS channelization (C2): split
-			// the System path into attribute + instance, then build a unique match
-			// token. Scalars (CPU/Usage_pct) yield the bare attribute — identical
-			// to the old prefix-strip — so flat host metrics stay backward
-			// compatible; channelized ones (Network/docker0/Rx_MB) become
-			// "Network/Rx_MB@docker0", which fits nombre_instancia and is unique.
+			// FALLBACK for producers without uns/*: parse the System path into
+			// attribute + instance and build the same match token. Scalars
+			// (CPU/Usage_pct) yield the bare attribute — backward compatible;
+			// channelized (Network/docker0/Rx_MB) → "Network/Rx_MB@docker0".
 			mqttTopic = topic.GroupID + "/" + topic.EdgeNodeID
 			ref := parseFiwareSignal(metricName, false)
 			code = MatchToken(ref.Codigo, ref.Instance)
