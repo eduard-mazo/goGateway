@@ -142,9 +142,12 @@ async function deletePlanta(p: SSFVPlanta) {
   } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error') }
 }
 
-// Sparkplug B derivation
-const spGroupId = computed(() => plantaForm.broker_base.split('/')[1] ?? '')
-const spNodeId  = computed(() => plantaForm.broker_base.split('/')[3] ?? '')
+// Contract §1.1: broker_base = the Sparkplug group (one segment). Invalid if it
+// contains a '/' or whitespace.
+const brokerBaseInvalid = computed(() => {
+  const b = plantaForm.broker_base.trim()
+  return b !== '' && /[/\s]/.test(b)
+})
 
 // ─── Equipos ──────────────────────────────────────────────────────────────────
 const plantaEquipos  = ref<Record<number, SSFVEquipo[]>>({})
@@ -166,6 +169,30 @@ async function loadEquipoSignals(eid: number) {
   equipoSignals.value = { ...equipoSignals.value, [eid]: r.data ?? [] }
 }
 
+// Contract §1.1: node = the first topic segment after the group (broker_base).
+function nodeOf(planta: SSFVPlanta, eq: SSFVEquipo): string {
+  const base = planta.broker_base
+  const rel = eq.nombre_topic.startsWith(base + '/') ? eq.nombre_topic.slice(base.length + 1) : eq.nombre_topic
+  return rel.split('/')[0] || '(nodo)'
+}
+// Whether an equipo is the node-level entity (group/node) vs a device (group/node/device).
+function isNodeEntity(planta: SSFVPlanta, eq: SSFVEquipo): boolean {
+  const base = planta.broker_base
+  const rel = eq.nombre_topic.startsWith(base + '/') ? eq.nombre_topic.slice(base.length + 1) : eq.nombre_topic
+  return !rel.includes('/')
+}
+// Group a planta's equipos by node → planta(group) → nodo → {system, devices}.
+function equiposByNode(planta: SSFVPlanta): { node: string; equipos: SSFVEquipo[] }[] {
+  const groups = new Map<string, SSFVEquipo[]>()
+  for (const eq of plantaEquipos.value[planta.planta_id!] ?? []) {
+    const n = nodeOf(planta, eq)
+    if (!groups.has(n)) groups.set(n, [])
+    groups.get(n)!.push(eq)
+  }
+  return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([node, equipos]) => ({ node, equipos }))
+}
+
 // Equipo dialog
 const equipoDialog = ref(false)
 const equipoEdit   = ref<SSFVEquipo | null>(null)
@@ -176,7 +203,16 @@ watch(() => equipoForm.nombre_topic_suffix, (suffix) => {
   const pid = equipoForm.planta_id
   if (!pid || !suffix || equipoEdit.value) return
   const planta = plantas.value.find(p => p.planta_id === pid)
-  if (planta) equipoForm.nombre_topic = planta.broker_base + '/' + suffix
+  if (planta) equipoForm.nombre_topic = planta.broker_base + '/' + suffix.replace(/^\/+/, '')
+})
+
+// The group (broker_base) of the equipo's planta, and the prefix invariant check.
+const equipoPlantaBase = computed(() =>
+  plantas.value.find(p => p.planta_id === equipoForm.planta_id)?.broker_base ?? '')
+const equipoTopicInvalid = computed(() => {
+  const base = equipoPlantaBase.value, t = equipoForm.nombre_topic.trim()
+  if (!base || !t) return false
+  return t !== base && !t.startsWith(base + '/')
 })
 
 function openCreateEquipo(plantaId: number) {
@@ -1185,7 +1221,13 @@ function tipoEquipoIcon(nombre: string) {
               Sin equipos. Agrega un equipo para auto-instanciar sus señales.
             </div>
 
-            <div v-for="eq in plantaEquipos[p.planta_id!] ?? []" :key="eq.equipo_id" class="rounded-sm border border-border bg-card mb-2 overflow-hidden">
+            <!-- Group by node (contract §1.1: planta=group → nodo → {system, devices}) -->
+            <div v-for="ng in equiposByNode(p)" :key="ng.node" class="mb-3">
+              <div class="flex items-center gap-2 px-1 pb-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-[color:var(--epm-bosque)]">
+                <GitBranch class="h-3.5 w-3.5" /> Nodo <span class="font-mono normal-case text-foreground">{{ ng.node }}</span>
+                <span class="text-muted-foreground font-normal normal-case">· {{ ng.equipos.length }} entidad(es)</span>
+              </div>
+              <div v-for="eq in ng.equipos" :key="eq.equipo_id" class="rounded-sm border border-border bg-card mb-2 overflow-hidden ml-3">
               <!-- Equipo row -->
               <div class="flex items-center gap-3 px-3 py-2">
                 <button type="button" class="flex items-center gap-2 flex-1 min-w-0 text-left" @click="toggleEquipo(eq.equipo_id!)">
@@ -1202,6 +1244,16 @@ function tipoEquipoIcon(nombre: string) {
                   </div>
                 </button>
                 <div class="flex items-center gap-2 shrink-0">
+                  <span v-if="isNodeEntity(p, eq)"
+                    class="text-[9px] px-1.5 py-0.5 rounded-sm bg-sky-500/15 text-sky-400 font-bold uppercase tracking-wide inline-flex items-center gap-1"
+                    title="Entidad de nivel nodo (group/node) — porta System + señales de proceso del nodo">
+                    <Cog class="h-2.5 w-2.5" />System
+                  </span>
+                  <span v-else
+                    class="text-[9px] px-1.5 py-0.5 rounded-sm bg-violet-500/15 text-violet-400 font-bold uppercase tracking-wide inline-flex items-center gap-1"
+                    title="Device (group/node/device)">
+                    <Cpu class="h-2.5 w-2.5" />Device
+                  </span>
                   <span class="text-[10px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_18%,transparent)] text-[color:var(--epm-bosque)] font-semibold">
                     {{ eq.tipo_nombre }}
                   </span>
@@ -1243,6 +1295,7 @@ function tipoEquipoIcon(nombre: string) {
                     </TableBody>
                   </Table>
                 </div>
+              </div>
               </div>
             </div>
           </div>
@@ -2131,10 +2184,15 @@ function tipoEquipoIcon(nombre: string) {
           <Input v-model="plantaForm.nombre" placeholder="Central Solar Norte" />
         </div>
         <div class="col-span-2 space-y-1.5">
-          <Label>Broker Base * <span class="text-[10px] text-muted-foreground">(prefijo Sparkplug B: grupo/tipo/nodo/planta)</span></Label>
-          <Input v-model="plantaForm.broker_base" placeholder="EPM/SSFV/EPM/Sede30" class="font-mono" />
-          <p v-if="plantaForm.broker_base" class="text-[11px] text-muted-foreground font-mono">
-            spBv1.0/<span class="text-[color:var(--epm-citrico)]">{{ spGroupId }}</span>/DDATA/<span class="text-[color:var(--epm-citrico)]">{{ spNodeId }}</span>/&lt;device_id&gt;
+          <Label>Group ID * <span class="text-[10px] text-muted-foreground">(grupo Sparkplug B — la planta = un group, un solo segmento)</span></Label>
+          <Input v-model="plantaForm.broker_base" placeholder="plant-floor" class="font-mono"
+            :class="brokerBaseInvalid ? 'border-destructive' : ''" />
+          <p v-if="brokerBaseInvalid" class="text-[11px] text-destructive">
+            El Group ID debe ser un único segmento, sin «/» ni espacios (p. ej. <span class="font-mono">plant-floor</span>).
+          </p>
+          <p v-else-if="plantaForm.broker_base" class="text-[11px] text-muted-foreground font-mono">
+            spBv1.0/<span class="text-[color:var(--epm-citrico)]">{{ plantaForm.broker_base.trim() }}</span>/NDATA/&lt;nodo&gt;
+            · …/DDATA/&lt;nodo&gt;/&lt;device&gt;
           </p>
         </div>
         <div class="space-y-1.5">
@@ -2163,7 +2221,7 @@ function tipoEquipoIcon(nombre: string) {
       </div>
       <DialogFooter class="px-6 pb-6 pt-4 border-t border-border">
         <Button variant="outline" class="rounded-sm" @click="plantaDialog = false">Cancelar</Button>
-        <Button class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm" @click="savePlanta" :disabled="!plantaForm.nombre || !plantaForm.broker_base">
+        <Button class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm" @click="savePlanta" :disabled="!plantaForm.nombre || !plantaForm.broker_base || brokerBaseInvalid">
           {{ plantaEdit ? 'Guardar' : 'Crear planta' }}
         </Button>
       </DialogFooter>
@@ -2195,12 +2253,16 @@ function tipoEquipoIcon(nombre: string) {
           <Input v-model="equipoForm.nombre_equipo" placeholder="Inversor 1" />
         </div>
         <div class="space-y-1.5">
-          <Label>Sufijo topic (device_id) *</Label>
-          <Input v-model="equipoForm.nombre_topic_suffix" placeholder="INV_1" class="font-mono" />
+          <Label>Ruta bajo el group * <span class="text-[10px] text-muted-foreground font-normal">nodo[/device]</span></Label>
+          <Input v-model="equipoForm.nombre_topic_suffix" placeholder="edge-1/meter-01" class="font-mono" />
         </div>
         <div class="space-y-1.5">
-          <Label>Topic completo</Label>
-          <Input v-model="equipoForm.nombre_topic" class="font-mono bg-muted/30 text-[11px]" />
+          <Label>Topic completo <span class="text-[10px] text-muted-foreground font-normal">(group/nodo[/device])</span></Label>
+          <Input v-model="equipoForm.nombre_topic" class="font-mono bg-muted/30 text-[11px]"
+            :class="equipoTopicInvalid ? 'border-destructive' : ''" />
+          <p v-if="equipoTopicInvalid" class="text-[11px] text-destructive">
+            Debe empezar por el Group ID de la planta (<span class="font-mono">{{ equipoPlantaBase }}</span>).
+          </p>
         </div>
         <div class="space-y-1.5">
           <Label>Fabricante</Label>
@@ -2228,7 +2290,7 @@ function tipoEquipoIcon(nombre: string) {
       </div>
       <DialogFooter class="px-6 pb-6 pt-4 border-t border-border">
         <Button variant="outline" class="rounded-sm" @click="equipoDialog = false">Cancelar</Button>
-        <Button class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm" @click="saveEquipo" :disabled="!equipoForm.nombre_equipo || !equipoForm.nombre_topic || !equipoForm.tipo_id">
+        <Button class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm" @click="saveEquipo" :disabled="!equipoForm.nombre_equipo || !equipoForm.nombre_topic || !equipoForm.tipo_id || equipoTopicInvalid">
           {{ equipoEdit ? 'Guardar' : 'Crear equipo' }}
         </Button>
       </DialogFooter>
