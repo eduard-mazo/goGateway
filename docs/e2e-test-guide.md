@@ -434,6 +434,11 @@ watch -n30 'echo "rebirth=$(grep -c "requesting rebirth" /tmp/e2e/gogw.log) \
 curl -s http://localhost:8091/api/tsdb/status   # writeRate, errorRate, dlqDepth, walPending
 ```
 
+Raw datasets from the 2026-06-11 validation runs (baseline with the seq bug,
+post-fix verification, and the final full-fix 10-minute soak) live in
+[`e2e-results/2026-06-11/`](e2e-results/2026-06-11/) — useful as a reference
+for what "healthy" and "storming" look like in these numbers.
+
 **Steady-state pass criteria** (any sustained deviation is a bug, not noise):
 
 | Signal | Expect |
@@ -443,6 +448,11 @@ curl -s http://localhost:8091/api/tsdb/status   # writeRate, errorRate, dlqDepth
 | `tbl_valores` row growth | linear, ≈ message rate (no gaps/plateaus) |
 | `/api/tsdb/status` | `errorRate 0`, `dlqDepth 0`, `walPending 0`, circuit closed |
 | edge `/api/status` `bdSeq` | **constant** for the session (it does NOT count rebirths) |
+| `docker logs e2e-tsdb` | materialization lines only at the cagg cadence (5 m/30 m/1 h), never paired duplicates |
+
+Reference (final 2026-06-11 run, 2 Modbus pts @1 s + 2 DNP3 pts @2 s + CPU @5 s):
+10 min → 0 rebirths, 0 out-of-sequence, 0 birth re-publishes, ~3.2 rows/s
+written linearly (1 932 rows), 456 KB hypertable, 0 write errors.
 
 > **History — why this section exists:** the 2026-06 validation soak caught a
 > deterministic storm: the producer wrapped the Sparkplug seq 255→**1**
@@ -453,14 +463,28 @@ curl -s http://localhost:8091/api/tsdb/status   # writeRate, errorRate, dlqDepth
 > `sparkplug/node.go` (spec wrap + publish-order mutex + per-session bdSeq)
 > and goGateway `mqtt/client.go` (5 s per-node rebirth cooldown). With those
 > fixes the same 10-minute soak shows **zero** rebirths.
+>
+> The same soak's postgres logs exposed a second bug: the migration runner
+> tracked versions in an **unqualified** `schema_migrations` table, which the
+> SSFV pool's `search_path = ssfv, public` resolved into `ssfv` once that
+> schema existed — so **every gateway restart re-ran all migrations**,
+> duplicating the generic pipeline (signals + caggs + jobs) inside `ssfv`
+> (symptom: paired `inserted 0 row(s) into materialization table` log lines
+> each refresh cycle). Fixed in `migrate.go` (explicit
+> `public.schema_migrations`); migration **0017** drops the accidental copies
+> and relaxes the cagg refresh cadence (5 m/30 m/1 h). When soaking, also
+> check `docker logs e2e-tsdb` — repeated 0-row materialization pairs more
+> often than the cagg schedule means duplicated refresh jobs.
 
 > **DNP3 sim caveat:** an opendnp3 outstation built with the default
 > `OutstationStackConfig(DatabaseConfig(N))` has an **empty event buffer** —
 > forced events are discarded, Class scans return nothing, and the master sees
-> data only at the startup integrity poll. Either configure the sim
-> (`config.outstation.eventBufferConfig = EventBufferConfig::AllTypes(50)`)
-> or set `"integrityScanMs": 5000` on the gateway outstation so static values
-> are re-polled periodically.
+> data only at the startup integrity poll. The sim must set
+> `config.outstation.eventBufferConfig = EventBufferConfig::AllTypes(50);`
+> (applied to `~/dnp3-docker-sim` on 2026-06-11 — rebuild with
+> `docker compose build && docker compose up -d` if recreating). If you can't
+> change the sim, `"integrityScanMs": 5000` on the gateway outstation re-polls
+> static values periodically as a workaround.
 
 ---
 

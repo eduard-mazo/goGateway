@@ -1,0 +1,8 @@
+hypertable_size_bytes|466944
+valores_rows|2028
+distinct_signals|5
+_hyper_11_1_chunk|2030|0
+bgw_job_stat|2|0
+bgw_policy_chunk_stats|0|0
+_materialized_hypertable_4|0|0
+_materialized_hypertable_3|0|0
