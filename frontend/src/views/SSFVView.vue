@@ -128,7 +128,7 @@ async function savePlanta() {
 async function deletePlanta(p: SSFVPlanta) {
   const ok = await confirm({
     title: 'Eliminar planta',
-    message: 'Se eliminarán todos los equipos, señales instanciadas y fronteras asociadas.',
+    message: 'La planta y sus equipos se marcarán como dados de baja y dejarán de ingerir datos. El histórico de valores y alarmas se conserva.',
     detail: p.nombre,
     variant: 'danger',
     confirmText: 'Eliminar planta',
@@ -136,7 +136,7 @@ async function deletePlanta(p: SSFVPlanta) {
   if (!ok) return
   try {
     await api.delete(`/ssfv/plantas/${p.planta_id}`)
-    toast.success('Planta eliminada')
+    toast.success('Planta dada de baja')
     if (plantaOpen.value === p.planta_id) plantaOpen.value = null
     await fetchPlantas()
   } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error') }
@@ -245,7 +245,7 @@ async function saveEquipo() {
 async function deleteEquipo(eq: SSFVEquipo) {
   const ok = await confirm({
     title: 'Eliminar equipo',
-    message: 'Se eliminan todas las señales instanciadas de este equipo.',
+    message: 'El equipo se marcará como dado de baja y dejará de ingerir datos. El histórico de valores y alarmas se conserva.',
     detail: eq.nombre_equipo,
     variant: 'danger',
     confirmText: 'Eliminar equipo',
@@ -253,7 +253,7 @@ async function deleteEquipo(eq: SSFVEquipo) {
   if (!ok) return
   try {
     await api.delete(`/ssfv/equipos/${eq.equipo_id}`)
-    toast.success('Equipo eliminado')
+    toast.success('Equipo dado de baja')
     if (equipoOpen.value === eq.equipo_id) equipoOpen.value = null
     await loadEquiposByPlanta(eq.planta_id)
   } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error') }

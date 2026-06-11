@@ -173,11 +173,19 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	rows, err := pool.Query(ctx, `
+	// Soft-deleted plantas (fecha_baja IS NOT NULL) are hidden unless the caller
+	// explicitly asks for the audit view with ?include_deleted=1.
+	query := `
 		SELECT planta_id, nombre, ubicacion, propietario,
 		       broker_base, capacidad_kwp, fecha_comisionamiento, estado,
-		       fecha_creacion, fecha_modif
-		FROM ssfv.tbl_planta ORDER BY planta_id`)
+		       fecha_creacion, fecha_modif, fecha_baja
+		FROM ssfv.tbl_planta`
+	if r.URL.Query().Get("include_deleted") != "1" {
+		query += ` WHERE fecha_baja IS NULL`
+	}
+	query += ` ORDER BY planta_id`
+
+	rows, err := pool.Query(ctx, query)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -191,9 +199,10 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 		var ubicacion, propietario, fechaCom *string
 		var capacidad *float64
 		var fechaCreacion, fechaModif time.Time
+		var fechaBaja *time.Time
 		if err := rows.Scan(&id, &nombre, &ubicacion, &propietario,
 			&brokerBase, &capacidad, &fechaCom, &estado,
-			&fechaCreacion, &fechaModif); err != nil {
+			&fechaCreacion, &fechaModif, &fechaBaja); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -201,6 +210,7 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 			"propietario": propietario, "broker_base": brokerBase,
 			"capacidad_kWp": capacidad, "fecha_comisionamiento": fechaCom,
 			"estado": estado, "fecha_creacion": fechaCreacion, "fecha_modif": fechaModif,
+			"fecha_baja": fechaBaja,
 		})
 	}
 	if out == nil {
@@ -290,6 +300,11 @@ func (h *SSFVHandler) updatePlanta(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deletePlanta soft-deletes a planta: it stamps fecha_baja and forces estado=0
+// (the ingestion pipeline only processes estado=1, so new data stops) on the
+// planta and all its equipos. The tbl_valores / tbl_alarmas history is kept
+// intact — a hard cascade DELETE of a planta's señales is millions of rows and
+// cannot finish inside an HTTP request (context deadline exceeded in prod).
 func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	pool := h.pool()
@@ -297,7 +312,7 @@ func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	tx, err := pool.Begin(ctx)
@@ -307,21 +322,13 @@ func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(ctx)
 
-	// Delete leaf tables first, then intermediate, then root.
 	for _, q := range []string{
-		`DELETE FROM ssfv.tbl_alarmas WHERE equisenal_id IN (
-		    SELECT sxe.equisenal_id FROM ssfv.tbl_senales_x_equipo sxe
-		    JOIN ssfv.tbl_equipo e ON e.equipo_id = sxe.equipo_id
-		    WHERE e.planta_id = $1)`,
-		`DELETE FROM ssfv.tbl_valores WHERE equisenal_id IN (
-		    SELECT sxe.equisenal_id FROM ssfv.tbl_senales_x_equipo sxe
-		    JOIN ssfv.tbl_equipo e ON e.equipo_id = sxe.equipo_id
-		    WHERE e.planta_id = $1)`,
-		`DELETE FROM ssfv.tbl_senales_x_equipo WHERE equipo_id IN (
-		    SELECT equipo_id FROM ssfv.tbl_equipo WHERE planta_id = $1)`,
-		`DELETE FROM ssfv.tbl_equipo WHERE planta_id = $1`,
-		`DELETE FROM ssfv.tbl_frontera_comercial WHERE planta_id = $1`,
-		`DELETE FROM ssfv.tbl_planta WHERE planta_id = $1`,
+		`UPDATE ssfv.tbl_equipo
+		    SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
+		    WHERE planta_id = $1 AND fecha_baja IS NULL`,
+		`UPDATE ssfv.tbl_planta
+		    SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
+		    WHERE planta_id = $1 AND fecha_baja IS NULL`,
 	} {
 		if _, err := tx.Exec(ctx, q, id); err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
@@ -352,15 +359,23 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT e.equipo_id, e.planta_id, e.tipo_id, e.nombre_equipo,
 		       e.nombre_topic, e.fabricante, e.modelo, e.nro_serie,
-		       e.estado, e.fecha_creacion, e.fecha_modif,
+		       e.estado, e.fecha_creacion, e.fecha_modif, e.fecha_baja,
 		       te.nombre AS tipo_nombre, p.nombre AS planta_nombre
 		FROM ssfv.tbl_equipo e
 		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id = e.tipo_id
 		JOIN ssfv.tbl_planta p ON p.planta_id = e.planta_id`
 	args := []any{}
+	conds := []string{}
 	if plantaID != "" {
-		query += ` WHERE e.planta_id=$1`
 		args = append(args, plantaID)
+		conds = append(conds, fmt.Sprintf("e.planta_id=$%d", len(args)))
+	}
+	// Soft-deleted equipos are hidden unless ?include_deleted=1.
+	if r.URL.Query().Get("include_deleted") != "1" {
+		conds = append(conds, "e.fecha_baja IS NULL")
+	}
+	if len(conds) > 0 {
+		query += ` WHERE ` + strings.Join(conds, " AND ")
 	}
 	query += ` ORDER BY e.equipo_id`
 
@@ -377,8 +392,9 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 		var nombre, nombreTopic, tipoNombre, plantaNombre string
 		var fabricante, modelo, nroSerie *string
 		var fechaC, fechaM time.Time
+		var fechaBaja *time.Time
 		if err := rows.Scan(&eqID, &plantaIDv, &tipoID, &nombre, &nombreTopic,
-			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM,
+			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM, &fechaBaja,
 			&tipoNombre, &plantaNombre); err != nil {
 			continue
 		}
@@ -387,6 +403,7 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 			"nombre_equipo": nombre, "nombre_topic": nombreTopic,
 			"fabricante": fabricante, "modelo": modelo, "nro_serie": nroSerie,
 			"estado": estado, "fecha_creacion": fechaC, "fecha_modif": fechaM,
+			"fecha_baja": fechaBaja,
 			"tipo_nombre": tipoNombre, "planta_nombre": plantaNombre,
 		})
 	}
@@ -667,6 +684,9 @@ func (h *SSFVHandler) updateEquipo(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteEquipo soft-deletes a single equipo (see deletePlanta): fecha_baja is
+// stamped and estado forced to 0 so ingestion stops, while its tbl_valores /
+// tbl_alarmas history is preserved.
 func (h *SSFVHandler) deleteEquipo(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	pool := h.pool()
@@ -674,35 +694,17 @@ func (h *SSFVHandler) deleteEquipo(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
+	if _, err := pool.Exec(ctx, `
+		UPDATE ssfv.tbl_equipo
+		   SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
+		 WHERE equipo_id = $1 AND fecha_baja IS NULL`, id); err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer tx.Rollback(ctx)
 
-	// Delete leaf tables first, then intermediate, then root.
-	for _, q := range []string{
-		`DELETE FROM ssfv.tbl_alarmas WHERE equisenal_id IN (
-		    SELECT equisenal_id FROM ssfv.tbl_senales_x_equipo WHERE equipo_id = $1)`,
-		`DELETE FROM ssfv.tbl_valores WHERE equisenal_id IN (
-		    SELECT equisenal_id FROM ssfv.tbl_senales_x_equipo WHERE equipo_id = $1)`,
-		`DELETE FROM ssfv.tbl_senales_x_equipo WHERE equipo_id = $1`,
-		`DELETE FROM ssfv.tbl_equipo WHERE equipo_id = $1`,
-	} {
-		if _, err := tx.Exec(ctx, q, id); err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		errResp(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	h.triggerReload()
 	w.WriteHeader(http.StatusNoContent)
 }

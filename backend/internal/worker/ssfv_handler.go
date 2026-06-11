@@ -75,7 +75,9 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 		JOIN ssfv.tbl_planta            p   ON p.planta_id  = e.planta_id
 		WHERE sxe.activo = TRUE
 		  AND e.estado   = 1
-		  AND p.estado   = 1`)
+		  AND p.estado   = 1
+		  AND e.fecha_baja IS NULL
+		  AND p.fecha_baja IS NULL`)
 	if err != nil {
 		return fmt.Errorf("ssfv mapping reload: %w", err)
 	}
@@ -107,7 +109,8 @@ func (c *SSFVMappingCache) Reload(pool *pgxpool.Pool) error {
 		SELECT e.nombre_topic
 		FROM ssfv.tbl_equipo e
 		JOIN ssfv.tbl_planta p ON p.planta_id = e.planta_id
-		WHERE e.estado = 1 AND p.estado = 1`)
+		WHERE e.estado = 1 AND p.estado = 1
+		  AND e.fecha_baja IS NULL AND p.fecha_baja IS NULL`)
 	if err != nil {
 		log.Printf("ssfv mapping reload equipos: %v", err)
 	} else {
