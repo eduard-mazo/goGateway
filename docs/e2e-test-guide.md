@@ -15,9 +15,14 @@ ICR-3232 edge).
 > (C1 migration runbook), [`ARCHITECTURE_goGateway.md`](ARCHITECTURE_goGateway.md),
 > and goMqttModbus `ARCHITECTURE.md`.
 >
-> Current as of the UNS/C1 refactor: producers declare `uns/code` + `uns/instance`;
-> the catalog matches on the composite `(entity, codigo_senal, nombre_instancia)`;
-> approvals pre-fill from `uns/*` and fail loud (HTTP 207) on bad signals.
+> Current as of **contract v3**: `uns/code` is the LEAF attribute of the metric
+> name and `uns/instance` the folder path (`SYSTEM/CPU/Usage_pct` →
+> `Usage_pct` / `CPU`); the catalog matches on the composite
+> `(entity, codigo_senal, nombre_instancia)`; producers may declare birth-only
+> `uns/name`/`uns/description` (pre-fills the approve dialog) and a node-level
+> `uns/planta` alias; approving an entity whose Sparkplug group has no Planta
+> yet can create it inline (`create_planta`). Approvals fail loud (HTTP 207)
+> on bad signals.
 
 ---
 
@@ -58,8 +63,9 @@ process signals (Modbus/DNP3) **and** System/host metrics alike.
 | MQTT broker | mosquitto | Docker |
 | TimescaleDB | gateway TSDB sink | Docker |
 | goGateway | consumer + UI | `make build` → one binary |
-| goMqttModbus | edge producer | `go build` (or static ARMv7 for ICR) |
-| Modbus slave sim | fake PLC registers | `scripts/sim/modbusslave` |
+| goMqttModbus | edge producer | `go build` (or static ARMv7 for ICR; `make build-ffi` for real DNP3) |
+| Modbus slave sim | fake PLC registers | `scripts/sim/modbusslave` (pure Go) |
+| DNP3 outstation sim | fake RTU points | `scripts/sim/outstation_sim.cpp` (`make sim-dnp3`, needs vendored opendnp3) — or any opendnp3-based container |
 
 Prereqs: **Go 1.24+**, **Docker**, **sqlite3**, **pnpm** (for the UI build),
 and `mosquitto_sub`/`mosquitto_pub` (the guide runs them from the mosquitto
@@ -169,7 +175,7 @@ grep -E "applied migration 0000|SSFV adapter connected|mapping cache loaded|spar
 Expected in the log:
 
 ```
-tsdb: applied migration 000001_initial.up.sql … 000012_drop_host_metrics.up.sql
+tsdb: applied migration 000001_initial.up.sql … 000016_sxe_instancia_unique.up.sql
 tsdb: SSFV adapter connected → ssfv.tbl_valores (ON CONFLICT DO NOTHING)
 ssfv: mapping cache loaded (… signal entries, … equipos known)
 mqtt sparkplug connected, subscribing spBv1.0/plant-floor/#
@@ -230,6 +236,16 @@ curl -s -X POST http://localhost:8090/api/gateway/start | python3 -m json.tool
 
 `{"success":true,"data":{"running":true,"mqttConnected":true,...}}` means the edge
 is connected and publishing.
+
+> **Contract-v3 producer fields (optional but recommended):** each mapping may
+> declare `"nombre"` and `"descripcion"` (→ birth-only `uns/name` /
+> `uns/description`, pre-filling the approve dialog) and explicit
+> `"signalCode"`/`"instance"` overrides (default: leaf/folder of
+> `metricName`). The `sparkplug` block may declare `"plantaAlias"` (e.g.
+> `"GSANRAFA"`) — published as `uns/planta` in NBIRTH and used by the
+> gateway's create-planta staging. All of these are editable in the producer
+> web UI (Señales modal → «Catálogo UNS», Sparkplug panel → «Alias de
+> planta»).
 
 ---
 
@@ -292,16 +308,19 @@ curl -s -X POST "http://localhost:8091/api/ssfv/autodiscovered/$MID/approve" \
      {"codigo_senal":"Relay1","nombre":"Rele","tipavar_id":10,"unidad_id":3,"tipo_valor":"Instantaneo"}]}'
 
 # host station = the edge node itself. UNS/FIWARE split (sparkplug-contract.md
-# §5.1): codigo_senal = the Attribute (uns/code), nombre_instancia = the channel
-# (uns/instance). A flat metric omits nombre_instancia (→ "default"); a
-# channelized one (per-interface, per-mount) sets it. From the UI the approve
-# dialog PRE-FILLS both from the producer's uns/* — you just confirm.
+# §5.1, contract v3): codigo_senal = the LEAF attribute (uns/code),
+# nombre_instancia = the FOLDER path (uns/instance). "System/CPU/Usage_pct"
+# (prefix stripped) → codigo "Usage_pct", instancia "CPU"; a flat metric
+# omits nombre_instancia (→ "default"). The same leaf under two folders
+# ("CPU/Usage_pct" and "Memory/Usage_pct") is ONE catalog señal bound twice
+# with different instancias. From the UI the approve dialog PRE-FILLS codigo,
+# instancia, nombre and descripcion from the producer's uns/* — you confirm.
 curl -s -w ' [HTTP %{http_code}]' -X POST "http://localhost:8091/api/ssfv/autodiscovered/$NID/approve" \
   -H 'Content-Type: application/json' -d '{
    "planta_id":1,"tipo_id":2,"nombre_equipo":"edge-1-host","nombre_topic":"plant-floor/edge-1",
    "create_signals":[
-     {"codigo_senal":"CPU/Usage_pct","nombre":"CPU","tipavar_id":5,"unidad_id":3},
-     {"codigo_senal":"Network/Rx_MB","nombre":"NetRx","tipavar_id":5,"unidad_id":3,"nombre_instancia":"docker0"}]}'
+     {"codigo_senal":"Usage_pct","nombre":"Porcentaje utilizado","nombre_instancia":"CPU","tipavar_id":7,"unidad_id":13},
+     {"codigo_senal":"Rx_MB","nombre":"NetRx","nombre_instancia":"Network/docker0","tipavar_id":7,"unidad_id":13}]}'
 
 sleep 6
 TS "SELECT e.nombre_topic AS station, s.codigo_senal AS attribute, sxe.nombre_instancia AS channel,
@@ -313,11 +332,19 @@ TS "SELECT e.nombre_topic AS station, s.codigo_senal AS attribute, sxe.nombre_in
     GROUP BY 1,2,3 ORDER BY 1,2;"
 ```
 
-**Expected:** only the registered signals appear in `tbl_valores`. The flat
-`CPU/Usage_pct` binds with `nombre_instancia='default'`; the **channelized**
-`Network/Rx_MB` binds with `nombre_instancia='docker0'` — and it persists (this
-was impossible before C1). The unregistered node metric `tank_level` is **not**
+**Expected:** only the registered signals appear in `tbl_valores`.
+`System/CPU/Usage_pct` persists as codigo `Usage_pct` · instancia `CPU`;
+`System/Network/docker0/Rx_MB` as codigo `Rx_MB` · instancia
+`Network/docker0`. The unregistered node metric `tank_level` is **not**
 present.
+
+> **Creating the Planta inline:** if the Sparkplug group has no Planta row yet
+> (fresh deployment), pass `"planta_id": 0` plus
+> `"create_planta": {"nombre": "GSANRAFA", "broker_base": "plant-floor"}` —
+> the approval creates/restores the Planta (UI alias = nombre, group =
+> broker_base) before registering the equipo. The UI approve dialog offers
+> this as «➕ Crear planta para el group …», pre-filling the alias from the
+> producer's NBIRTH `uns/planta` property (producer config `plantaAlias`).
 
 > `tipavar_id` / `unidad_id` are FKs into the seeded `ssfv.tbl_tipo_variable` /
 > `ssfv.tbl_unidades`. List them with
@@ -389,6 +416,51 @@ approval both stations write to `tbl_valores`; steady-state rebirths stay ~0
 > **Tip — tipo templates scale to fleets:** a signal registered on a `tipo_equipo`
 > propagates to *every* equipo of that type. Approving `edge-2-host` against
 > `tipo_id=2` after edge-1 auto-instantiates the System signals you already linked.
+
+### Soak test — birth storms, retries, storage performance
+
+After the iterations, hold the pipeline **10 minutes** and watch for rebirth
+storms and write health. Sample every 30 s:
+
+```bash
+# wire capture (counts NBIRTH/DBIRTH/NCMD re-publishes)
+docker exec mosquitto mosquitto_sub -t 'spBv1.0/<group>/#' -F '%t' > /tmp/e2e/wire.log &
+
+watch -n30 'echo "rebirth=$(grep -c "requesting rebirth" /tmp/e2e/gogw.log) \
+  ooseq=$(grep -c out-of-sequence /tmp/e2e/gogw.log) \
+  nbirth=$(grep -c /NBIRTH/ /tmp/e2e/wire.log) ncmd=$(grep -c /NCMD/ /tmp/e2e/wire.log) \
+  rows=$(docker exec e2e-tsdb psql -U postgres -d gwtest -tAc \
+        "SELECT count(*) FROM ssfv.tbl_valores;")"
+curl -s http://localhost:8091/api/tsdb/status   # writeRate, errorRate, dlqDepth, walPending
+```
+
+**Steady-state pass criteria** (any sustained deviation is a bug, not noise):
+
+| Signal | Expect |
+|---|---|
+| `requesting rebirth` / NCMD on the wire | **0 new** after the approval burst |
+| NBIRTH/DBIRTH on the wire | only connect + one per approval |
+| `tbl_valores` row growth | linear, ≈ message rate (no gaps/plateaus) |
+| `/api/tsdb/status` | `errorRate 0`, `dlqDepth 0`, `walPending 0`, circuit closed |
+| edge `/api/status` `bdSeq` | **constant** for the session (it does NOT count rebirths) |
+
+> **History — why this section exists:** the 2026-06 validation soak caught a
+> deterministic storm: the producer wrapped the Sparkplug seq 255→**1**
+> (skipping 0) while consumers expect `(seq+1) % 256`, so every 255 messages
+> triggered out-of-sequence → NCMD → full re-birth (~1.5 storms/min at
+> 2 msg/s); concurrent NDATA/DDATA publishers could also reorder seq on the
+> wire, and each gap fired duplicate NCMDs. Fixed in goMqttDnp3
+> `sparkplug/node.go` (spec wrap + publish-order mutex + per-session bdSeq)
+> and goGateway `mqtt/client.go` (5 s per-node rebirth cooldown). With those
+> fixes the same 10-minute soak shows **zero** rebirths.
+
+> **DNP3 sim caveat:** an opendnp3 outstation built with the default
+> `OutstationStackConfig(DatabaseConfig(N))` has an **empty event buffer** —
+> forced events are discarded, Class scans return nothing, and the master sees
+> data only at the startup integrity poll. Either configure the sim
+> (`config.outstation.eventBufferConfig = EventBufferConfig::AllTypes(50)`)
+> or set `"integrityScanMs": 5000` on the gateway outstation so static values
+> are re-polled periodically.
 
 ---
 
@@ -525,7 +597,7 @@ docker rm -f e2e-mosq e2e-tsdb e2e-cap 2>/dev/null
 |---|---|
 | `POST /api/sparkplug/decode` | decode a raw frame (`{topic, payload_hex}`) → JSON |
 | `GET  /api/ssfv/autodiscovered` | pending/approved nodes & devices |
-| `POST /api/ssfv/autodiscovered/{id}/approve` | create a station + register signals |
+| `POST /api/ssfv/autodiscovered/{id}/approve` | create a station + register signals (`planta_id:0` + `create_planta:{nombre,broker_base}` creates the Planta inline) |
 | `GET  /api/ssfv/missed` | Descartados (known equipment, unregistered signal) |
 | `GET  /api/tsdb/status` | pipeline health (writeRate, dlqDepth, circuit, WAL) |
 | `GET  /api/status` | broker/IEC-104/counts |
