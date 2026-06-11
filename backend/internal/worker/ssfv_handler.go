@@ -210,11 +210,22 @@ var hostCategories = map[string]bool{
 	"Temperature": true, "Power": true, "Process": true,
 }
 
+// trimHostPrefix strips the producer's cosmetic host-telemetry folder prefix
+// (configurable metricPrefix; "System/" by default, "SYSTEM/" in the EPM
+// deployment). Matching is case-insensitive on the first segment.
+func trimHostPrefix(name string) string {
+	if i := strings.IndexByte(name, '/'); i >= 0 && strings.EqualFold(name[:i], "System") {
+		return name[i+1:]
+	}
+	return name
+}
+
 // isHostMetric reports whether a Sparkplug metric name is gateway host
-// telemetry rather than a plant process signal. Accepts an optional "System/"
-// prefix (the producer's configurable metricPrefix).
+// telemetry rather than a plant process signal. Accepts an optional
+// "System/"/"SYSTEM/" prefix (the producer's configurable metricPrefix,
+// matched case-insensitively).
 func isHostMetric(name string) bool {
-	n := strings.TrimPrefix(name, "System/")
+	n := trimHostPrefix(name)
 	if n == "Uptime_h" {
 		return true
 	}

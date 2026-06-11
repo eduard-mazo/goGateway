@@ -16,6 +16,10 @@ type MetricMeta struct {
 	TipoVariable string `json:"tipo_variable,omitempty"`
 	TipoValor    string `json:"tipo_valor,omitempty"`
 	Description  string `json:"description,omitempty"`
+	// UnsName is the producer-declared display name (birth-only property
+	// uns/name, contract v3 §5) → pre-fills tbl_senales.nombre on approval
+	// (e.g. "Valvula cerrada"). Description above is fed from uns/description.
+	UnsName string `json:"uns_name,omitempty"`
 	// UnsCode / UnsInstance carry the producer-declared FIWARE decomposition
 	// (contract §5.1) so the approve UI pre-fills codigo_senal / nombre_instancia
 	// instead of making the operator type them.

@@ -40,11 +40,18 @@ telemetry is always node-scoped.**
 ### 1.1 Infrastructure hierarchy (group → node → device → signal)
 
 The Sparkplug namespace **is** the infrastructure model; the consumer catalog
-mirrors it 1:1:
+mirrors it 1:1. The UI ("Señales SSFV → Infraestructura") shows **aliases** for
+the Sparkplug identifiers:
+
+| UI concept | Sparkplug | Catalog | Example |
+|---|---|---|---|
+| **Planta** (alias) | `group_id` | `tbl_planta.nombre` = alias, `broker_base` = the group_id | `GSANRAFA` ↔ `EPM_SSFV` |
+| **Equipo** (alias) | `edge_node_id` | `tbl_equipo` at depth 2: `nombre_topic = {group}/{node}` | `EDGE` ↔ `EPM_SSFV/EDGE` |
+| **Device** | `device_id` | `tbl_equipo` at depth 3: `nombre_topic = {group}/{node}/{device}` | `DNP` ↔ `EPM_SSFV/EDGE/DNP` |
 
 ```
 group_id        ↔  Planta            (ssfv.tbl_planta.broker_base = the group, one segment)
- └─ edge_node   ↔  Nodo              (the edge gateway; the segment after the group)
+ └─ edge_node   ↔  Equipo (Nodo)     (the edge gateway; the segment after the group)
      ├─ node-level metrics  →  System + node process signals   (NDATA)
      └─ device_id ↔ Device   →  device signals                 (DDATA)
          (signals)           →  ssfv.tbl_senales_x_equipo (codigo_senal + nombre_instancia)
@@ -52,10 +59,12 @@ group_id        ↔  Planta            (ssfv.tbl_planta.broker_base = the group,
 
 **Rules (binding):**
 - A **Planta maps to at most one `group_id`**. `tbl_planta.broker_base` holds the
-  **group** (a single topic segment, e.g. `plant-floor`).
-- An **Entity** (catalog `tbl_equipo`, `nombre_topic`) is either a **node**
-  (`{group}/{node}` — carries its System + node process signals) or a **device**
-  (`{group}/{node}/{device}`).
+  **group** (a single topic segment, e.g. `EPM_SSFV`); `tbl_planta.nombre` is the
+  free-form UI alias (e.g. `GSANRAFA`).
+- An **Entity** (catalog `tbl_equipo`, `nombre_topic`) is either an **Equipo/node**
+  (`{group}/{node}` — publishes NDATA; carries its System + node process signals)
+  or a **Device** (`{group}/{node}/{device}` — publishes DDATA). The Device's
+  parent Equipo is implicit: strip the last topic segment.
 - **Prefix invariant:** `equipo.nombre_topic` MUST start with its planta's
   `broker_base` (the group). Enforced in the consumer at the API (422) and the DB
   (trigger, migration 0014).
@@ -63,8 +72,9 @@ group_id        ↔  Planta            (ssfv.tbl_planta.broker_base = the group,
   nombre_topic after the group`. (Opción A — no separate node table.)
 
 The producer is already conformant: `sparkplug.groupId` = Planta, `nodeId` =
-Nodo, `deviceId` = Device. Optionally it may declare the Planta in node
-properties (`planta` / `planta_id`) for auto-provisioning.
+Equipo, `deviceId` = Device. It SHOULD declare the Planta UI alias in the NBIRTH
+payload-level properties as **`uns/planta`** (e.g. `"GSANRAFA"`) so the consumer
+can stage the Planta for creation when it does not exist yet (§7).
 
 ---
 
@@ -106,11 +116,17 @@ which mirrors `mapping.Apply`.)
 
 ## 4. Metric naming
 
+Metric names use `/` as a **folder** separator (standard Sparkplug: clients
+render the segments as a tree inside the payload). The folder path groups
+metrics within an entity (e.g. `PLC/tank_level`, `VALV/VALV_ON`,
+`SYSTEM/CPU/Usage_pct`); the leaf is the attribute. Folders are organizational —
+the catalog identity is carried by `uns/*` (§5.1), never parsed from the name.
+
 | Source | Name | Notes |
 |---|---|---|
-| **DNP3** | `SignalMapping.metricName` (user-defined, free-form) | e.g. `Feeder1/Voltage`. Identity is `(pointType, index)` on the outstation. |
-| **Modbus** | `SignalMapping.metricName` (user-defined) | e.g. `Meter1/Energy_kWh`. Identity is `(function, address)`. |
-| **System (numeric)** | `{metricPrefix}{group}/{leaf}` | Default prefix `System/`. e.g. `System/CPU/Usage_pct`, `System/Memory/Used_pct`, `System/Disk/<mount>/Free_MB`, `System/Network/<iface>/RxRate_kbps`, `System/Temperature/CPU_C`, `System/Power/Supply_V`, `System/Power/RTC_Battery_OK`, `System/Uptime_h`, `System/Process/Count`. |
+| **DNP3** | `SignalMapping.metricName` (user-defined, free-form) | e.g. `VALV/VALV_ON`, `Feeder1/Voltage`. Identity is `(pointType, index)` on the outstation. |
+| **Modbus** | `SignalMapping.metricName` (user-defined) | e.g. `PLC/tank_level`, `Meter1/Energy_kWh`. Identity is `(function, address)`. |
+| **System (numeric)** | `{metricPrefix}{group}/{leaf}` | Prefix is configurable: default `System/`, `SYSTEM/` in the EPM deployment — consumers MUST match it case-insensitively. e.g. `SYSTEM/CPU/Usage_pct`, `SYSTEM/Memory/Free_MB`, `System/Disk/<mount>/Free_MB`, `System/Network/<iface>/RxRate_kbps`, `System/Temperature/CPU_C`, `System/Power/Supply_V`, `System/Power/RTC_Battery_OK`, `System/Uptime_h`, `System/Process/Count`. |
 | **System (identity, ICR build)** | `{prefix}Device/...` (String) | `System/Device/PartNumber`, `ProductType`, `ProductName`, `Firmware`, `Serial`, `UUID`. |
 
 See the goMqttDnp3 repo's `ARCHITECTURE.md` §5 and its `sysmon` package for the
@@ -131,8 +147,11 @@ Every NDATA/DDATA value metric carries a `PropertySet`. **Values are typed**
 | `dnp3.restart` | `Boolean` (7) | Restart bit set. |
 | `dnp3.comm_lost` | `Boolean` (7) | Comm-lost bit set. |
 | `engUnit` | `String` (8) | Engineering unit, when configured (e.g. `V`, `kWh`, `degC`). |
-| `uns/code` | `String` (8) | **UNS Attribute** — the canonical signal code (→ consumer catalog `codigo_senal`). Declared in NBIRTH/DBIRTH (and echoed on data). |
-| `uns/instance` | `String` (8) | **UNS entity instance / channel** (→ consumer `nombre_instancia`). `default` when the metric has no instance dimension. |
+| `uns/code` | `String` (8) | **UNS Attribute** — the canonical signal code, the metric's **leaf** (→ consumer catalog `codigo_senal`, ≤ 20 chars). Declared in NBIRTH/DBIRTH (and echoed on data). |
+| `uns/instance` | `String` (8) | **UNS folder / channel path** between the entity and the leaf (→ consumer `nombre_instancia`, ≤ 30 chars). `default` when the metric is flat. |
+| `uns/name` | `String` (8) | **Birth only.** Display name → `tbl_senales.nombre` (e.g. `"Valvula abierta"`). Pre-fills the operator approve dialog (§7). |
+| `uns/description` | `String` (8) | **Birth only.** → `tbl_senales.descripcion` (e.g. `"Valvula gas confirmación apertura"`). |
+| `uns/planta` | `String` (8) | **NBIRTH payload-level property** (not per-metric): the Planta UI alias (e.g. `"GSANRAFA"`) for staging the Planta on first contact (§1.1, §7). |
 
 PropertyValue value-field numbers: `int_value`=3, `long_value`=4,
 `float_value`=5, `double_value`=6, `boolean_value`=7, `string_value`=8.
@@ -144,28 +163,40 @@ structure and declares it explicitly via `uns/code` + `uns/instance` so any
 consumer maps it to an **Entity → Attribute** model deterministically, **without
 parsing the name**. This is protocol- and domain-agnostic (Modbus, DNP3, System,
 any). The **Entity** is the MQTT topic node (`…/NDATA/node`) or device
-(`…/DDATA/node/device`); `uns/instance` is the sub-channel *within* that entity;
-`uns/code` is the attribute.
+(`…/DDATA/node/device`); `uns/code` is the **leaf** attribute; `uns/instance`
+is the **folder/channel path** between the entity and the leaf.
+
+**The rule (v3):** for a metric name `[prefix/]folder₁/…/folderₙ/leaf`
+(the cosmetic host-telemetry prefix stripped first, §4):
+
+- `uns/code` = `leaf`
+- `uns/instance` = `folder₁/…/folderₙ`, or `default` when there are no folders.
 
 | Metric name (example) | `uns/code` | `uns/instance` |
 |---|---|---|
-| `tank_level` (Modbus node) | `tank_level` | `default` |
-| `Energy_kWh` (device) | `Energy_kWh` | `default` |
-| `System/CPU/Usage_pct` | `CPU/Usage_pct` | `default` |
-| `System/Disk/root/Used_pct` | `Disk/Used_pct` | `root` |
-| `System/Network/eth0/Rx_MB` | `Network/Rx_MB` | `eth0` |
+| `tank_press` (flat, device) | `tank_press` | `default` |
+| `PLC/tank_level` (device) | `tank_level` | `PLC` |
+| `VALV/VALV_ON` (device) | `VALV_ON` | `VALV` |
+| `SYSTEM/CPU/Usage_pct` (node) | `Usage_pct` | `CPU` |
+| `SYSTEM/Memory/Usage_pct` (node) | `Usage_pct` | `Memory` |
+| `System/Disk/root/Used_pct` (node) | `Used_pct` | `Disk/root` |
+| `System/Network/eth0/Rx_MB` (node) | `Rx_MB` | `Network/eth0` |
 | `Feeder1/Voltage` (device sub-component) | `Voltage` | `Feeder1` |
 
+Note the same leaf under two folders (`Usage_pct` @ `CPU` / `Memory`) is **one**
+catalog señal (`codigo_senal = Usage_pct`, one `nombre`/`descripcion`) bound to
+the entity once per instancia — the folder is the instance dimension.
+
 **Producer rules (goMqttDnp3):** Modbus/DNP3 mappings take `uns/code` from the
-config `signalCode` (default = `metricName`) and `uns/instance` from `instance`
-(default `default`). System metrics derive them natively from the path
-(`Category[/Instance]/Attribute`). `bdSeq` and other session metrics carry no
-`uns/*`.
+config `signalCode` (default = the **leaf** of `metricName`) and `uns/instance`
+from `instance` (default = the folder path of `metricName`, else `default`).
+System metrics derive them natively from the path. `bdSeq` and other session
+metrics carry no `uns/*`.
 
 **Consumer rules (goGateway):** seed `alias → {uns/code, uns/instance}` from the
 BIRTH and resolve data by alias. When `uns/*` is absent (legacy/3rd-party
-producer) fall back to parsing the name. The match identity is
-`(entity, uns/code, uns/instance)`.
+producer) fall back to parsing the name with the same leaf/folder rule. The
+match identity is `(entity, uns/code, uns/instance)`.
 
 > **Producer note (Modbus):** Modbus reads have no rich quality model — a
 > successful read sets `quality=192` / `dnp3.online=true`; the other `dnp3.*`
@@ -203,6 +234,17 @@ The files in [`schema/`](schema/) show one of each message type, decoded to JSON
 4. Read `PropertySet` typed values for `quality`/`engUnit`/`dnp3.*`.
 5. On a `seq` gap or unknown alias: publish `NCMD Node Control/Rebirth=true`.
 6. On `NDEATH` with matching `bdSeq`: mark the node and its devices offline.
+7. **Auto-discovery staging:** every NBIRTH/DBIRTH from an entity not in the
+   catalog is recorded as `pending` (with its metric list, `uns/*` metadata and
+   node properties) for operator review — **nothing is provisioned without
+   confirmation in the UI**. On approval the consumer creates, as needed: the
+   **Planta** (alias from `uns/planta`, group from the topic), the
+   **Equipo/Device** (`tbl_equipo`), and the **señales**
+   (`codigo_senal`/`nombre`/`descripcion` pre-filled from
+   `uns/code`/`uns/name`/`uns/description`) — then publishes
+   `NCMD Node Control/Rebirth=true` so data flows against the fresh catalog.
+   Unregistered signals on known entities are quarantined (Descartados), never
+   silently dropped.
 
 ---
 
@@ -211,3 +253,11 @@ The files in [`schema/`](schema/) show one of each message type, decoded to JSON
 This contract tracks Eclipse Sparkplug **2.2**, payload schema **spBv1.0**.
 Changes to metric naming, datatypes, or property keys are **breaking** for the
 consumer and must bump this section and be coordinated across both repos.
+
+**Contract v3** (2026-06): `uns/code` is now the **leaf** attribute and
+`uns/instance` the **folder path** (§5.1) — previously the code kept the
+category (`CPU/Usage_pct`) and the instance was only the middle channel
+segment. Catalog rows created under the v2 scheme (codes containing `/`) must
+be migrated by splitting at the last `/`. Added birth-only metadata properties
+`uns/name`/`uns/description` and the NBIRTH payload property `uns/planta`
+(§5), and the staging lifecycle (§7).

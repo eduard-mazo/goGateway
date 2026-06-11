@@ -327,17 +327,22 @@ func (h *SparkplugHandler) dispatchMetric(
 			codigo, instance = ref.Codigo, ref.Instance
 		default:
 			parts := strings.Split(metricName, "/")
-			if len(parts) >= 2 {
-				// FALLBACK: full UNS path embedded in the name
+			if len(parts) >= 2 && parts[0] == topic.GroupID {
+				// FALLBACK (legacy): full UNS path embedded in the name
 				// ("EPM_SSFV/Sede30/INV_1/OSV") → entity = path, attribute = leaf.
+				// Only when the name starts with the topic's own group — otherwise
+				// a folder-grouped name ("PLC/tank_level") would be misread as a
+				// foreign entity.
 				entity = strings.Join(parts[:len(parts)-1], "/")
 				codigo = parts[len(parts)-1]
+				instance = "default"
 			} else {
-				// Simple metric name on the node/device entity.
+				// FALLBACK: folder-grouped or flat name on the node/device entity
+				// (contract v3 §5.1): codigo = leaf, instance = folder path.
 				entity = devEntity
-				codigo = metricName
+				ref := parseFiwareSignal(metricName, isDevice)
+				codigo, instance = ref.Codigo, ref.Instance
 			}
-			instance = "default"
 		}
 		if instance == "" {
 			instance = "default"
@@ -434,7 +439,14 @@ func collectMetricMeta(metrics []sparkplug.Metric) []MetricMeta {
 			mm.EngUnit = m.Properties["engUnit"]
 			mm.TipoVariable = m.Properties["tipo_variable"]
 			mm.TipoValor = m.Properties["tipo_valor"]
-			mm.Description = m.Properties["description"]
+			// Contract v3 §5: uns/name + uns/description are the canonical
+			// birth-only metadata keys; the bare "description" key is the
+			// pre-v3 spelling kept as fallback.
+			mm.UnsName = m.Properties["uns/name"]
+			mm.Description = m.Properties["uns/description"]
+			if mm.Description == "" {
+				mm.Description = m.Properties["description"]
+			}
 			mm.UnsCode = m.Properties["uns/code"]
 			mm.UnsInstance = m.Properties["uns/instance"]
 			mm.DeviceTopic = m.Properties["device_topic"]

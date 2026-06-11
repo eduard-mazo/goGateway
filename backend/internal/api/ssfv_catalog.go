@@ -1657,6 +1657,15 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 		TipoID       int    `json:"tipo_id"`
 		NombreEquipo string `json:"nombre_equipo"`
 		NombreTopic  string `json:"nombre_topic"`
+		// CreatePlanta: stage the parent Planta together with the entity when it
+		// does not exist yet (contract v3 §1.1 / §7). Used only when planta_id is
+		// 0. nombre = the UI alias (pre-filled from the NBIRTH uns/planta node
+		// property); broker_base = the Sparkplug group_id (pre-filled from the
+		// entity's group). Idempotent on broker_base so re-approval reuses the row.
+		CreatePlanta *struct {
+			Nombre     string `json:"nombre"`
+			BrokerBase string `json:"broker_base"`
+		} `json:"create_planta"`
 		// CreateSignals: metrics with no catalog entry. Each is inserted into
 		// ssfv.tbl_senales and linked to the tipo_equipo template so it is
 		// instantiated for this (and every future) equipo of the same type.
@@ -1702,6 +1711,38 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+
+	// Stage the parent Planta when the operator asked for it (planta does not
+	// exist yet). broker_base defaults to the entity's own group_id, which by
+	// construction satisfies the prefix invariant below.
+	if body.PlantaID == 0 && body.CreatePlanta != nil {
+		cp := body.CreatePlanta
+		if cp.BrokerBase == "" {
+			cp.BrokerBase = groupID
+		}
+		if reason := validateBrokerBase(cp.BrokerBase); reason != "" {
+			errResp(w, http.StatusUnprocessableEntity, reason)
+			return
+		}
+		if strings.TrimSpace(cp.Nombre) == "" {
+			cp.Nombre = cp.BrokerBase
+		}
+		// Re-approval after a soft delete revives the planta (estado=1,
+		// fecha_baja cleared) instead of failing on the unique broker_base.
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO ssfv.tbl_planta (nombre, broker_base, estado)
+			VALUES ($1,$2,1)
+			ON CONFLICT (broker_base) DO UPDATE SET
+			    nombre      = excluded.nombre,
+			    estado      = 1,
+			    fecha_baja  = NULL,
+			    fecha_modif = NOW()
+			RETURNING planta_id`,
+			strings.TrimSpace(cp.Nombre), cp.BrokerBase).Scan(&body.PlantaID); err != nil {
+			errResp(w, http.StatusInternalServerError, "create planta: "+err.Error())
+			return
+		}
+	}
 
 	// Prefix invariant (contract §1.1): the entity topic must be under the
 	// planta's group. Reject loudly before creating the equipo.

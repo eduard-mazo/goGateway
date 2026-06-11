@@ -24,46 +24,36 @@ const invalidCode = "_invalid"
 // via uns/* metric properties (legacy or third-party producers). When those
 // properties are present the consumer uses them directly and never calls this.
 //
-//	Rule A — System/host telemetry (node scope), Category[/Instance]/Attribute:
-//	  System/CPU/Usage_pct           → {"CPU/Usage_pct",   "default"}
-//	  System/Network/docker0/Rx_MB   → {"Network/Rx_MB",   "docker0"}
-//	  System/Disk/root/Used_pct      → {"Disk/Used_pct",   "root"}
-//	  System/Uptime_h                → {"Uptime_h",        "default"}
-//	Rule B — flat node metric:
-//	  tank_level                     → {"tank_level",      "default"}
-//	Rule C — device metric (topic is the entity; leading segment = sub-instance):
-//	  Energy_kWh                     → {"Energy_kWh",      "default"}
-//	  Feeder1/Voltage                → {"Voltage",         "Feeder1"}
-//	  Feeder1/PhaseA/Voltage         → {"PhaseA/Voltage",  "Feeder1"}
+// Contract v3 (§5.1): codigo is the LEAF attribute only; instance is the folder
+// path between the entity and the leaf ("default" when flat). For host
+// telemetry the producer's cosmetic metricPrefix ("System/"/"SYSTEM/") is
+// stripped before the split.
+//
+//	System/CPU/Usage_pct           → {"Usage_pct",  "CPU"}
+//	SYSTEM/Memory/Free_MB          → {"Free_MB",    "Memory"}
+//	System/Network/docker0/Rx_MB   → {"Rx_MB",      "Network/docker0"}
+//	System/Uptime_h                → {"Uptime_h",   "default"}
+//	tank_level                     → {"tank_level", "default"}
+//	PLC/tank_level                 → {"tank_level", "PLC"}
+//	VALV/VALV_ON                   → {"VALV_ON",    "VALV"}
+//	Feeder1/PhaseA/Voltage         → {"Voltage",    "Feeder1/PhaseA"}
 func parseFiwareSignal(metricName string, isDevice bool) signalRef {
-	parts := splitClean(metricName)
-	if len(parts) == 0 {
-		return signalRef{Codigo: invalidCode, Instance: instanceDefault}
-	}
-
-	// Rule A: System/host telemetry uses Category[/Instance]/Attribute.
+	name := metricName
 	if !isDevice && isHostMetric(metricName) {
-		hp := splitClean(strings.TrimPrefix(metricName, "System/"))
-		switch len(hp) {
-		case 0:
-			return signalRef{Codigo: invalidCode, Instance: instanceDefault}
-		case 1: // System/Uptime_h
-			return signalRef{Codigo: hp[0], Instance: instanceDefault}
-		case 2: // System/CPU/Usage_pct — scalar category, no instance
-			return signalRef{Codigo: hp[0] + "/" + hp[1], Instance: instanceDefault}
-		default: // System/Network/docker0/Rx_MB[/…] — Category / Instance / Attribute…
-			return signalRef{
-				Codigo:   hp[0] + "/" + strings.Join(hp[2:], "/"),
-				Instance: hp[1],
-			}
+		name = trimHostPrefix(metricName)
+	}
+	parts := splitClean(name)
+	switch len(parts) {
+	case 0:
+		return signalRef{Codigo: invalidCode, Instance: instanceDefault}
+	case 1:
+		return signalRef{Codigo: parts[0], Instance: instanceDefault}
+	default:
+		return signalRef{
+			Codigo:   parts[len(parts)-1],
+			Instance: strings.Join(parts[:len(parts)-1], "/"),
 		}
 	}
-
-	// Rule B / C: flat or device metric. A leading '/' segment is a sub-instance.
-	if len(parts) == 1 {
-		return signalRef{Codigo: parts[0], Instance: instanceDefault}
-	}
-	return signalRef{Codigo: strings.Join(parts[1:], "/"), Instance: parts[0]}
 }
 
 // splitClean splits on '/' and drops empty segments — robust against leading,
