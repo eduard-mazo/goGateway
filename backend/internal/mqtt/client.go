@@ -43,6 +43,13 @@ type Manager struct {
 	bdSeq     atomic.Uint64 // birth/death sequence; increments on every MQTT CONNECT
 	cfg       worker.MQTTConfigSnapshot
 
+	// lastRebirth debounces NCMD Rebirth per node: one seq gap is detected
+	// independently by the NDATA and DDATA handlers (one node-level seq
+	// counter), so without a cooldown each gap sends 2+ NCMDs and the producer
+	// answers with as many full NBIRTH+DBIRTH bursts.
+	rebirthMu   sync.Mutex
+	lastRebirth map[string]time.Time
+
 	// SSFV JSON handler — intercepts equipment topics before generic dispatch.
 	ssfvHandler *worker.SSFVHandler
 
@@ -409,6 +416,11 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 	worker.ParseAndDispatch(topic, payload, maps, m.d)
 }
 
+// rebirthCooldown is the per-node minimum interval between NCMD Rebirth
+// requests. A birth burst takes well under a second; anything re-detected
+// within the window is the same gap (or the burst itself racing the detector).
+const rebirthCooldown = 5 * time.Second
+
 // publishRebirth sends an NCMD message requesting the EoN node to re-publish
 // its NBIRTH.  Called by SparkplugHandler on out-of-sequence NDATA.
 func (m *Manager) publishRebirth(groupID, nodeID string) {
@@ -420,6 +432,19 @@ func (m *Manager) publishRebirth(groupID, nodeID string) {
 	if c == nil || !connected {
 		return
 	}
+
+	key := groupID + "/" + nodeID
+	m.rebirthMu.Lock()
+	if t, ok := m.lastRebirth[key]; ok && time.Since(t) < rebirthCooldown {
+		m.rebirthMu.Unlock()
+		log.Printf("sparkplug: rebirth for %s suppressed (cooldown)", key)
+		return
+	}
+	if m.lastRebirth == nil {
+		m.lastRebirth = make(map[string]time.Time)
+	}
+	m.lastRebirth[key] = time.Now()
+	m.rebirthMu.Unlock()
 	topic := fmt.Sprintf("%s/%s/NCMD/%s", sparkplug.Namespace, groupID, nodeID)
 	payload := sparkplug.EncodeNCMDRebirth()
 	// QoS 1: a dropped rebirth leaves the node out-of-sync until the next gap
