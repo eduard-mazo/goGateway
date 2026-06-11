@@ -545,6 +545,7 @@ interface MetricMetaItem {
   tipo_variable?: string
   tipo_valor?: string
   description?: string
+  uns_name?: string       // producer-declared display name (→ tbl_senales.nombre)
   uns_code?: string       // producer-declared FIWARE attribute (→ codigo_senal)
   uns_instance?: string   // producer-declared entity instance/channel (→ nombre_instancia)
   device_topic?: string
@@ -568,7 +569,11 @@ const autoEntities       = ref<AutodiscEntity[]>([])
 const autoPendingCount   = computed(() => autoEntities.value.filter(e => e.status === 'pending').length)
 const approveDialog      = ref(false)
 const approveTarget      = ref<AutodiscEntity | null>(null)
-const approveForm        = reactive({ planta_id: '', tipo_id: '', nombre_equipo: '', nombre_topic: '' })
+// planta_id '__new__' = stage the parent Planta with the approval (contract v3
+// §7): nombre = UI alias (pre-filled from the NBIRTH uns/planta property),
+// broker_base = the entity's Sparkplug group_id.
+const approveForm        = reactive({ planta_id: '', tipo_id: '', nombre_equipo: '', nombre_topic: '', planta_nombre: '' })
+const PLANTA_NEW = '__new__'
 
 // Derived: unique device types detected in the approve target's metric_meta
 const approveDetectedTypes = computed(() => {
@@ -598,7 +603,9 @@ const HOST_CATEGORIES = new Set(['CPU', 'Memory', 'Disk', 'Network', 'Temperatur
 
 function metricKind(name: string): MetricKind {
   if (name === 'bdSeq' || name === 'seq') return 'sesion'
-  const n = name.startsWith('System/') ? name.slice(7) : name
+  // The producer's host-telemetry prefix is matched case-insensitively
+  // ("System/" default, "SYSTEM/" in the EPM deployment) — contract v3 §4.
+  const n = /^system\//i.test(name) ? name.slice(name.indexOf('/') + 1) : name
   if (n.startsWith('Device/')) return 'identidad'
   if (n === 'Uptime_h' || HOST_CATEGORIES.has(n.split('/')[0])) return 'sistema'
   return 'proceso'
@@ -613,6 +620,7 @@ interface ReviewMetric {
   tipoValor?: string
   description?: string
   deviceType?: string
+  unsName?: string        // producer-declared display name (→ nombre)
   unsCode?: string        // producer-declared attribute (→ codigo_senal)
   unsInstance?: string    // producer-declared instance/channel (→ nombre_instancia)
   kind: MetricKind
@@ -634,6 +642,7 @@ function buildReviewMetrics(e: AutodiscEntity): ReviewMetric[] {
       tipoValor:    m?.tipo_valor || undefined,
       description:  m?.description || undefined,
       deviceType:   m?.device_type || undefined,
+      unsName:      m?.uns_name || undefined,
       unsCode:      m?.uns_code || undefined,
       unsInstance:  m?.uns_instance || undefined,
       kind: metricKind(name),
@@ -726,6 +735,13 @@ function signalCode(name: string): string {
   const seg = name.split('/')
   return seg[seg.length - 1]
 }
+// nombre_instancia fallback = the folder path between entity and leaf, with the
+// cosmetic System/SYSTEM host prefix stripped (mirrors parseFiwareSignal in Go).
+function signalInstance(name: string): string {
+  const n = /^system\//i.test(name) ? name.slice(name.indexOf('/') + 1) : name
+  const seg = n.split('/').filter(Boolean)
+  return seg.length > 1 ? seg.slice(0, -1).join('/') : 'default'
+}
 // Indexed signals: "IDC_1" → base "IDC_x" (mirrors resolveIndexedSignal in Go).
 function indexedBase(code: string): string | null {
   const parts = code.split('_')
@@ -770,6 +786,7 @@ interface PlanEntry {
   selected: boolean
   senalId?: number            // catalog → existing señal to link into template
   nombre: string
+  descripcion: string         // → tbl_senales.descripcion (from uns/description)
   tipovarId: string           // new → catalog FKs (string for shadcn Select)
   unidadId: string
   tipoValor: string
@@ -811,7 +828,7 @@ function rebuildSignalPlan() {
     // Prefer the producer-declared FIWARE decomposition (uns/*); fall back to
     // deriving from the metric name for producers that don't send it.
     const code = m.unsCode || signalCode(m.name)
-    const instance = m.unsInstance || 'default'
+    const instance = m.unsInstance || signalInstance(m.name)
     const channelized = instance !== 'default'
     const base = indexedBase(code)
     // A channelized signal is bound per-equipo with its instance, so it always
@@ -822,12 +839,15 @@ function rebuildSignalPlan() {
     if (hit) {
       signalPlan[m.name] = {
         name: m.name, code, instance, status: 'catalog', selected: true, senalId: hit.senal_id,
-        nombre: hit.nombre, tipovarId: '', unidadId: '', tipoValor: '', codeTooLong: false,
+        nombre: hit.nombre, descripcion: '', tipovarId: '', unidadId: '', tipoValor: '', codeTooLong: false,
       }
     } else {
       signalPlan[m.name] = {
         name: m.name, code, instance, status: 'new', selected: code.length <= 20,
-        nombre: m.description || code,
+        // Producer-declared display name (uns/name, e.g. "Valvula abierta")
+        // pre-fills nombre; uns/description pre-fills descripcion.
+        nombre: m.unsName || m.description || code,
+        descripcion: m.description || '',
         tipovarId: matchTipoVar(m.tipoVariable),
         unidadId:  matchUnidad(m.engUnit),
         tipoValor: m.tipoValor === 'Acumulado' ? 'Acumulado' : 'Instantaneo',
@@ -898,11 +918,18 @@ async function openApprove(e: AutodiscEntity) {
     || ''
   const matched = tipoEquipos.value.find(t => t.nombre === suggestedType)
 
+  // Pre-select the planta whose group (broker_base) matches the entity's
+  // group_id; when none exists, offer staging a new one whose alias comes from
+  // the NBIRTH uns/planta property (fallback: the group_id itself).
+  const plantaHit = plantas.value.find(p => p.broker_base === e.group_id)
+  const plantaAlias = e.node_properties?.['uns/planta'] || e.node_properties?.planta || e.group_id
+
   Object.assign(approveForm, {
-    planta_id: '',
+    planta_id: plantaHit ? String(plantaHit.planta_id) : PLANTA_NEW,
     tipo_id:   matched ? String(matched.tipo_id) : '',
     nombre_equipo: e.device_id || e.node_id,
     nombre_topic: defaultTopic,
+    planta_nombre: plantaAlias,
   })
   approveDialog.value = true
 
@@ -929,16 +956,20 @@ async function submitApprove() {
       tipavar_id:       Number(e.tipovarId),
       unidad_id:        Number(e.unidadId),
       tipo_valor:       e.tipoValor || 'Instantaneo',
-      descripcion:      e.nombre || null,
+      descripcion:      e.descripcion || e.nombre || null,
     }))
   const linkSignals = planEntries.value
     .filter(e => e.selected && e.status === 'catalog' && e.senalId)
     .map(e => e.senalId as number)
+  const stagingPlanta = approveForm.planta_id === PLANTA_NEW
   try {
     // 207 Multi-Status (partial) is a 2xx, so axios resolves it — inspect the body
     // for `rejected[]` so the operator sees exactly what didn't register.
     const res = await api.post(`/ssfv/autodiscovered/${approveTarget.value.id}/approve`, {
-      planta_id:      Number(approveForm.planta_id),
+      planta_id:      stagingPlanta ? 0 : Number(approveForm.planta_id),
+      create_planta:  stagingPlanta
+        ? { nombre: approveForm.planta_nombre, broker_base: approveTarget.value.group_id }
+        : undefined,
       tipo_id:        Number(approveForm.tipo_id),
       nombre_equipo:  approveForm.nombre_equipo,
       nombre_topic:   approveForm.nombre_topic,
@@ -955,7 +986,7 @@ async function submitApprove() {
         `Las señales aparecen en «Catálogo» y al expandir el equipo en «Plantas».`)
     }
     approveDialog.value = false
-    await Promise.all([fetchAutodiscovered(), fetchSenales()])
+    await Promise.all([fetchAutodiscovered(), fetchSenales(), ...(stagingPlanta ? [fetchPlantas()] : [])])
   } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error aprobando') }
 }
 
@@ -1947,8 +1978,13 @@ function tipoEquipoIcon(nombre: string) {
                 <SelectTrigger class="rounded-sm"><SelectValue placeholder="Seleccionar planta…" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem v-for="p in plantas" :key="p.planta_id" :value="String(p.planta_id)">{{ p.nombre }}</SelectItem>
+                  <SelectItem :value="PLANTA_NEW">➕ Crear planta para el group «{{ approveTarget?.group_id }}»</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            <div v-if="approveForm.planta_id === PLANTA_NEW" class="grid gap-1.5">
+              <Label>Alias de la planta * <span class="text-[10px] text-muted-foreground font-normal">(group = {{ approveTarget?.group_id }})</span></Label>
+              <Input v-model="approveForm.planta_nombre" class="rounded-sm h-8" placeholder="p. ej. GSANRAFA" />
             </div>
             <div class="grid gap-1.5">
               <Label>Tipo de equipo *</Label>
@@ -2157,7 +2193,7 @@ function tipoEquipoIcon(nombre: string) {
           v-if="!approveReadOnly"
           size="sm"
           class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm"
-          :disabled="!approveForm.planta_id || !approveForm.tipo_id || !planValid"
+          :disabled="!approveForm.planta_id || (approveForm.planta_id === PLANTA_NEW && !approveForm.planta_nombre.trim()) || !approveForm.tipo_id || !planValid"
           @click="submitApprove"
         >
           <CheckCircle2 class="h-3.5 w-3.5 mr-1.5" />
