@@ -1,0 +1,61 @@
+== hypertable totals ==
+valores_rows=6597
+distinct_signals=5
+hypertable_size_bytes=1286144
+== chunks (ssfv.tbl_valores) ==
+ERROR:  column reference "chunk_name" is ambiguous
+LINE 1: SELECT chunk_name, range_start, range_end, is_compressed, pg...
+               ^
+== all hypertables ==
+       hypertable       | num_chunks | compression_enabled 
+------------------------+------------+---------------------
+ public.pipeline_health |          0 | f
+ public.signals         |          0 | t
+ public.signals_raw     |          0 | f
+ ssfv.tbl_alarmas       |          0 | t
+ ssfv.tbl_valores       |          1 | t
+(5 rows)
+
+== background jobs ==
+ job_id |              proc_name              | schedule_interval |         target         | total_runs | total_successes | total_failures 
+--------+-------------------------------------+-------------------+------------------------+------------+-----------------+----------------
+      1 | policy_telemetry                    | 24:00:00          |                        |          2 |               1 |              0
+      3 | policy_job_stat_history_retention   | 06:00:00          |                        |          1 |               1 |              0
+   1001 | policy_refresh_continuous_aggregate | 00:05:00          | public.signals_1m      |         13 |              13 |              0
+   1002 | policy_refresh_continuous_aggregate | 00:30:00          | public.signals_1h      |          3 |               3 |              0
+   1003 | policy_refresh_continuous_aggregate | 01:00:00          | public.signals_1d      |          2 |               2 |              0
+   1004 | policy_compression                  | 12:00:00          | public.signals_1m      |          1 |               1 |              0
+   1005 | policy_compression                  | 12:00:00          | public.signals_1h      |          1 |               1 |              0
+   1006 | policy_compression                  | 12:00:00          | public.signals_1d      |          1 |               1 |              0
+   1007 | policy_retention                    | 1 day             | public.signals         |          1 |               1 |              0
+   1008 | policy_retention                    | 1 day             | public.signals_1m      |          1 |               1 |              0
+   1009 | policy_retention                    | 1 day             | public.signals_1h      |          1 |               1 |              0
+   1010 | policy_retention                    | 1 day             | public.pipeline_health |          1 |               1 |              0
+   1011 | policy_compression                  | 12:00:00          | public.signals         |          1 |               1 |              0
+   1012 | policy_compression                  | 12:00:00          | ssfv.tbl_valores       |          1 |               1 |              0
+   1013 | policy_compression                  | 12:00:00          | ssfv.tbl_alarmas       |          1 |               1 |              0
+(15 rows)
+
+== per-signal write distribution (top 12) ==
+ equisenal_id | nombre_instancia | codigo_senal |  n   |          first_ts          |          last_ts           
+--------------+------------------+--------------+------+----------------------------+----------------------------
+           74 | PLC              | tank_press   | 2063 | 2026-06-12 20:08:21.052+00 | 2026-06-12 20:44:25.529+00
+           75 | VALV             | VALV_OFF     | 2063 | 2026-06-12 20:08:21.052+00 | 2026-06-12 20:44:25.529+00
+          112 | VALV             | VALV_ON      | 1031 | 2026-06-12 20:08:21.764+00 | 2026-06-12 20:44:25.028+00
+          111 | PLC              | tank_level   | 1031 | 2026-06-12 20:08:21.764+00 | 2026-06-12 20:44:25.028+00
+           93 | CPU              | Usage_pct    |  413 | 2026-06-12 20:08:22.529+00 | 2026-06-12 20:44:22.529+00
+(5 rows)
+
+== pg_stat_database (gwtest) ==
+ xact_commit | xact_rollback | tup_inserted | tup_fetched | blks_read | blks_hit | cache_hit_pct | deadlocks 
+-------------+---------------+--------------+-------------+-----------+----------+---------------+-----------
+        5297 |             3 |        12487 |      271226 |       644 |   602445 |         99.89 |         0
+(1 row)
+
+== chunk insert stats (pg_stat_user_tables, _timescaledb_internal) ==
+      relname      | n_tup_ins | n_live_tup 
+-------------------+-----------+------------
+ _hyper_11_1_chunk |      6595 |       6597
+ bgw_job_stat      |         2 |          1
+(2 rows)
+
