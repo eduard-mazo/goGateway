@@ -181,16 +181,28 @@ function isNodeEntity(planta: SSFVPlanta, eq: SSFVEquipo): boolean {
   const rel = eq.nombre_topic.startsWith(base + '/') ? eq.nombre_topic.slice(base.length + 1) : eq.nombre_topic
   return !rel.includes('/')
 }
-// Group a planta's equipos by node → planta(group) → nodo → {system, devices}.
-function equiposByNode(planta: SSFVPlanta): { node: string; equipos: SSFVEquipo[] }[] {
-  const groups = new Map<string, SSFVEquipo[]>()
+// Contract §1.1 hierarchy: Planta (group) → Nodo (group/node, carries System +
+// node-level señales) → Devices (group/node/device). The node-level equipo is
+// the PARENT in the tree; its devices nest beneath it. Devices discovered
+// before their node was approved hang under a ghost node header.
+type NodeBranch = { node: string; nodeEntity: SSFVEquipo | null; devices: SSFVEquipo[] }
+function nodeTree(planta: SSFVPlanta): NodeBranch[] {
+  const branches = new Map<string, NodeBranch>()
   for (const eq of plantaEquipos.value[planta.planta_id!] ?? []) {
     const n = nodeOf(planta, eq)
-    if (!groups.has(n)) groups.set(n, [])
-    groups.get(n)!.push(eq)
+    let b = branches.get(n)
+    if (!b) { b = { node: n, nodeEntity: null, devices: [] }; branches.set(n, b) }
+    if (isNodeEntity(planta, eq)) b.nodeEntity = eq
+    else b.devices.push(eq)
   }
-  return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([node, equipos]) => ({ node, equipos }))
+  for (const b of branches.values()) {
+    b.devices.sort((x, y) => x.nombre_topic.localeCompare(y.nombre_topic))
+  }
+  return [...branches.values()].sort((a, b) => a.node.localeCompare(b.node))
+}
+// Last topic segment — the device's own id, shown as the child's primary label.
+function lastSegment(topic: string): string {
+  return topic.split('/').pop() || topic
 }
 
 // Equipo dialog
@@ -366,11 +378,21 @@ async function saveSenal() {
   } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error') }
 }
 async function deleteSenal(s: SSFVSenal) {
-  const ok = await confirm({ title: 'Eliminar señal', message: `${s.codigo_senal} — ${s.nombre}`, variant: 'danger', confirmText: 'Eliminar señal' })
+  const ok = await confirm({
+    title: 'Eliminar señal',
+    message: 'Una señal sin vínculos se elimina del catálogo. Si está vinculada a equipos, la señal y sus instancias se darán de baja: dejan de ingerir datos y el histórico se conserva.',
+    detail: `${s.codigo_senal} — ${s.nombre}`,
+    variant: 'danger',
+    confirmText: 'Eliminar señal',
+  })
   if (!ok) return
   try {
-    await api.delete(`/ssfv/senales/${s.senal_id}`)
-    toast.success('Señal eliminada')
+    const r = await api.delete(`/ssfv/senales/${s.senal_id}`)
+    if (r.status === 200 && r.data?.deactivated) {
+      toast.success(`Señal dada de baja — ${r.data.bindings} instancia(s) conservan su histórico`)
+    } else {
+      toast.success('Señal eliminada')
+    }
     await fetchSenales()
   } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error') }
 }
@@ -1252,81 +1274,172 @@ function tipoEquipoIcon(nombre: string) {
               Sin equipos. Agrega un equipo para auto-instanciar sus señales.
             </div>
 
-            <!-- Group by node (contract §1.1: planta=group → nodo → {system, devices}) -->
-            <div v-for="ng in equiposByNode(p)" :key="ng.node" class="mb-3">
-              <div class="flex items-center gap-2 px-1 pb-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-[color:var(--epm-bosque)]">
-                <GitBranch class="h-3.5 w-3.5" /> Nodo <span class="font-mono normal-case text-foreground">{{ ng.node }}</span>
-                <span class="text-muted-foreground font-normal normal-case">· {{ ng.equipos.length }} entidad(es)</span>
-              </div>
-              <div v-for="eq in ng.equipos" :key="eq.equipo_id" class="rounded-sm border border-border bg-card mb-2 overflow-hidden ml-3">
-              <!-- Equipo row -->
-              <div class="flex items-center gap-3 px-3 py-2">
-                <button type="button" class="flex items-center gap-2 flex-1 min-w-0 text-left" @click="toggleEquipo(eq.equipo_id!)">
-                  <ChevronRight
-                    class="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform"
-                    :class="equipoOpen === eq.equipo_id ? 'rotate-90' : ''"
-                  />
-                  <div class="grid place-items-center w-6 h-6 rounded-sm bg-muted shrink-0">
-                    <component :is="tipoEquipoIcon(eq.tipo_nombre ?? '')" class="h-3.5 w-3.5 text-muted-foreground" />
-                  </div>
-                  <div class="min-w-0">
-                    <div class="text-sm font-semibold truncate">{{ eq.nombre_equipo }}</div>
-                    <div class="text-[10px] text-muted-foreground font-mono truncate">{{ eq.nombre_topic }}</div>
-                  </div>
-                </button>
-                <div class="flex items-center gap-2 shrink-0">
-                  <span v-if="isNodeEntity(p, eq)"
-                    class="text-[9px] px-1.5 py-0.5 rounded-sm bg-sky-500/15 text-sky-400 font-bold uppercase tracking-wide inline-flex items-center gap-1"
-                    title="Entidad de nivel nodo (group/node) — porta System + señales de proceso del nodo">
-                    <Cog class="h-2.5 w-2.5" />System
-                  </span>
-                  <span v-else
-                    class="text-[9px] px-1.5 py-0.5 rounded-sm bg-violet-500/15 text-violet-400 font-bold uppercase tracking-wide inline-flex items-center gap-1"
-                    title="Device (group/node/device)">
-                    <Cpu class="h-2.5 w-2.5" />Device
-                  </span>
-                  <span class="text-[10px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_18%,transparent)] text-[color:var(--epm-bosque)] font-semibold">
-                    {{ eq.tipo_nombre }}
-                  </span>
-                  <Button variant="ghost" size="icon" class="h-6 w-6" @click="openEditEquipo(eq)"><Pencil class="h-3 w-3" /></Button>
-                  <Button variant="ghost" size="icon" class="h-6 w-6 text-destructive" @click="deleteEquipo(eq)"><Trash2 class="h-3 w-3" /></Button>
-                </div>
-              </div>
+            <!-- Hierarchy (contract §1.1): Nodo (group/node) is the PARENT;
+                 its devices (group/node/device) nest beneath with tree rails -->
+            <div v-for="br in nodeTree(p)" :key="br.node" class="mb-3">
+              <div class="rounded-sm border border-border bg-card overflow-hidden border-l-[3px] !border-l-[color:var(--epm-bosque)]">
 
-              <!-- Signal instances panel -->
-              <div v-if="equipoOpen === eq.equipo_id" class="border-t border-border/60 bg-muted/10 px-4 py-2">
-                <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground mb-2 font-semibold">
-                  Señales instanciadas — <span class="font-mono font-normal">{{ (equipoSignals[eq.equipo_id!] ?? []).length }} puntos</span>
+                <!-- Node row (parent entity, carries System + node señales) -->
+                <template v-if="br.nodeEntity">
+                  <div class="flex items-center gap-3 px-3 py-2.5 bg-[color:color-mix(in_srgb,var(--epm-bosque)_5%,transparent)]">
+                    <button type="button" class="flex items-center gap-2.5 flex-1 min-w-0 text-left" @click="toggleEquipo(br.nodeEntity.equipo_id!)">
+                      <ChevronRight
+                        class="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform"
+                        :class="equipoOpen === br.nodeEntity.equipo_id ? 'rotate-90' : ''"
+                      />
+                      <div class="grid place-items-center w-7 h-7 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-bosque)_14%,transparent)] shrink-0">
+                        <GitBranch class="h-3.5 w-3.5 text-[color:var(--epm-bosque)]" />
+                      </div>
+                      <div class="min-w-0">
+                        <div class="text-sm font-bold truncate">
+                          {{ br.node }}
+                          <span v-if="br.nodeEntity.nombre_equipo !== br.node" class="font-normal text-muted-foreground">· {{ br.nodeEntity.nombre_equipo }}</span>
+                        </div>
+                        <div class="text-[10px] text-muted-foreground font-mono truncate">{{ br.nodeEntity.nombre_topic }}</div>
+                      </div>
+                    </button>
+                    <div class="flex items-center gap-2 shrink-0">
+                      <span
+                        class="text-[9px] px-1.5 py-0.5 rounded-sm bg-sky-500/15 text-sky-400 font-bold uppercase tracking-wide inline-flex items-center gap-1"
+                        title="Entidad de nivel nodo (group/node) — porta System + señales de proceso del nodo">
+                        <Cog class="h-2.5 w-2.5" />Nodo
+                      </span>
+                      <span class="text-[10px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_18%,transparent)] text-[color:var(--epm-bosque)] font-semibold">
+                        {{ br.nodeEntity.tipo_nombre }}
+                      </span>
+                      <span class="text-[10px] font-mono text-muted-foreground">{{ br.devices.length }} device(s)</span>
+                      <Button variant="ghost" size="icon" class="h-6 w-6" @click="openEditEquipo(br.nodeEntity)"><Pencil class="h-3 w-3" /></Button>
+                      <Button variant="ghost" size="icon" class="h-6 w-6 text-destructive" @click="deleteEquipo(br.nodeEntity)"><Trash2 class="h-3 w-3" /></Button>
+                    </div>
+                  </div>
+
+                  <!-- Node signal instances -->
+                  <div v-if="equipoOpen === br.nodeEntity.equipo_id" class="border-t border-border/60 bg-muted/10 px-4 py-2">
+                    <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground mb-2 font-semibold">
+                      Señales instanciadas — <span class="font-mono font-normal">{{ (equipoSignals[br.nodeEntity.equipo_id!] ?? []).length }} puntos</span>
+                    </div>
+                    <div v-if="!(equipoSignals[br.nodeEntity.equipo_id!] ?? []).length" class="text-xs text-muted-foreground italic">Sin señales instanciadas</div>
+                    <div v-else class="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
+                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold w-32">Instancia</TableHead>
+                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Señal</TableHead>
+                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Unidad</TableHead>
+                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Tipo</TableHead>
+                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold text-right">equisenal_id</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          <TableRow v-for="s in equipoSignals[br.nodeEntity.equipo_id!]" :key="s.equisenal_id" class="border-b border-border/40 last:border-0">
+                            <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-citrico)]">{{ s.nombre_instancia }}</TableCell>
+                            <TableCell class="text-xs">{{ s.senal_nombre }}</TableCell>
+                            <TableCell class="text-xs text-muted-foreground">{{ s.unidad }}</TableCell>
+                            <TableCell>
+                              <span v-if="s.es_alarma" class="text-[10px] px-1.5 py-0.5 rounded-sm bg-red-500/15 text-red-400 font-semibold">Alarma</span>
+                              <span v-else class="text-[10px] text-muted-foreground">{{ s.tipo_valor }}</span>
+                            </TableCell>
+                            <TableCell class="text-right font-mono text-[10px]">
+                              <span class="px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground">{{ s.equisenal_id }}</span>
+                            </TableCell>
+                          </TableRow>
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Ghost node: devices exist but the node entity isn't registered -->
+                <div v-else class="flex items-center gap-2.5 px-3 py-2.5 text-xs text-muted-foreground">
+                  <div class="grid place-items-center w-7 h-7 rounded-sm border border-dashed border-border shrink-0">
+                    <GitBranch class="h-3.5 w-3.5" />
+                  </div>
+                  <span>
+                    Nodo <code class="font-mono text-foreground">{{ br.node }}</code>
+                    <span class="italic"> — sin registrar (aprueba su NBIRTH en Pendientes para capturar System)</span>
+                  </span>
                 </div>
-                <div v-if="!(equipoSignals[eq.equipo_id!] ?? []).length" class="text-xs text-muted-foreground italic">Sin señales instanciadas</div>
-                <div v-else class="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
-                        <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold w-32">Instancia</TableHead>
-                        <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Señal</TableHead>
-                        <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Unidad</TableHead>
-                        <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Tipo</TableHead>
-                        <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold text-right">equisenal_id</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      <TableRow v-for="s in equipoSignals[eq.equipo_id!]" :key="s.equisenal_id" class="border-b border-border/40 last:border-0">
-                        <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-citrico)]">{{ s.nombre_instancia }}</TableCell>
-                        <TableCell class="text-xs">{{ s.senal_nombre }}</TableCell>
-                        <TableCell class="text-xs text-muted-foreground">{{ s.unidad }}</TableCell>
-                        <TableCell>
-                          <span v-if="s.es_alarma" class="text-[10px] px-1.5 py-0.5 rounded-sm bg-red-500/15 text-red-400 font-semibold">Alarma</span>
-                          <span v-else class="text-[10px] text-muted-foreground">{{ s.tipo_valor }}</span>
-                        </TableCell>
-                        <TableCell class="text-right font-mono text-[10px]">
-                          <span class="px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground">{{ s.equisenal_id }}</span>
-                        </TableCell>
-                      </TableRow>
-                    </TableBody>
-                  </Table>
+
+                <!-- Devices nested under the node -->
+                <div v-if="br.devices.length" class="pl-[26px] pr-2 pb-2">
+                  <div v-for="(dev, di) in br.devices" :key="dev.equipo_id" class="relative pl-5 pt-2">
+                    <!-- tree rails: vertical guide + elbow into the row -->
+                    <div class="absolute left-0 top-0 w-px bg-border" :class="di === br.devices.length - 1 ? 'h-[30px]' : 'h-full'"></div>
+                    <div class="absolute left-0 top-[30px] h-px w-4 bg-border"></div>
+
+                    <div class="rounded-sm border border-border bg-background overflow-hidden border-l-2 !border-l-violet-500/50">
+                      <!-- Device row -->
+                      <div class="flex items-center gap-3 px-3 py-2">
+                        <button type="button" class="flex items-center gap-2 flex-1 min-w-0 text-left" @click="toggleEquipo(dev.equipo_id!)">
+                          <ChevronRight
+                            class="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform"
+                            :class="equipoOpen === dev.equipo_id ? 'rotate-90' : ''"
+                          />
+                          <div class="grid place-items-center w-6 h-6 rounded-sm bg-violet-500/10 shrink-0">
+                            <component :is="tipoEquipoIcon(dev.tipo_nombre ?? '')" class="h-3.5 w-3.5 text-violet-400" />
+                          </div>
+                          <div class="min-w-0">
+                            <div class="text-sm font-semibold truncate">
+                              {{ lastSegment(dev.nombre_topic) }}
+                              <span v-if="dev.nombre_equipo !== lastSegment(dev.nombre_topic)" class="font-normal text-muted-foreground">· {{ dev.nombre_equipo }}</span>
+                            </div>
+                            <div class="text-[10px] text-muted-foreground font-mono truncate">{{ dev.nombre_topic }}</div>
+                          </div>
+                        </button>
+                        <div class="flex items-center gap-2 shrink-0">
+                          <span
+                            class="text-[9px] px-1.5 py-0.5 rounded-sm bg-violet-500/15 text-violet-400 font-bold uppercase tracking-wide inline-flex items-center gap-1"
+                            title="Device (group/node/device)">
+                            <Cpu class="h-2.5 w-2.5" />Device
+                          </span>
+                          <span class="text-[10px] px-1.5 py-0.5 rounded-sm bg-[color:color-mix(in_srgb,var(--epm-citrico)_18%,transparent)] text-[color:var(--epm-bosque)] font-semibold">
+                            {{ dev.tipo_nombre }}
+                          </span>
+                          <Button variant="ghost" size="icon" class="h-6 w-6" @click="openEditEquipo(dev)"><Pencil class="h-3 w-3" /></Button>
+                          <Button variant="ghost" size="icon" class="h-6 w-6 text-destructive" @click="deleteEquipo(dev)"><Trash2 class="h-3 w-3" /></Button>
+                        </div>
+                      </div>
+
+                      <!-- Device signal instances -->
+                      <div v-if="equipoOpen === dev.equipo_id" class="border-t border-border/60 bg-muted/10 px-4 py-2">
+                        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground mb-2 font-semibold">
+                          Señales instanciadas — <span class="font-mono font-normal">{{ (equipoSignals[dev.equipo_id!] ?? []).length }} puntos</span>
+                        </div>
+                        <div v-if="!(equipoSignals[dev.equipo_id!] ?? []).length" class="text-xs text-muted-foreground italic">Sin señales instanciadas</div>
+                        <div v-else class="overflow-x-auto">
+                          <Table>
+                            <TableHeader>
+                              <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
+                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold w-32">Instancia</TableHead>
+                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Señal</TableHead>
+                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Unidad</TableHead>
+                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Tipo</TableHead>
+                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold text-right">equisenal_id</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              <TableRow v-for="s in equipoSignals[dev.equipo_id!]" :key="s.equisenal_id" class="border-b border-border/40 last:border-0">
+                                <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-citrico)]">{{ s.nombre_instancia }}</TableCell>
+                                <TableCell class="text-xs">{{ s.senal_nombre }}</TableCell>
+                                <TableCell class="text-xs text-muted-foreground">{{ s.unidad }}</TableCell>
+                                <TableCell>
+                                  <span v-if="s.es_alarma" class="text-[10px] px-1.5 py-0.5 rounded-sm bg-red-500/15 text-red-400 font-semibold">Alarma</span>
+                                  <span v-else class="text-[10px] text-muted-foreground">{{ s.tipo_valor }}</span>
+                                </TableCell>
+                                <TableCell class="text-right font-mono text-[10px]">
+                                  <span class="px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground">{{ s.equisenal_id }}</span>
+                                </TableCell>
+                              </TableRow>
+                            </TableBody>
+                          </Table>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </div>
+                <div v-else-if="br.nodeEntity" class="pl-[26px] pb-2 text-[11px] italic text-muted-foreground">
+                  Sin devices bajo este nodo
+                </div>
               </div>
             </div>
           </div>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jmoiron/sqlx"
 
@@ -837,8 +839,63 @@ func (h *SSFVHandler) updateSenal(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteSenal removes a catalog señal. An unbound señal is hard-deleted
+// (204). A señal referenced by tbl_senales_x_equipo — and transitively by
+// tbl_valores history — cannot be deleted without destroying data, so the FK
+// violation downgrades the operation to a "baja": the señal and all its
+// bindings flip to activo=FALSE (ingestion stops, history stays) and the
+// response reports it (200 {deactivated, bindings}).
 func (h *SSFVHandler) deleteSenal(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_senales WHERE senal_id=$1`)
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := pool.Exec(ctx, `DELETE FROM ssfv.tbl_senales WHERE senal_id=$1`, id)
+	if err == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !isFKViolation(err) {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	ct, err := tx.Exec(ctx,
+		`UPDATE ssfv.tbl_senales_x_equipo SET activo=FALSE WHERE senal_id=$1`, id)
+	if err == nil {
+		_, err = tx.Exec(ctx,
+			`UPDATE ssfv.tbl_senales SET activo=FALSE WHERE senal_id=$1`, id)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.triggerReload()
+	jsonResp(w, http.StatusOK, map[string]any{
+		"deactivated": true,
+		"bindings":    ct.RowsAffected(),
+	})
+}
+
+// isFKViolation reports whether err is a PostgreSQL foreign-key violation
+// (SQLSTATE 23503).
+func isFKViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
 // ─── Asignaciones (Señales x Equipo) ─────────────────────────────────────────
@@ -975,9 +1032,39 @@ func (h *SSFVHandler) updateAsignacion(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteAsignacion removes a señal↔equipo binding. A binding with no stored
+// values is hard-deleted (204); one referenced by tbl_valores history hits the
+// FK and is soft-deleted instead (activo=FALSE → ingestion stops, history
+// stays; 200 {deactivated}).
 func (h *SSFVHandler) deleteAsignacion(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := pool.Exec(ctx,
+		`DELETE FROM ssfv.tbl_senales_x_equipo WHERE equisenal_id=$1`, id)
+	switch {
+	case err == nil:
+		h.triggerReload()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case !isFKViolation(err):
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_senales_x_equipo SET activo=FALSE WHERE equisenal_id=$1`, id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	h.triggerReload()
-	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_senales_x_equipo WHERE equisenal_id=$1`)
+	jsonResp(w, http.StatusOK, map[string]any{"deactivated": true})
 }
 
 // ─── Fronteras Comerciales ────────────────────────────────────────────────────
