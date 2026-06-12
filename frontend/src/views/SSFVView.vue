@@ -28,6 +28,7 @@ import {
   ChevronRight, ChevronDown, Zap, Building2, Cpu, Layers,
   Link2, Activity, Ruler, GitBranch, TriangleAlert, Scan,
   Eye, Search, Hash, Tag, Gauge, Boxes, Cog, Fingerprint, Radio,
+  ListChecks, Loader2, X,
 } from 'lucide-vue-next'
 import { useConfirm } from '@/composables/useConfirm'
 
@@ -88,6 +89,29 @@ async function fetchPlantas() {
   const r = await api.get('/ssfv/plantas')
   plantas.value = r.data ?? []
 }
+
+// Con miles de plantas la lista necesita búsqueda + filtro de estado + render
+// incremental (lotes de PLANTA_PAGE) para no inflar el DOM.
+const PLANTA_PAGE = 25
+const plantaSearch = ref('')
+const plantaEstadoFilter = ref<'all' | '1' | '0' | '2'>('all')
+const plantaLimit = ref(PLANTA_PAGE)
+watch([plantaSearch, plantaEstadoFilter], () => { plantaLimit.value = PLANTA_PAGE })
+
+const filteredPlantas = computed(() => {
+  const q = plantaSearch.value.trim().toLowerCase()
+  let list = plantas.value
+  if (plantaEstadoFilter.value !== 'all') list = list.filter(p => String(p.estado) === plantaEstadoFilter.value)
+  if (q) {
+    list = list.filter(p =>
+      p.nombre.toLowerCase().includes(q) ||
+      p.broker_base.toLowerCase().includes(q) ||
+      (p.ubicacion ?? '').toLowerCase().includes(q) ||
+      (p.propietario ?? '').toLowerCase().includes(q))
+  }
+  return list
+})
+const visiblePlantas = computed(() => filteredPlantas.value.slice(0, plantaLimit.value))
 
 function togglePlanta(id: number) {
   plantaOpen.value = plantaOpen.value === id ? null : id
@@ -332,6 +356,13 @@ const filteredSenales = computed(() => {
     (s.tipo_var_nombre ?? '').toLowerCase().includes(q),
   )
 })
+
+// Render incremental del catálogo (lotes de SENAL_PAGE) — misma razón que
+// visiblePlantas: el filtro es sobre todo el set, el DOM solo pinta una página.
+const SENAL_PAGE = 50
+const senalLimit = ref(SENAL_PAGE)
+watch(senalSearch, () => { senalLimit.value = SENAL_PAGE })
+const visibleSenales = computed(() => filteredSenales.value.slice(0, senalLimit.value))
 
 async function fetchSenales() {
   const r = await api.get('/ssfv/senales')
@@ -1052,6 +1083,265 @@ async function deleteAutodiscoveredEntity(e: AutodiscEntity) {
   } catch (err: any) { toast.error(err.response?.data?.error ?? 'Error eliminando') }
 }
 
+// ─── Pendientes a escala: búsqueda, filtro, agrupación y selección ────────────
+// Con miles de plantas el bus produce miles de entidades descubiertas; la vista
+// agrupa por group_id (= planta Sparkplug), filtra por estado (pendientes por
+// defecto) y permite buscar por group/nodo/device o por nombre de métrica.
+const autoSearch       = ref('')
+const autoStatusFilter = ref<'pending' | 'approved' | 'rejected' | 'all'>('pending')
+const autoSelected     = ref<Set<number>>(new Set())
+
+const filteredAuto = computed<AutodiscEntity[]>(() => {
+  const q = autoSearch.value.trim().toLowerCase()
+  let list = autoEntities.value
+  if (autoStatusFilter.value !== 'all') list = list.filter(e => e.status === autoStatusFilter.value)
+  if (q) {
+    list = list.filter(e =>
+      e.group_id.toLowerCase().includes(q) ||
+      e.node_id.toLowerCase().includes(q) ||
+      e.device_id.toLowerCase().includes(q) ||
+      e.metric_names.some(n => n.toLowerCase().includes(q)))
+  }
+  return list
+})
+
+interface AutoGroup {
+  group: string
+  planta: SSFVPlanta | null     // existing planta whose broker_base = group_id
+  entities: AutodiscEntity[]    // node entity first, then devices by topic
+  pending: number
+}
+
+const autoGroups = computed<AutoGroup[]>(() => {
+  const byGroup = new Map<string, AutodiscEntity[]>()
+  for (const e of filteredAuto.value) {
+    if (!byGroup.has(e.group_id)) byGroup.set(e.group_id, [])
+    byGroup.get(e.group_id)!.push(e)
+  }
+  return [...byGroup.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([group, entities]) => ({
+      group,
+      planta: plantas.value.find(p => p.broker_base === group) ?? null,
+      entities: [...entities].sort((a, b) =>
+        a.node_id.localeCompare(b.node_id) ||
+        (a.device_id === '' ? -1 : b.device_id === '' ? 1 : a.device_id.localeCompare(b.device_id))),
+      pending: entities.filter(e => e.status === 'pending').length,
+    }))
+})
+
+// Selection only ever holds PENDING entities (the bulk actions' domain).
+const selectedAuto = computed(() =>
+  autoEntities.value.filter(e => e.status === 'pending' && autoSelected.value.has(e.id)))
+
+function toggleAutoSelect(id: number) {
+  const s = new Set(autoSelected.value)
+  s.has(id) ? s.delete(id) : s.add(id)
+  autoSelected.value = s
+}
+function groupSelectable(g: AutoGroup) { return g.entities.filter(e => e.status === 'pending') }
+function groupAllSelected(g: AutoGroup) {
+  const sel = groupSelectable(g)
+  return sel.length > 0 && sel.every(e => autoSelected.value.has(e.id))
+}
+function toggleGroupSelect(g: AutoGroup) {
+  const s = new Set(autoSelected.value)
+  const sel = groupSelectable(g)
+  const all = groupAllSelected(g)
+  for (const e of sel) all ? s.delete(e.id) : s.add(e.id)
+  autoSelected.value = s
+}
+const visiblePendingAuto = computed(() => filteredAuto.value.filter(e => e.status === 'pending'))
+const allVisibleSelected = computed(() =>
+  visiblePendingAuto.value.length > 0 && visiblePendingAuto.value.every(e => autoSelected.value.has(e.id)))
+function toggleSelectAllVisible() {
+  const s = new Set(autoSelected.value)
+  const all = allVisibleSelected.value
+  for (const e of visiblePendingAuto.value) all ? s.delete(e.id) : s.add(e.id)
+  autoSelected.value = s
+}
+function clearAutoSelection() { autoSelected.value = new Set() }
+
+// ─── Aprobación en lote ───────────────────────────────────────────────────────
+// El endpoint /approve es idempotente extremo a extremo (planta ON CONFLICT
+// broker_base, equipo ON CONFLICT nombre_topic, señales/plantilla ON CONFLICT),
+// así que el lote es un bucle secuencial del mismo flujo que la aprobación
+// individual, con la planta/tipo/señales derivados igual que en openApprove.
+interface BulkRow {
+  entity: AutodiscEntity
+  topic: string
+  plantaId: number              // 0 ⇒ se crea/reusa por create_planta
+  tipoId: string                // Select model; prellenado del payload
+  tipoDetected: string
+  nuevas: number                // señales nuevas a crear
+  vinculadas: number            // señales de catálogo a vincular a la plantilla
+  omitidas: { code: string; reason: string }[]
+  state: 'listo' | 'corriendo' | 'ok' | 'parcial' | 'error'
+  detail: string
+}
+
+const bulkDialog      = ref(false)
+const bulkRows        = ref<BulkRow[]>([])
+// Plantas a crear durante el lote: una entrada editable por group sin planta.
+const bulkNewPlantas  = ref<{ group: string; nombre: string }[]>([])
+// Variable por defecto para señales nuevas cuyo payload no trae tipo_variable.
+const bulkFallbackVar = ref('')
+const bulkRunning     = ref(false)
+const bulkDone        = ref(false)
+
+// Plan de señales por entidad (espejo de rebuildSignalPlan, en versión pura).
+// No deduplica contra la plantilla del tipo: el backend lo hace con ON
+// CONFLICT, así que recrear/relink es inocuo.
+function bulkPlanFor(e: AutodiscEntity, fallbackVarId: string) {
+  const create: any[] = []
+  const link: number[] = []
+  const omitidas: { code: string; reason: string }[] = []
+  for (const m of buildReviewMetrics(e)) {
+    if (m.kind !== 'proceso') continue
+    const code = m.unsCode || signalCode(m.name)
+    const instance = m.unsInstance || signalInstance(m.name)
+    const channelized = instance !== 'default'
+    const base = indexedBase(code)
+    const hit = channelized ? undefined
+      : (catalogByCode.value.get(code) || (base ? catalogByCode.value.get(base) : undefined))
+    if (hit) { if (hit.senal_id) link.push(hit.senal_id); continue }
+    if (code.length > 20) { omitidas.push({ code, reason: 'código >20 caracteres' }); continue }
+    const tipovarId = matchTipoVar(m.tipoVariable) || fallbackVarId
+    if (!tipovarId) { omitidas.push({ code, reason: 'sin tipo de variable' }); continue }
+    create.push({
+      codigo_senal:     code,
+      nombre_instancia: instance,
+      nombre:           m.unsName || m.description || code,
+      tipavar_id:       Number(tipovarId),
+      unidad_id:        Number(matchUnidad(m.engUnit)),
+      tipo_valor:       m.tipoValor === 'Acumulado' ? 'Acumulado' : 'Instantaneo',
+      descripcion:      m.description || m.unsName || null,
+    })
+  }
+  return { create, link, omitidas }
+}
+
+function refreshBulkCounts() {
+  for (const row of bulkRows.value) {
+    const plan = bulkPlanFor(row.entity, bulkFallbackVar.value)
+    row.nuevas = plan.create.length
+    row.vinculadas = plan.link.length
+    row.omitidas = plan.omitidas
+  }
+}
+watch(bulkFallbackVar, () => { if (!bulkRunning.value && !bulkDone.value) refreshBulkCounts() })
+
+async function openBulkApprove() {
+  if (!selectedAuto.value.length) return
+  if (!senales.value.length) { try { await fetchSenales() } catch { /* counts may be off */ } }
+  bulkDone.value = false
+  bulkRunning.value = false
+  bulkFallbackVar.value = ''
+  const groupsNeedingPlanta = new Map<string, string>()
+  bulkRows.value = selectedAuto.value.map(e => {
+    const plantaHit = plantas.value.find(p => p.broker_base === e.group_id)
+    if (!plantaHit && !groupsNeedingPlanta.has(e.group_id)) {
+      groupsNeedingPlanta.set(e.group_id,
+        e.node_properties?.['uns/planta'] || e.node_properties?.planta || e.group_id)
+    }
+    const suggestedType = e.node_properties?.entity_type || e.metric_meta?.[0]?.device_type || ''
+    const matched = tipoEquipos.value.find(t => t.nombre === suggestedType)
+    return {
+      entity: e,
+      topic: e.device_id ? `${e.group_id}/${e.node_id}/${e.device_id}` : `${e.group_id}/${e.node_id}`,
+      plantaId: plantaHit?.planta_id ?? 0,
+      tipoId: matched?.tipo_id ? String(matched.tipo_id) : '',
+      tipoDetected: suggestedType,
+      nuevas: 0, vinculadas: 0, omitidas: [],
+      state: 'listo', detail: '',
+    } as BulkRow
+  })
+  bulkNewPlantas.value = [...groupsNeedingPlanta.entries()].map(([group, nombre]) => ({ group, nombre }))
+  refreshBulkCounts()
+  bulkDialog.value = true
+}
+
+// Aplica un tipo de equipo a todas las filas que aún no tienen uno.
+const bulkFillTipo = ref('')
+watch(bulkFillTipo, (v) => {
+  if (!v) return
+  for (const row of bulkRows.value) if (!row.tipoId) row.tipoId = v
+  bulkFillTipo.value = ''
+})
+
+const bulkReady = computed(() =>
+  bulkRows.value.length > 0 &&
+  bulkRows.value.every(r => !!r.tipoId) &&
+  bulkNewPlantas.value.every(p => p.nombre.trim() !== ''))
+const bulkMissingTipo = computed(() => bulkRows.value.filter(r => !r.tipoId).length)
+const bulkProgress = computed(() => {
+  const done = bulkRows.value.filter(r => r.state === 'ok' || r.state === 'parcial' || r.state === 'error').length
+  return bulkRows.value.length ? Math.round(100 * done / bulkRows.value.length) : 0
+})
+const bulkSummary = computed(() => ({
+  ok:      bulkRows.value.filter(r => r.state === 'ok').length,
+  parcial: bulkRows.value.filter(r => r.state === 'parcial').length,
+  error:   bulkRows.value.filter(r => r.state === 'error').length,
+}))
+
+async function runBulkApprove() {
+  if (!bulkReady.value || bulkRunning.value) return
+  bulkRunning.value = true
+  for (const row of bulkRows.value) {
+    row.state = 'corriendo'
+    const plan = bulkPlanFor(row.entity, bulkFallbackVar.value)
+    const newPlanta = bulkNewPlantas.value.find(p => p.group === row.entity.group_id)
+    try {
+      const res = await api.post(`/ssfv/autodiscovered/${row.entity.id}/approve`, {
+        planta_id:     row.plantaId,
+        create_planta: row.plantaId === 0 && newPlanta
+          ? { nombre: newPlanta.nombre.trim(), broker_base: row.entity.group_id }
+          : undefined,
+        tipo_id:        Number(row.tipoId),
+        nombre_equipo:  row.entity.device_id || row.entity.node_id,
+        nombre_topic:   row.topic,
+        create_signals: plan.create,
+        link_signals:   plan.link,
+      })
+      const rejected: any[] = res.data?.rejected ?? []
+      row.state = rejected.length ? 'parcial' : 'ok'
+      row.detail = `${res.data?.created ?? 0} creadas · ${res.data?.linked ?? 0} vinculadas`
+        + (rejected.length ? ` · ${rejected.length} rechazadas` : '')
+        + (plan.omitidas.length ? ` · ${plan.omitidas.length} omitidas` : '')
+    } catch (err: any) {
+      row.state = 'error'
+      row.detail = err.response?.data?.error ?? err.message ?? 'error'
+    }
+  }
+  bulkRunning.value = false
+  bulkDone.value = true
+  const s = bulkSummary.value
+  if (s.error === 0 && s.parcial === 0) toast.success(`${s.ok} entidad(es) aprobadas en lote`)
+  else toast.warning(`Lote terminado: ${s.ok} ok · ${s.parcial} parciales · ${s.error} con error`)
+  clearAutoSelection()
+  await Promise.all([fetchAutodiscovered(), fetchSenales(), fetchPlantas()])
+}
+
+async function bulkReject() {
+  const targets = selectedAuto.value
+  if (!targets.length) return
+  const ok = await confirm({
+    title: 'Rechazar en lote',
+    message: `¿Marcar ${targets.length} entidad(es) como rechazadas? No se creará ningún equipo.`,
+    variant: 'danger',
+    confirmText: `Rechazar ${targets.length}`,
+  })
+  if (!ok) return
+  let failed = 0
+  for (const e of targets) {
+    try { await api.post(`/ssfv/autodiscovered/${e.id}/reject`) } catch { failed++ }
+  }
+  failed ? toast.warning(`${targets.length - failed} rechazadas · ${failed} con error`)
+         : toast.success(`${targets.length} entidad(es) rechazadas`)
+  clearAutoSelection()
+  await fetchAutodiscovered()
+}
+
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 onMounted(async () => {
   try {
@@ -1071,7 +1361,7 @@ watch(tab, async (t) => {
     if (t === 'catalogo')   await Promise.all([fetchSenales(), fetchCatalogs()])
     if (t === 'tipos')      await fetchCatalogs()
     if (t === 'estado')     await Promise.all([fetchStatus(), fetchMissed()])
-    if (t === 'pendientes') await Promise.all([fetchAutodiscovered(), fetchCatalogs(), fetchSenales()])
+    if (t === 'pendientes') await Promise.all([fetchAutodiscovered(), fetchCatalogs(), fetchSenales(), fetchPlantas()])
   } catch (e: any) {
     toast.error(e?.response?.data?.error ?? e?.message ?? 'Error cargando datos')
   }
@@ -1175,9 +1465,33 @@ function tipoEquipoIcon(nombre: string) {
          TAB: Infraestructura (Plantas → Equipos → Señales + Fronteras)
     ═══════════════════════════════════════════════════════════════════════ -->
     <div v-if="tab === 'plantas'" class="space-y-4">
-      <div class="flex justify-end">
+      <!-- Toolbar: búsqueda + filtro de estado, pensado para miles de plantas -->
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative flex-1 min-w-56 max-w-sm">
+          <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input v-model="plantaSearch" placeholder="Buscar planta, group, ubicación…" class="pl-8 rounded-sm text-xs" />
+        </div>
+        <div class="flex rounded-sm border border-border overflow-hidden">
+          <button
+            v-for="f in [
+              { id: 'all', label: 'Todas' },
+              { id: '1',   label: 'Activas' },
+              { id: '2',   label: 'Mantto.' },
+              { id: '0',   label: 'Inactivas' },
+            ] as const"
+            :key="f.id"
+            class="px-2.5 py-1.5 text-[11px] font-medium transition-colors border-r border-border last:border-r-0"
+            :class="plantaEstadoFilter === f.id
+              ? 'bg-[color:var(--epm-bosque)] text-white'
+              : 'bg-card text-muted-foreground hover:text-foreground'"
+            @click="plantaEstadoFilter = f.id"
+          >
+            {{ f.label }}
+          </button>
+        </div>
+        <span class="text-xs text-muted-foreground font-mono">{{ filteredPlantas.length }} / {{ plantas.length }}</span>
         <Button
-          class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm"
+          class="ml-auto bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm"
           @click="openCreatePlanta"
         >
           <Plus class="h-4 w-4 mr-1.5" /> Nueva planta
@@ -1187,9 +1501,12 @@ function tipoEquipoIcon(nombre: string) {
       <div v-if="!plantas.length" class="card-soft p-8 text-center text-sm text-muted-foreground">
         No hay plantas configuradas. Crea la primera planta solar para comenzar.
       </div>
+      <div v-else-if="!filteredPlantas.length" class="card-soft p-8 text-center text-sm text-muted-foreground">
+        Ninguna planta coincide con «{{ plantaSearch }}».
+      </div>
 
       <!-- Plant cards -->
-      <div v-for="p in plantas" :key="p.planta_id" class="card-soft overflow-hidden">
+      <div v-for="p in visiblePlantas" :key="p.planta_id" class="card-soft overflow-hidden">
 
         <!-- Plant header -->
         <button
@@ -1445,6 +1762,14 @@ function tipoEquipoIcon(nombre: string) {
           </div>
         </div>
       </div>
+
+      <!-- Render incremental: el filtro corre sobre todo el set, el DOM pinta por páginas -->
+      <div v-if="filteredPlantas.length > plantaLimit" class="flex justify-center pt-1">
+        <Button variant="outline" size="sm" class="rounded-sm text-xs" @click="plantaLimit += PLANTA_PAGE">
+          Mostrar {{ Math.min(PLANTA_PAGE, filteredPlantas.length - plantaLimit) }} más
+          <span class="text-muted-foreground font-mono ml-1.5">({{ filteredPlantas.length - plantaLimit }} restantes)</span>
+        </Button>
+      </div>
     </div>
 
     <!-- ═══════════════════════════════════════════════════════════════════════
@@ -1471,7 +1796,7 @@ function tipoEquipoIcon(nombre: string) {
         Sin señales en el catálogo.
       </div>
 
-      <div v-for="s in filteredSenales" :key="s.senal_id" class="card-soft overflow-hidden">
+      <div v-for="s in visibleSenales" :key="s.senal_id" class="card-soft overflow-hidden">
         <!-- Signal row -->
         <button
           type="button"
@@ -1527,6 +1852,13 @@ function tipoEquipoIcon(nombre: string) {
             </div>
           </div>
         </div>
+      </div>
+
+      <div v-if="filteredSenales.length > senalLimit" class="flex justify-center pt-1">
+        <Button variant="outline" size="sm" class="rounded-sm text-xs" @click="senalLimit += SENAL_PAGE">
+          Mostrar {{ Math.min(SENAL_PAGE, filteredSenales.length - senalLimit) }} más
+          <span class="text-muted-foreground font-mono ml-1.5">({{ filteredSenales.length - senalLimit }} restantes)</span>
+        </Button>
       </div>
     </div>
 
@@ -1809,38 +2141,99 @@ function tipoEquipoIcon(nombre: string) {
          TAB: Pendientes (Sparkplug B auto-discovery)
     ═══════════════════════════════════════════════════════════════════════ -->
     <div v-if="tab === 'pendientes'" class="space-y-4">
-      <div class="flex items-start justify-between gap-4">
-        <div class="space-y-1">
-          <p class="text-sm text-muted-foreground max-w-2xl">
-            Nodos y dispositivos <span class="font-semibold text-foreground">Sparkplug B</span> detectados en el bus
-            sin entrada en el catálogo SSFV. Expande una fila para inspeccionar las métricas del
-            <span class="font-mono text-[11px]">NBIRTH/DBIRTH</span>, luego aprueba para crear el equipo y
-            auto-instanciar señales, o rechaza para ignorar.
-          </p>
-          <div class="flex items-center gap-3 text-[11px] text-muted-foreground">
-            <span class="inline-flex items-center gap-1">
-              <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span>
-              {{ autoPendingCount }} pendiente{{ autoPendingCount === 1 ? '' : 's' }}
-            </span>
-            <span class="inline-flex items-center gap-1">
-              <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-              {{ autoEntities.filter(e => e.status === 'approved').length }} aprobada(s)
-            </span>
-            <span class="inline-flex items-center gap-1">
-              <span class="h-1.5 w-1.5 rounded-full bg-zinc-500"></span>
-              {{ autoEntities.filter(e => e.status === 'rejected').length }} rechazada(s)
-            </span>
-          </div>
+      <p class="text-sm text-muted-foreground max-w-3xl">
+        Nodos y dispositivos <span class="font-semibold text-foreground">Sparkplug B</span> detectados en el bus,
+        agrupados por planta (<span class="font-mono text-[11px]">group_id</span>). Marca varias entidades y
+        apruébalas en lote — la planta, el tipo y las señales se derivan del
+        <span class="font-mono text-[11px]">NBIRTH/DBIRTH</span> — o entra fila por fila para ajustar el detalle.
+      </p>
+
+      <!-- Toolbar: búsqueda + filtro por estado + selección global -->
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative flex-1 min-w-64 max-w-md">
+          <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input v-model="autoSearch" placeholder="Buscar group, nodo, device o métrica…" class="pl-8 rounded-sm text-xs" />
         </div>
-        <Button variant="outline" size="sm" @click="fetchAutodiscovered">
+        <div class="flex rounded-sm border border-border overflow-hidden">
+          <button
+            v-for="f in [
+              { id: 'pending',  label: 'Pendientes', n: autoPendingCount },
+              { id: 'approved', label: 'Aprobadas',  n: autoEntities.filter(e => e.status === 'approved').length },
+              { id: 'rejected', label: 'Rechazadas', n: autoEntities.filter(e => e.status === 'rejected').length },
+              { id: 'all',      label: 'Todas',      n: autoEntities.length },
+            ] as const"
+            :key="f.id"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium transition-colors border-r border-border last:border-r-0"
+            :class="autoStatusFilter === f.id
+              ? 'bg-[color:var(--epm-bosque)] text-white'
+              : 'bg-card text-muted-foreground hover:text-foreground'"
+            @click="autoStatusFilter = f.id"
+          >
+            {{ f.label }}
+            <span class="font-mono font-bold" :class="autoStatusFilter === f.id ? 'opacity-80' : 'opacity-60'">{{ f.n }}</span>
+          </button>
+        </div>
+        <label
+          v-if="visiblePendingAuto.length"
+          class="inline-flex items-center gap-2 text-[11px] text-muted-foreground cursor-pointer select-none"
+        >
+          <input type="checkbox" :checked="allVisibleSelected" class="h-3.5 w-3.5 accent-[color:var(--epm-bosque)]"
+            @change="toggleSelectAllVisible" />
+          Seleccionar {{ visiblePendingAuto.length }} pendiente(s) visibles
+        </label>
+        <Button variant="outline" size="sm" class="ml-auto" @click="fetchAutodiscovered">
           <RefreshCw class="h-3.5 w-3.5 mr-1.5" /> Actualizar
         </Button>
       </div>
 
-      <div class="overflow-x-auto rounded-sm border border-border">
+      <div v-if="!autoGroups.length" class="card-soft p-10 text-center text-xs text-muted-foreground">
+        <Scan class="h-6 w-6 mx-auto mb-2 opacity-40" />
+        <template v-if="autoSearch || autoStatusFilter !== 'all'">
+          Nada coincide con el filtro actual.
+          <button class="underline ml-1" @click="autoSearch = ''; autoStatusFilter = 'all'">Ver todas</button>
+        </template>
+        <template v-else>
+          Sin entidades descubiertas. Cuando llegue un NBIRTH/DBIRTH de un nodo no catalogado aparecerá aquí.
+        </template>
+      </div>
+
+      <!-- Un card por group (= planta Sparkplug): a escala, el operador trabaja
+           planta por planta y puede aprobar el nodo + sus devices de una vez -->
+      <div v-for="g in autoGroups" :key="g.group"
+        class="card-soft overflow-hidden border-l-[3px] !border-l-[color:var(--epm-bosque)]">
+
+        <!-- Group header -->
+        <div class="flex items-center gap-3 px-4 py-2.5 bg-[color:color-mix(in_srgb,var(--epm-bosque)_5%,transparent)] border-b border-border">
+          <input
+            v-if="groupSelectable(g).length"
+            type="checkbox" :checked="groupAllSelected(g)"
+            class="h-3.5 w-3.5 accent-[color:var(--epm-bosque)] cursor-pointer"
+            :title="`Seleccionar las ${groupSelectable(g).length} pendientes de ${g.group}`"
+            @change="toggleGroupSelect(g)"
+          />
+          <span v-else class="w-3.5"></span>
+          <Sun class="h-3.5 w-3.5 text-[color:var(--epm-citrico)] shrink-0" />
+          <span class="font-mono text-sm font-bold">{{ g.group }}</span>
+          <span v-if="g.planta"
+            class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm bg-green-500/15 text-green-500 font-semibold"
+            :title="'Las aprobaciones caen en la planta existente «' + g.planta.nombre + '»'">
+            <CheckCircle2 class="h-3 w-3" /> {{ g.planta.nombre }}
+          </span>
+          <span v-else
+            class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-400 font-semibold"
+            title="No existe planta con este group — se creará al aprobar">
+            <Plus class="h-3 w-3" /> planta nueva
+          </span>
+          <span class="ml-auto text-[11px] font-mono text-muted-foreground">
+            {{ g.entities.length }} entidad(es)<template v-if="g.pending"> · <span class="text-blue-400 font-semibold">{{ g.pending }} pendiente(s)</span></template>
+          </span>
+        </div>
+
+        <div class="overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow class="bg-muted/30">
+              <TableHead class="w-8" />
               <TableHead class="w-8" />
               <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Entidad Sparkplug</TableHead>
               <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Métricas reportadas</TableHead>
@@ -1850,8 +2243,18 @@ function tipoEquipoIcon(nombre: string) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            <template v-for="e in autoEntities" :key="e.id">
-              <TableRow class="border-b border-border/50 hover:bg-muted/20">
+            <template v-for="e in g.entities" :key="e.id">
+              <TableRow class="border-b border-border/50 hover:bg-muted/20"
+                :class="autoSelected.has(e.id) ? 'bg-[color:color-mix(in_srgb,var(--epm-bosque)_6%,transparent)]' : ''">
+                <!-- selection -->
+                <TableCell class="align-top pt-3.5">
+                  <input
+                    v-if="e.status === 'pending'"
+                    type="checkbox" :checked="autoSelected.has(e.id)"
+                    class="h-3.5 w-3.5 accent-[color:var(--epm-bosque)] cursor-pointer"
+                    @change="toggleAutoSelect(e.id)"
+                  />
+                </TableCell>
                 <!-- expand toggle -->
                 <TableCell class="align-top pt-3">
                   <button
@@ -1969,6 +2372,7 @@ function tipoEquipoIcon(nombre: string) {
               <!-- expanded inline metric preview -->
               <TableRow v-if="expandedAuto.has(e.id)" class="bg-muted/10 border-b border-border/50">
                 <TableCell />
+                <TableCell />
                 <TableCell colspan="5" class="py-3">
                   <div class="space-y-3">
                     <!-- node properties -->
@@ -2031,15 +2435,46 @@ function tipoEquipoIcon(nombre: string) {
                 </TableCell>
               </TableRow>
             </template>
-
-            <TableRow v-if="!autoEntities.length">
-              <TableCell colspan="6" class="text-center text-muted-foreground text-xs py-10">
-                <Scan class="h-6 w-6 mx-auto mb-2 opacity-40" />
-                Sin entidades descubiertas. Cuando llegue un NBIRTH/DBIRTH de un nodo no catalogado aparecerá aquí.
-              </TableCell>
-            </TableRow>
           </TableBody>
         </Table>
+        </div>
+      </div>
+
+      <!-- Barra flotante de acciones en lote -->
+      <div class="fixed bottom-6 inset-x-0 z-40 flex justify-center pointer-events-none">
+      <Transition name="bulkbar">
+        <div
+          v-if="selectedAuto.length"
+          class="pointer-events-auto flex items-center gap-3 rounded-sm border border-[color:var(--epm-bosque-deep)] bg-[color:var(--epm-bosque)] text-white shadow-2xl pl-4 pr-2 py-2"
+        >
+          <ListChecks class="h-4 w-4 opacity-90" />
+          <span class="text-sm font-semibold whitespace-nowrap">
+            {{ selectedAuto.length }} seleccionada{{ selectedAuto.length === 1 ? '' : 's' }}
+          </span>
+          <span class="h-5 w-px bg-white/25"></span>
+          <Button
+            size="sm"
+            class="h-7 px-3 text-xs rounded-sm bg-white text-[color:var(--epm-bosque)] hover:bg-white/90 font-bold"
+            @click="openBulkApprove"
+          >
+            <CheckCircle2 class="h-3.5 w-3.5 mr-1.5" /> Aprobar en lote
+          </Button>
+          <Button
+            size="sm" variant="ghost"
+            class="h-7 px-3 text-xs rounded-sm text-white hover:bg-white/15 hover:text-white"
+            @click="bulkReject"
+          >
+            <XCircle class="h-3.5 w-3.5 mr-1.5" /> Rechazar
+          </Button>
+          <button
+            class="h-7 w-7 inline-flex items-center justify-center rounded-sm hover:bg-white/15 transition-colors"
+            title="Limpiar selección"
+            @click="clearAutoSelection"
+          >
+            <X class="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </Transition>
       </div>
     </div>
 
@@ -2658,4 +3093,161 @@ function tipoEquipoIcon(nombre: string) {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <!-- Aprobación en lote -->
+  <Dialog v-model:open="bulkDialog">
+    <DialogContent class="!max-w-4xl p-0 overflow-hidden gap-0" @interact-outside="(e: Event) => bulkRunning && e.preventDefault()">
+      <DialogHeader class="px-6 py-4 bg-[color:color-mix(in_srgb,var(--epm-bosque)_10%,transparent)] border-b border-border">
+        <DialogTitle class="flex items-center gap-2 text-base">
+          <ListChecks class="h-4 w-4 text-[color:var(--epm-bosque)]" />
+          Aprobación en lote
+        </DialogTitle>
+        <DialogDescription class="text-xs">
+          {{ bulkRows.length }} entidad(es) — planta, tipo y señales derivados del
+          <span class="font-mono">NBIRTH/DBIRTH</span>. Las señales de catálogo se vinculan; las nuevas se crean
+          con su variable y unidad detectadas.
+        </DialogDescription>
+      </DialogHeader>
+
+      <div class="max-h-[68vh] overflow-y-auto">
+
+        <!-- Plantas que se crearán -->
+        <div v-if="bulkNewPlantas.length" class="px-6 py-4 border-b border-border space-y-2">
+          <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] font-bold text-muted-foreground">
+            <Sun class="h-3.5 w-3.5 text-[color:var(--epm-citrico)]" /> Plantas a crear
+            <span class="font-mono font-normal normal-case">· {{ bulkNewPlantas.length }}</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div v-for="np in bulkNewPlantas" :key="np.group"
+              class="flex items-center gap-2 rounded-sm border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5">
+              <code class="font-mono text-xs text-muted-foreground shrink-0">{{ np.group }} →</code>
+              <Input v-model="np.nombre" class="rounded-sm h-7 text-xs flex-1" placeholder="Alias de la planta"
+                :disabled="bulkRunning || bulkDone" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Defaults del lote -->
+        <div v-if="!bulkDone" class="px-6 py-4 border-b border-border grid grid-cols-2 gap-4">
+          <div class="grid gap-1.5">
+            <Label class="text-xs">
+              Tipo de equipo para las {{ bulkMissingTipo }} fila(s) sin tipo detectado
+            </Label>
+            <Select v-model="bulkFillTipo" :disabled="bulkRunning || !bulkMissingTipo">
+              <SelectTrigger class="rounded-sm h-8 text-xs">
+                <SelectValue :placeholder="bulkMissingTipo ? 'Asignar a las filas vacías…' : 'Todas las filas tienen tipo ✓'" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="t in tipoEquipos" :key="t.tipo_id" :value="String(t.tipo_id)">{{ t.nombre }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div class="grid gap-1.5">
+            <Label class="text-xs">Variable por defecto <span class="text-muted-foreground font-normal">(señales nuevas sin tipo_variable en el payload)</span></Label>
+            <Select v-model="bulkFallbackVar" :disabled="bulkRunning">
+              <SelectTrigger class="rounded-sm h-8 text-xs"><SelectValue placeholder="— omitir esas señales —" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="tv in tipoVars" :key="tv.tipovar_id" :value="String(tv.tipovar_id)">{{ tv.nombre }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <!-- Progreso -->
+        <div v-if="bulkRunning || bulkDone" class="px-6 pt-4">
+          <div class="flex items-center justify-between text-[11px] text-muted-foreground mb-1.5">
+            <span class="font-semibold" :class="bulkDone ? 'text-foreground' : ''">
+              {{ bulkDone ? `Lote terminado — ${bulkSummary.ok} ok · ${bulkSummary.parcial} parciales · ${bulkSummary.error} con error`
+                          : 'Aprobando…' }}
+            </span>
+            <span class="font-mono">{{ bulkProgress }}%</span>
+          </div>
+          <div class="h-1 rounded-full bg-muted overflow-hidden">
+            <div class="h-full bg-[color:var(--epm-bosque)] transition-all duration-300" :style="{ width: bulkProgress + '%' }"></div>
+          </div>
+        </div>
+
+        <!-- Filas del lote -->
+        <div class="px-6 py-4 space-y-1.5">
+          <div v-for="row in bulkRows" :key="row.entity.id"
+            class="flex items-center gap-3 rounded-sm border border-border bg-card px-3 py-2">
+            <!-- estado -->
+            <span class="shrink-0 w-4 grid place-items-center">
+              <Loader2 v-if="row.state === 'corriendo'" class="h-4 w-4 animate-spin text-[color:var(--epm-bosque)]" />
+              <CheckCircle2 v-else-if="row.state === 'ok'" class="h-4 w-4 text-emerald-500" />
+              <TriangleAlert v-else-if="row.state === 'parcial'" class="h-4 w-4 text-amber-500" />
+              <XCircle v-else-if="row.state === 'error'" class="h-4 w-4 text-destructive" />
+              <span v-else class="h-1.5 w-1.5 rounded-full bg-muted-foreground/40"></span>
+            </span>
+
+            <!-- entidad -->
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <component :is="row.entity.device_id ? Cpu : Radio" class="h-3 w-3 shrink-0"
+                  :class="row.entity.device_id ? 'text-violet-400' : 'text-sky-400'" />
+                <span class="font-mono text-xs font-medium truncate">{{ row.topic }}</span>
+                <span class="text-[9px] px-1 py-0.5 rounded-sm font-bold uppercase shrink-0"
+                  :class="row.entity.device_id ? 'bg-violet-500/15 text-violet-400' : 'bg-sky-500/15 text-sky-400'">
+                  {{ row.entity.device_id ? 'DBIRTH' : 'NBIRTH' }}
+                </span>
+              </div>
+              <div class="text-[10px] text-muted-foreground mt-0.5">
+                <template v-if="row.state === 'listo'">
+                  <span class="text-amber-400 font-semibold" v-if="row.nuevas">+{{ row.nuevas }} señal(es) nueva(s)</span>
+                  <span v-if="row.nuevas && row.vinculadas"> · </span>
+                  <span class="text-blue-400" v-if="row.vinculadas">{{ row.vinculadas }} a vincular</span>
+                  <span v-if="(row.nuevas || row.vinculadas) && row.omitidas.length"> · </span>
+                  <span class="text-destructive" v-if="row.omitidas.length"
+                    :title="row.omitidas.map(o => `${o.code}: ${o.reason}`).join('\n')">
+                    {{ row.omitidas.length }} omitida(s)
+                  </span>
+                  <span v-if="!row.nuevas && !row.vinculadas && !row.omitidas.length">solo plantilla del tipo</span>
+                </template>
+                <template v-else>{{ row.detail }}</template>
+              </div>
+            </div>
+
+            <!-- tipo equipo -->
+            <div class="shrink-0 w-44">
+              <Select v-model="row.tipoId" :disabled="bulkRunning || bulkDone">
+                <SelectTrigger class="rounded-sm h-7 text-xs"
+                  :class="!row.tipoId ? 'border-amber-500/60' : ''">
+                  <SelectValue placeholder="⚠ tipo de equipo…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="t in tipoEquipos" :key="t.tipo_id" :value="String(t.tipo_id)">{{ t.nombre }}</SelectItem>
+                </SelectContent>
+              </Select>
+              <div v-if="row.tipoDetected" class="text-[9px] text-muted-foreground mt-0.5 truncate text-right">
+                payload: {{ row.tipoDetected }}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <DialogFooter class="px-6 py-4 border-t border-border gap-2">
+        <Button variant="ghost" size="sm" :disabled="bulkRunning" @click="bulkDialog = false">
+          {{ bulkDone ? 'Cerrar' : 'Cancelar' }}
+        </Button>
+        <Button
+          v-if="!bulkDone"
+          size="sm"
+          class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm"
+          :disabled="!bulkReady || bulkRunning"
+          @click="runBulkApprove"
+        >
+          <Loader2 v-if="bulkRunning" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          <CheckCircle2 v-else class="h-3.5 w-3.5 mr-1.5" />
+          {{ bulkRunning ? 'Aprobando…' : `Aprobar ${bulkRows.length} entidad(es)` }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 </template>
+
+<style scoped>
+.bulkbar-enter-active, .bulkbar-leave-active { transition: opacity .18s ease, transform .18s ease; }
+.bulkbar-enter-from, .bulkbar-leave-to { opacity: 0; transform: translateY(12px); }
+.bulkbar-enter-to, .bulkbar-leave-from { opacity: 1; transform: translateY(0); }
+</style>
