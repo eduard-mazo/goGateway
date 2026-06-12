@@ -177,15 +177,46 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 
 	// Soft-deleted plantas (fecha_baja IS NOT NULL) are hidden unless the caller
 	// explicitly asks for the audit view with ?include_deleted=1.
+	//
+	// Fleet stats ride along in one pass (no N+1 from the UI): equipos y
+	// señales activos, alarmas abiertas y la última lectura por planta. La
+	// última lectura usa v_ultimas_lecturas (DISTINCT ON respaldado por
+	// idx_valores_equisenal_time), no un scan del hypertable completo.
 	query := `
-		SELECT planta_id, nombre, ubicacion, propietario,
-		       broker_base, capacidad_kwp, fecha_comisionamiento, estado,
-		       fecha_creacion, fecha_modif, fecha_baja
-		FROM ssfv.tbl_planta`
+		WITH eq AS (
+		    SELECT planta_id, COUNT(*) AS n
+		    FROM ssfv.tbl_equipo WHERE fecha_baja IS NULL GROUP BY planta_id
+		), sx AS (
+		    SELECT e.planta_id, COUNT(*) AS n
+		    FROM ssfv.tbl_senales_x_equipo s
+		    JOIN ssfv.tbl_equipo e USING (equipo_id)
+		    WHERE s.activo AND e.fecha_baja IS NULL GROUP BY e.planta_id
+		), al AS (
+		    SELECT e.planta_id, COUNT(*) AS n
+		    FROM ssfv.tbl_alarmas a
+		    JOIN ssfv.tbl_senales_x_equipo s ON s.equisenal_id = a.equisenal_id
+		    JOIN ssfv.tbl_equipo e ON e.equipo_id = s.equipo_id
+		    WHERE a.activa GROUP BY e.planta_id
+		), ul AS (
+		    SELECT e.planta_id, MAX(v.timestamp_utc) AS ts
+		    FROM ssfv.v_ultimas_lecturas v
+		    JOIN ssfv.tbl_senales_x_equipo s ON s.equisenal_id = v.equisenal_id
+		    JOIN ssfv.tbl_equipo e ON e.equipo_id = s.equipo_id
+		    GROUP BY e.planta_id
+		)
+		SELECT p.planta_id, p.nombre, p.ubicacion, p.propietario,
+		       p.broker_base, p.capacidad_kwp, p.fecha_comisionamiento, p.estado,
+		       p.fecha_creacion, p.fecha_modif, p.fecha_baja,
+		       COALESCE(eq.n, 0), COALESCE(sx.n, 0), COALESCE(al.n, 0), ul.ts
+		FROM ssfv.tbl_planta p
+		LEFT JOIN eq USING (planta_id)
+		LEFT JOIN sx USING (planta_id)
+		LEFT JOIN al USING (planta_id)
+		LEFT JOIN ul USING (planta_id)`
 	if r.URL.Query().Get("include_deleted") != "1" {
-		query += ` WHERE fecha_baja IS NULL`
+		query += ` WHERE p.fecha_baja IS NULL`
 	}
-	query += ` ORDER BY planta_id`
+	query += ` ORDER BY p.planta_id`
 
 	rows, err := pool.Query(ctx, query)
 	if err != nil {
@@ -197,14 +228,16 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 	var out []map[string]any
 	for rows.Next() {
 		var id, estado int
+		var nEquipos, nSenales, nAlarmas int64
 		var nombre, brokerBase string
 		var ubicacion, propietario, fechaCom *string
 		var capacidad *float64
 		var fechaCreacion, fechaModif time.Time
-		var fechaBaja *time.Time
+		var fechaBaja, ultimaLectura *time.Time
 		if err := rows.Scan(&id, &nombre, &ubicacion, &propietario,
 			&brokerBase, &capacidad, &fechaCom, &estado,
-			&fechaCreacion, &fechaModif, &fechaBaja); err != nil {
+			&fechaCreacion, &fechaModif, &fechaBaja,
+			&nEquipos, &nSenales, &nAlarmas, &ultimaLectura); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -213,6 +246,8 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 			"capacidad_kWp": capacidad, "fecha_comisionamiento": fechaCom,
 			"estado": estado, "fecha_creacion": fechaCreacion, "fecha_modif": fechaModif,
 			"fecha_baja": fechaBaja,
+			"n_equipos": nEquipos, "n_senales": nSenales, "n_alarmas": nAlarmas,
+			"ultima_lectura": ultimaLectura,
 		})
 	}
 	if out == nil {

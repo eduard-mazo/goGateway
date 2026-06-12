@@ -251,6 +251,11 @@ export interface SSFVPlanta {
   capacidad_kWp?: number
   fecha_comisionamiento?: string
   estado: number
+  // Fleet stats (read-only, computed by GET /ssfv/plantas)
+  n_equipos?: number
+  n_senales?: number
+  n_alarmas?: number
+  ultima_lectura?: string | null
 }
 
 export interface SSFVEquipo {

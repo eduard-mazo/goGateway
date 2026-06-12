@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, reactive } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
 import { toast } from 'vue-sonner'
 import {
   api,
@@ -112,6 +112,52 @@ const filteredPlantas = computed(() => {
   return list
 })
 const visiblePlantas = computed(() => filteredPlantas.value.slice(0, plantaLimit.value))
+
+// ─── Vista de flota: frescura de datos y totales ─────────────────────────────
+// nowTick refresca cada 10 s para que «hace N s» y los puntos de frescura se
+// muevan sin re-consultar la API.
+const nowTick = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => { nowTimer = setInterval(() => { nowTick.value = Date.now() }, 10_000) })
+onUnmounted(() => { if (nowTimer) clearInterval(nowTimer) })
+
+function relTime(ts?: string | null): string {
+  if (!ts) return 'sin datos'
+  const s = Math.max(0, Math.round((nowTick.value - new Date(ts).getTime()) / 1000))
+  if (s < 60) return `hace ${s} s`
+  if (s < 3600) return `hace ${Math.floor(s / 60)} min`
+  if (s < 86400) return `hace ${Math.floor(s / 3600)} h`
+  return `hace ${Math.floor(s / 86400)} d`
+}
+
+// En línea <2 min (un par de ciclos de publicación); rezagada <15 min; luego fría.
+type Freshness = 'live' | 'lag' | 'cold' | 'none'
+function freshness(p: SSFVPlanta): Freshness {
+  if (!p.ultima_lectura) return 'none'
+  const s = (nowTick.value - new Date(p.ultima_lectura).getTime()) / 1000
+  if (s < 120) return 'live'
+  if (s < 900) return 'lag'
+  return 'cold'
+}
+const FRESH_META: Record<Freshness, { dot: string; text: string; label: string }> = {
+  live: { dot: 'bg-emerald-500 animate-pulse', text: 'text-emerald-500', label: 'en línea' },
+  lag:  { dot: 'bg-amber-500',                 text: 'text-amber-400',  label: 'rezagada' },
+  cold: { dot: 'bg-zinc-500',                  text: 'text-muted-foreground', label: 'sin flujo' },
+  none: { dot: 'bg-transparent border border-dashed border-muted-foreground/60', text: 'text-muted-foreground', label: 'sin datos' },
+}
+
+const fleetSummary = computed(() => {
+  const ps = plantas.value
+  return {
+    total:   ps.length,
+    activas: ps.filter(p => p.estado === 1).length,
+    kwp:     ps.reduce((a, p) => a + (p.capacidad_kWp ?? 0), 0),
+    equipos: ps.reduce((a, p) => a + (p.n_equipos ?? 0), 0),
+    senales: ps.reduce((a, p) => a + (p.n_senales ?? 0), 0),
+    alarmas: ps.reduce((a, p) => a + (p.n_alarmas ?? 0), 0),
+    live:    ps.filter(p => freshness(p) === 'live').length,
+  }
+})
 
 function togglePlanta(id: number) {
   plantaOpen.value = plantaOpen.value === id ? null : id
@@ -1189,6 +1235,10 @@ const bulkFallbackVar = ref('')
 const bulkRunning     = ref(false)
 const bulkDone        = ref(false)
 
+// Igual que en la aprobación individual: telemetría del host (System/*) solo
+// se registra como señales cuando el operador lo pide explícitamente.
+const bulkIncludeSystem = ref(false)
+
 // Plan de señales por entidad (espejo de rebuildSignalPlan, en versión pura).
 // No deduplica contra la plantilla del tipo: el backend lo hace con ON
 // CONFLICT, así que recrear/relink es inocuo.
@@ -1197,7 +1247,7 @@ function bulkPlanFor(e: AutodiscEntity, fallbackVarId: string) {
   const link: number[] = []
   const omitidas: { code: string; reason: string }[] = []
   for (const m of buildReviewMetrics(e)) {
-    if (m.kind !== 'proceso') continue
+    if (m.kind !== 'proceso' && !(bulkIncludeSystem.value && m.kind === 'sistema')) continue
     const code = m.unsCode || signalCode(m.name)
     const instance = m.unsInstance || signalInstance(m.name)
     const channelized = instance !== 'default'
@@ -1229,7 +1279,7 @@ function refreshBulkCounts() {
     row.omitidas = plan.omitidas
   }
 }
-watch(bulkFallbackVar, () => { if (!bulkRunning.value && !bulkDone.value) refreshBulkCounts() })
+watch([bulkFallbackVar, bulkIncludeSystem], () => { if (!bulkRunning.value && !bulkDone.value) refreshBulkCounts() })
 
 async function openBulkApprove() {
   if (!selectedAuto.value.length) return
@@ -1237,13 +1287,20 @@ async function openBulkApprove() {
   bulkDone.value = false
   bulkRunning.value = false
   bulkFallbackVar.value = ''
+  bulkIncludeSystem.value = false
+  // Alias de las plantas a crear: el uns/planta viene en el NBIRTH del nodo,
+  // no en los DBIRTH de sus devices — busca el alias en CUALQUIER entidad del
+  // group antes de caer al group_id.
   const groupsNeedingPlanta = new Map<string, string>()
+  for (const e of selectedAuto.value) {
+    if (plantas.value.some(p => p.broker_base === e.group_id)) continue
+    const alias = e.node_properties?.['uns/planta'] || e.node_properties?.planta
+    const cur = groupsNeedingPlanta.get(e.group_id)
+    if (alias && (!cur || cur === e.group_id)) groupsNeedingPlanta.set(e.group_id, alias)
+    else if (!groupsNeedingPlanta.has(e.group_id)) groupsNeedingPlanta.set(e.group_id, e.group_id)
+  }
   bulkRows.value = selectedAuto.value.map(e => {
     const plantaHit = plantas.value.find(p => p.broker_base === e.group_id)
-    if (!plantaHit && !groupsNeedingPlanta.has(e.group_id)) {
-      groupsNeedingPlanta.set(e.group_id,
-        e.node_properties?.['uns/planta'] || e.node_properties?.planta || e.group_id)
-    }
     const suggestedType = e.node_properties?.entity_type || e.metric_meta?.[0]?.device_type || ''
     const matched = tipoEquipos.value.find(t => t.nombre === suggestedType)
     return {
@@ -1465,6 +1522,36 @@ function tipoEquipoIcon(nombre: string) {
          TAB: Infraestructura (Plantas → Equipos → Señales + Fronteras)
     ═══════════════════════════════════════════════════════════════════════ -->
     <div v-if="tab === 'plantas'" class="space-y-4">
+      <!-- Resumen de flota -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div class="card-soft p-3 space-y-1">
+          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Plantas</div>
+          <div class="font-mono text-lg font-bold leading-none">{{ fleetSummary.activas }}<span class="text-xs font-normal text-muted-foreground"> / {{ fleetSummary.total }} activas</span></div>
+        </div>
+        <div class="card-soft p-3 space-y-1">
+          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Capacidad</div>
+          <div class="font-mono text-lg font-bold leading-none">{{ fleetSummary.kwp.toLocaleString() }}<span class="text-xs font-normal text-muted-foreground"> kWp</span></div>
+        </div>
+        <div class="card-soft p-3 space-y-1">
+          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Equipos</div>
+          <div class="font-mono text-lg font-bold leading-none">{{ fleetSummary.equipos }}</div>
+        </div>
+        <div class="card-soft p-3 space-y-1">
+          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Señales</div>
+          <div class="font-mono text-lg font-bold leading-none">{{ fleetSummary.senales }}</div>
+        </div>
+        <div class="card-soft p-3 space-y-1">
+          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">En línea</div>
+          <div class="font-mono text-lg font-bold leading-none" :class="fleetSummary.live ? 'text-emerald-500' : ''">
+            {{ fleetSummary.live }}<span class="text-xs font-normal text-muted-foreground"> / {{ fleetSummary.total }} &lt;2 min</span>
+          </div>
+        </div>
+        <div class="card-soft p-3 space-y-1" :class="fleetSummary.alarmas ? '!border-red-500/40' : ''">
+          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Alarmas activas</div>
+          <div class="font-mono text-lg font-bold leading-none" :class="fleetSummary.alarmas ? 'text-red-400' : ''">{{ fleetSummary.alarmas }}</div>
+        </div>
+      </div>
+
       <!-- Toolbar: búsqueda + filtro de estado, pensado para miles de plantas -->
       <div class="flex flex-wrap items-center gap-3">
         <div class="relative flex-1 min-w-56 max-w-sm">
@@ -1522,9 +1609,36 @@ function tipoEquipoIcon(nombre: string) {
             <Sun class="h-4 w-4 text-[color:var(--epm-citrico)]" />
           </div>
           <div class="flex-1 min-w-0">
-            <div class="font-bold text-sm">{{ p.nombre }}</div>
+            <div class="font-bold text-sm flex items-center gap-2">
+              {{ p.nombre }}
+              <span v-if="p.ubicacion" class="font-normal text-[11px] text-muted-foreground truncate">· {{ p.ubicacion }}</span>
+            </div>
             <div class="text-[11px] text-muted-foreground font-mono truncate">{{ p.broker_base }}</div>
           </div>
+
+          <!-- Fleet stats: equipos / señales / alarmas / frescura del dato -->
+          <div class="hidden md:flex items-center gap-2 shrink-0 mr-1">
+            <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground font-mono"
+              title="Equipos activos">
+              <Cpu class="h-3 w-3" />{{ p.n_equipos ?? 0 }}
+            </span>
+            <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground font-mono"
+              title="Señales instanciadas activas">
+              <Layers class="h-3 w-3" />{{ p.n_senales ?? 0 }}
+            </span>
+            <span v-if="p.n_alarmas"
+              class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm bg-red-500/15 text-red-400 font-bold font-mono"
+              title="Alarmas activas">
+              <TriangleAlert class="h-3 w-3" />{{ p.n_alarmas }}
+            </span>
+            <span class="inline-flex items-center gap-1.5 text-[10px] w-28 justify-end"
+              :class="FRESH_META[freshness(p)].text"
+              :title="p.ultima_lectura ? 'Última lectura: ' + new Date(p.ultima_lectura).toLocaleString() : 'Esta planta nunca ha escrito valores'">
+              <span class="h-2 w-2 rounded-full shrink-0" :class="FRESH_META[freshness(p)].dot"></span>
+              <span class="font-mono truncate">{{ relTime(p.ultima_lectura) }}</span>
+            </span>
+          </div>
+
           <div class="flex items-center gap-2 shrink-0" @click.stop>
             <span class="text-[10px] px-2 py-0.5 rounded-sm font-semibold uppercase tracking-wide" :class="estadoClass(p.estado)">
               {{ estadoLabel(p.estado) }}
@@ -3151,6 +3265,14 @@ function tipoEquipoIcon(nombre: string) {
               </SelectContent>
             </Select>
           </div>
+          <label class="col-span-2 flex items-center justify-between gap-3 rounded-sm border border-sky-500/30 bg-sky-500/5 px-3 py-2 cursor-pointer select-none">
+            <span class="flex items-center gap-2 text-[11px]">
+              <Cog class="h-3.5 w-3.5 text-sky-400" />
+              <span class="font-semibold text-foreground">Registrar telemetría del host</span>
+              <span class="text-muted-foreground">— métricas System/* (CPU, memoria, red…) de los nodos como señales</span>
+            </span>
+            <Switch v-model="bulkIncludeSystem" :disabled="bulkRunning" />
+          </label>
         </div>
 
         <!-- Progreso -->
