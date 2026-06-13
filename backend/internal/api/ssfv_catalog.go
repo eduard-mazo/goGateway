@@ -1913,6 +1913,17 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Re-approval restores the whole entity: reactivate any bindings that were
+	// soft-deactivated (DELETE /asignaciones on a binding with history, or a
+	// deactivated señal) so ingestion resumes. The channelized bind below uses
+	// NOT EXISTS and would otherwise leave a deactivated binding dormant.
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_senales_x_equipo SET activo = TRUE
+		 WHERE equipo_id = $1 AND activo = FALSE`, equipoID); err != nil {
+		errResp(w, http.StatusInternalServerError, "reactivate bindings: "+err.Error())
+		return
+	}
+
 	// ── New catalog signals (from NBIRTH metrics with no existing señal) ──
 	// Insert into ssfv.tbl_senales (strict: tipovar_id + unidad_id FKs required,
 	// tipo_valor CHECK, codigo_senal ≤20 chars) then attach to the tipo template.
