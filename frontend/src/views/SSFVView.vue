@@ -31,6 +31,7 @@ import {
   ListChecks, Loader2, X,
 } from 'lucide-vue-next'
 import { useConfirm } from '@/composables/useConfirm'
+import SignalTree from '@/components/SignalTree.vue'
 
 const { confirm } = useConfirm()
 
@@ -237,6 +238,27 @@ function toggleEquipo(eid: number) {
 async function loadEquipoSignals(eid: number) {
   const r = await api.get(`/ssfv/equipos/${eid}/senales`)
   equipoSignals.value = { ...equipoSignals.value, [eid]: r.data ?? [] }
+}
+
+// Delete a single instanced signal (binding). The backend hard-deletes a binding
+// with no history (204) or soft-deactivates one referenced by tbl_valores (200).
+async function deleteAsignacion(s: any) {
+  const inst = s.nombre_instancia && s.nombre_instancia !== 'default' ? ' — ' + s.nombre_instancia : ''
+  const ok = await confirm({
+    title: 'Eliminar señal instanciada',
+    message: 'Se elimina esta instancia de la señal en el equipo. Si tiene histórico, se da de baja (deja de ingerir; el histórico se conserva).',
+    detail: `${s.senal_nombre || s.codigo_senal}${inst}`,
+    variant: 'danger',
+    confirmText: 'Eliminar',
+  })
+  if (!ok) return
+  try {
+    const r = await api.delete(`/ssfv/asignaciones/${s.equisenal_id}`)
+    toast.success(r.status === 200 && r.data?.deactivated
+      ? 'Señal dada de baja — histórico conservado'
+      : 'Señal instanciada eliminada')
+    if (s.equipo_id) await loadEquipoSignals(s.equipo_id)
+  } catch (e: any) { toast.error(e.response?.data?.error ?? 'Error eliminando señal') }
 }
 
 // Contract §1.1: node = the first topic segment after the group (broker_base).
@@ -1750,33 +1772,7 @@ function tipoEquipoIcon(nombre: string) {
                       Señales instanciadas — <span class="font-mono font-normal">{{ (equipoSignals[br.nodeEntity.equipo_id!] ?? []).length }} puntos</span>
                     </div>
                     <div v-if="!(equipoSignals[br.nodeEntity.equipo_id!] ?? []).length" class="text-xs text-muted-foreground italic">Sin señales instanciadas</div>
-                    <div v-else class="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
-                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold w-32">Instancia</TableHead>
-                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Señal</TableHead>
-                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Unidad</TableHead>
-                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Tipo</TableHead>
-                            <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold text-right">equisenal_id</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          <TableRow v-for="s in equipoSignals[br.nodeEntity.equipo_id!]" :key="s.equisenal_id" class="border-b border-border/40 last:border-0">
-                            <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-citrico)]">{{ s.nombre_instancia }}</TableCell>
-                            <TableCell class="text-xs">{{ s.senal_nombre }}</TableCell>
-                            <TableCell class="text-xs text-muted-foreground">{{ s.unidad }}</TableCell>
-                            <TableCell>
-                              <span v-if="s.es_alarma" class="text-[10px] px-1.5 py-0.5 rounded-sm bg-red-500/15 text-red-400 font-semibold">Alarma</span>
-                              <span v-else class="text-[10px] text-muted-foreground">{{ s.tipo_valor }}</span>
-                            </TableCell>
-                            <TableCell class="text-right font-mono text-[10px]">
-                              <span class="px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground">{{ s.equisenal_id }}</span>
-                            </TableCell>
-                          </TableRow>
-                        </TableBody>
-                      </Table>
-                    </div>
+                    <SignalTree v-else :signals="equipoSignals[br.nodeEntity.equipo_id!]" @delete="deleteAsignacion" />
                   </div>
                 </template>
 
@@ -1837,33 +1833,7 @@ function tipoEquipoIcon(nombre: string) {
                           Señales instanciadas — <span class="font-mono font-normal">{{ (equipoSignals[dev.equipo_id!] ?? []).length }} puntos</span>
                         </div>
                         <div v-if="!(equipoSignals[dev.equipo_id!] ?? []).length" class="text-xs text-muted-foreground italic">Sin señales instanciadas</div>
-                        <div v-else class="overflow-x-auto">
-                          <Table>
-                            <TableHeader>
-                              <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
-                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold w-32">Instancia</TableHead>
-                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Señal</TableHead>
-                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Unidad</TableHead>
-                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold">Tipo</TableHead>
-                                <TableHead class="text-[10px] uppercase tracking-[0.16em] font-bold text-right">equisenal_id</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              <TableRow v-for="s in equipoSignals[dev.equipo_id!]" :key="s.equisenal_id" class="border-b border-border/40 last:border-0">
-                                <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-citrico)]">{{ s.nombre_instancia }}</TableCell>
-                                <TableCell class="text-xs">{{ s.senal_nombre }}</TableCell>
-                                <TableCell class="text-xs text-muted-foreground">{{ s.unidad }}</TableCell>
-                                <TableCell>
-                                  <span v-if="s.es_alarma" class="text-[10px] px-1.5 py-0.5 rounded-sm bg-red-500/15 text-red-400 font-semibold">Alarma</span>
-                                  <span v-else class="text-[10px] text-muted-foreground">{{ s.tipo_valor }}</span>
-                                </TableCell>
-                                <TableCell class="text-right font-mono text-[10px]">
-                                  <span class="px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground">{{ s.equisenal_id }}</span>
-                                </TableCell>
-                              </TableRow>
-                            </TableBody>
-                          </Table>
-                        </div>
+                        <SignalTree v-else :signals="equipoSignals[dev.equipo_id!]" @delete="deleteAsignacion" />
                       </div>
                     </div>
                   </div>

@@ -352,6 +352,13 @@ func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
+	// Capture broker_base (= the Sparkplug group_id, contract §1.1) so we can
+	// suppress this group's autodiscovery rows after the soft-delete commits. A
+	// missing planta leaves it empty and the suppression below is skipped.
+	var brokerBase string
+	_ = pool.QueryRow(ctx,
+		`SELECT broker_base FROM ssfv.tbl_planta WHERE planta_id = $1`, id).Scan(&brokerBase)
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
@@ -377,6 +384,21 @@ func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Stop re-surfacing: a live producer keeps publishing NBIRTH/DBIRTH for this
+	// group, so its autodiscovered_entities rows would otherwise linger (orphaned
+	// 'approved') or invite re-approval that revives the planta. Mark them
+	// 'rejected' — the autodiscovery upsert only revives rows WHERE status =
+	// 'pending', so the live edge can no longer flip them back. Re-adding the
+	// plant later still works via explicit re-approval.
+	if brokerBase != "" && h.db != nil {
+		if _, err := h.db.ExecContext(ctx,
+			`UPDATE autodiscovered_entities SET status='rejected', last_seen=CURRENT_TIMESTAMP
+			 WHERE group_id=? AND status<>'rejected'`, brokerBase); err != nil {
+			log.Printf("ssfv: deletePlanta %d: suppress autodiscovery for group %q: %v", id, brokerBase, err)
+		}
+	}
+
 	h.triggerReload()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1882,6 +1904,7 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 		    tipo_id       = excluded.tipo_id,
 		    nombre_equipo = excluded.nombre_equipo,
 		    estado        = excluded.estado,
+		    fecha_baja    = NULL,
 		    fecha_modif   = NOW()
 		RETURNING equipo_id`,
 		body.PlantaID, body.TipoID, body.NombreEquipo, body.NombreTopic).Scan(&equipoID)
@@ -2254,6 +2277,7 @@ func (h *SSFVHandler) provisionOneEquipo(
 		    tipo_id       = excluded.tipo_id,
 		    nombre_equipo = excluded.nombre_equipo,
 		    estado        = excluded.estado,
+		    fecha_baja    = NULL,
 		    fecha_modif   = NOW()
 		RETURNING equipo_id`,
 		plantaID, tipoID, equipoName, nombreTopic).Scan(&equipoID); err != nil {
