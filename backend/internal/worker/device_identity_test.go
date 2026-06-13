@@ -1,0 +1,32 @@
+package worker
+
+import "testing"
+
+func TestParseDeviceIdentity(t *testing.T) {
+	cases := []struct {
+		name   string
+		metric string
+		wantCol string
+		wantOK  bool
+	}{
+		{"prefixed part number", "SYSTEM/Device/PartNumber", "hw_part_number", true},
+		{"lowercase system prefix", "System/Device/Firmware", "hw_firmware", true},
+		{"no prefix", "Device/UUID", "hw_uuid", true},
+		{"product type", "SYSTEM/Device/ProductType", "hw_product_type", true},
+		{"product name", "SYSTEM/Device/ProductName", "hw_product_name", true},
+		{"serial", "SYSTEM/Device/Serial", "hw_serial", true},
+		{"unknown device field", "SYSTEM/Device/Mac", "", false},
+		{"host metric, not identity", "SYSTEM/CPU/Usage_pct", "", false},
+		{"process signal", "Feeder1/PhaseA/Voltage", "", false},
+		{"device prefix but deeper", "SYSTEM/Device/Sub/PartNumber", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			col, ok := parseDeviceIdentity(c.metric)
+			if ok != c.wantOK || col != c.wantCol {
+				t.Fatalf("parseDeviceIdentity(%q) = (%q, %v), want (%q, %v)",
+					c.metric, col, ok, c.wantCol, c.wantOK)
+			}
+		})
+	}
+}

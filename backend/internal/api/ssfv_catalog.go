@@ -419,6 +419,8 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 		SELECT e.equipo_id, e.planta_id, e.tipo_id, e.nombre_equipo,
 		       e.nombre_topic, e.fabricante, e.modelo, e.nro_serie,
 		       e.estado, e.fecha_creacion, e.fecha_modif, e.fecha_baja,
+		       e.hw_part_number, e.hw_product_type, e.hw_product_name,
+		       e.hw_firmware, e.hw_serial, e.hw_uuid, e.hw_reported_at,
 		       te.nombre AS tipo_nombre, p.nombre AS planta_nombre
 		FROM ssfv.tbl_equipo e
 		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id = e.tipo_id
@@ -450,10 +452,12 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 		var eqID, plantaIDv, tipoID, estado int
 		var nombre, nombreTopic, tipoNombre, plantaNombre string
 		var fabricante, modelo, nroSerie *string
+		var hwPart, hwType, hwName, hwFw, hwSerial, hwUUID *string
 		var fechaC, fechaM time.Time
-		var fechaBaja *time.Time
+		var fechaBaja, hwReportedAt *time.Time
 		if err := rows.Scan(&eqID, &plantaIDv, &tipoID, &nombre, &nombreTopic,
 			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM, &fechaBaja,
+			&hwPart, &hwType, &hwName, &hwFw, &hwSerial, &hwUUID, &hwReportedAt,
 			&tipoNombre, &plantaNombre); err != nil {
 			continue
 		}
@@ -463,7 +467,10 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 			"fabricante": fabricante, "modelo": modelo, "nro_serie": nroSerie,
 			"estado": estado, "fecha_creacion": fechaC, "fecha_modif": fechaM,
 			"fecha_baja": fechaBaja,
-			"tipo_nombre": tipoNombre, "planta_nombre": plantaNombre,
+			"hw_part_number": hwPart, "hw_product_type": hwType, "hw_product_name": hwName,
+			"hw_firmware": hwFw, "hw_serial": hwSerial, "hw_uuid": hwUUID,
+			"hw_reported_at": hwReportedAt,
+			"tipo_nombre":    tipoNombre, "planta_nombre": plantaNombre,
 		})
 	}
 	if out == nil {
@@ -485,6 +492,8 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 		SELECT e.equipo_id, e.planta_id, e.tipo_id, e.nombre_equipo,
 		       e.nombre_topic, e.fabricante, e.modelo, e.nro_serie,
 		       e.estado, e.fecha_creacion, e.fecha_modif,
+		       e.hw_part_number, e.hw_product_type, e.hw_product_name,
+		       e.hw_firmware, e.hw_serial, e.hw_uuid, e.hw_reported_at,
 		       te.nombre AS tipo_nombre
 		FROM ssfv.tbl_equipo e
 		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id = e.tipo_id
@@ -499,9 +508,13 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 		var eqID, plantaIDv, tipoID, estado int
 		var nombre, nombreTopic, tipoNombre string
 		var fabricante, modelo, nroSerie *string
+		var hwPart, hwType, hwName, hwFw, hwSerial, hwUUID *string
 		var fechaC, fechaM time.Time
+		var hwReportedAt *time.Time
 		if err := rows.Scan(&eqID, &plantaIDv, &tipoID, &nombre, &nombreTopic,
-			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM, &tipoNombre); err != nil {
+			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM,
+			&hwPart, &hwType, &hwName, &hwFw, &hwSerial, &hwUUID, &hwReportedAt,
+			&tipoNombre); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -509,7 +522,10 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 			"nombre_equipo": nombre, "nombre_topic": nombreTopic,
 			"fabricante": fabricante, "modelo": modelo, "nro_serie": nroSerie,
 			"estado": estado, "fecha_creacion": fechaC, "fecha_modif": fechaM,
-			"tipo_nombre": tipoNombre,
+			"hw_part_number": hwPart, "hw_product_type": hwType, "hw_product_name": hwName,
+			"hw_firmware": hwFw, "hw_serial": hwSerial, "hw_uuid": hwUUID,
+			"hw_reported_at": hwReportedAt,
+			"tipo_nombre":    tipoNombre,
 		})
 	}
 	if out == nil {

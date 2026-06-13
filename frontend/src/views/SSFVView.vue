@@ -32,6 +32,7 @@ import {
 } from 'lucide-vue-next'
 import { useConfirm } from '@/composables/useConfirm'
 import SignalTree from '@/components/SignalTree.vue'
+import HwIdentity from '@/components/HwIdentity.vue'
 
 const { confirm } = useConfirm()
 
@@ -1768,6 +1769,7 @@ function tipoEquipoIcon(nombre: string) {
 
                   <!-- Node signal instances -->
                   <div v-if="equipoOpen === br.nodeEntity.equipo_id" class="border-t border-border/60 bg-muted/10 px-4 py-2">
+                    <HwIdentity :equipo="br.nodeEntity" class="mb-3" />
                     <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground mb-2 font-semibold">
                       Señales instanciadas — <span class="font-mono font-normal">{{ (equipoSignals[br.nodeEntity.equipo_id!] ?? []).length }} puntos</span>
                     </div>
@@ -1829,6 +1831,7 @@ function tipoEquipoIcon(nombre: string) {
 
                       <!-- Device signal instances -->
                       <div v-if="equipoOpen === dev.equipo_id" class="border-t border-border/60 bg-muted/10 px-4 py-2">
+                        <HwIdentity :equipo="dev" class="mb-3" />
                         <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground mb-2 font-semibold">
                           Señales instanciadas — <span class="font-mono font-normal">{{ (equipoSignals[dev.equipo_id!] ?? []).length }} puntos</span>
                         </div>

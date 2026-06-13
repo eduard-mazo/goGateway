@@ -313,6 +313,15 @@ func (h *SparkplugHandler) dispatchMetric(
 		if isDevice && topic.DeviceID != "" {
 			devEntity = nodeEntity + "/" + topic.DeviceID
 		}
+
+		// ICR device hardware identity: <prefix>Device/<Field> string metrics
+		// from node System telemetry. Persist to the node's equipo — never a
+		// tbl_valores sample or IEC-104 route. Treat as handled when the node is
+		// a registered equipo so it doesn't log as an unmapped signal.
+		if col, ok := parseDeviceIdentity(metricName); ok {
+			h.ssfvHandler.UpdateDeviceIdentity(nodeEntity, col, m.StringValue)
+			return h.ssfvHandler.IsKnownTopic(nodeEntity)
+		}
 		switch {
 		case m.Properties["uns/code"] != "":
 			// Producer-DECLARED UNS decomposition (Phase 1, contract §5.1):

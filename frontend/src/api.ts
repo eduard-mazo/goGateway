@@ -268,6 +268,14 @@ export interface SSFVEquipo {
   modelo?: string
   nro_serie?: string
   estado: number
+  // device-reported hardware identity (ICR edges, auto-populated from Device/* metrics)
+  hw_part_number?: string
+  hw_product_type?: string
+  hw_product_name?: string
+  hw_firmware?: string
+  hw_serial?: string
+  hw_uuid?: string
+  hw_reported_at?: string
   // joined
   tipo_nombre?: string
   planta_nombre?: string

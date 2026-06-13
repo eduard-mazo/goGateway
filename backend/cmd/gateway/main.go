@@ -130,6 +130,7 @@ func main() {
 		alarmMgr := worker.NewAlarmManager(sa.Pool())
 		ssfvHandler.SetAlarmManager(alarmMgr)
 		ssfvHandler.SetMissFn(sa.RecordMiss)
+		ssfvHandler.SetPool(sa.Pool())
 		if err := ssfvCache.Reload(sa.Pool()); err != nil {
 			log.Printf("ssfv cache reload: %v", err)
 		}
@@ -172,12 +173,14 @@ func main() {
 			if sa := tsdbMgr.SSFVAdapter(); sa != nil {
 				ssfvHandler.SetAlarmManager(worker.NewAlarmManager(sa.Pool()))
 				ssfvHandler.SetMissFn(sa.RecordMiss)
+				ssfvHandler.SetPool(sa.Pool())
 				if err := ssfvCache.Reload(sa.Pool()); err != nil {
 					log.Printf("ssfv: mapping cache reload after tsdb reload: %v", err)
 				}
 			} else {
 				ssfvHandler.SetAlarmManager(nil)
 				ssfvHandler.SetMissFn(nil)
+				ssfvHandler.SetPool(nil)
 			}
 		},
 		NotifyNATS: func() {

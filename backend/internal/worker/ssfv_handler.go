@@ -169,6 +169,7 @@ type SSFVHandler struct {
 	pipe     *tsdb.WritePipeline             // guarded by mu; nil until TSDB connects
 	alarmMgr *AlarmManager                   // guarded by mu; nil until TSDB connects
 	missFn   func(signalPath, equipo string) // guarded by mu; optional miss callback
+	pool     *pgxpool.Pool                   // guarded by mu; for device-identity writes
 }
 
 func NewSSFVHandler(cache *SSFVMappingCache, pipe *tsdb.WritePipeline, alarms *AlarmManager) *SSFVHandler {
@@ -191,6 +192,67 @@ func (h *SSFVHandler) SetAlarmManager(a *AlarmManager) {
 	h.mu.Lock()
 	h.alarmMgr = a
 	h.mu.Unlock()
+}
+
+// SetPool provides the ssfv pool used for device-identity updates. Safe to call
+// from any goroutine; set alongside the mapping-cache reload on TSDB connect.
+func (h *SSFVHandler) SetPool(p *pgxpool.Pool) {
+	h.mu.Lock()
+	h.pool = p
+	h.mu.Unlock()
+}
+
+// deviceIdentityColumns maps an ICR device-identity metric leaf (after the
+// "Device/" prefix) to its ssfv.tbl_equipo column. The producer publishes these
+// as static string metrics in node System telemetry (goMqttModbus
+// sysmon/vendor_icr.go), e.g. "SYSTEM/Device/PartNumber".
+var deviceIdentityColumns = map[string]string{
+	"PartNumber":  "hw_part_number",
+	"ProductType": "hw_product_type",
+	"ProductName": "hw_product_name",
+	"Firmware":    "hw_firmware",
+	"Serial":      "hw_serial",
+	"UUID":        "hw_uuid",
+}
+
+// parseDeviceIdentity matches a node-level device-identity metric
+// (<metricPrefix>Device/<Field>) and returns its target tbl_equipo column. The
+// cosmetic metricPrefix ("System/"/"SYSTEM/") is stripped first.
+func parseDeviceIdentity(metricName string) (column string, ok bool) {
+	n := trimHostPrefix(metricName)
+	const p = "Device/"
+	if !strings.HasPrefix(n, p) {
+		return "", false
+	}
+	col, ok := deviceIdentityColumns[n[len(p):]]
+	return col, ok
+}
+
+// UpdateDeviceIdentity stores an ICR-reported hardware-identity string on the
+// node's equipo (matched by nombre_topic = entity). column MUST be a value from
+// deviceIdentityColumns — it is a fixed whitelist interpolated into the SQL, so
+// it is never attacker-controlled. The IS DISTINCT FROM guard means only an
+// actual change writes (and bumps hw_reported_at), so the per-tick re-publish of
+// static identity strings does not churn the row. Returns true when a row changed.
+func (h *SSFVHandler) UpdateDeviceIdentity(entity, column, value string) bool {
+	h.mu.RLock()
+	pool := h.pool
+	h.mu.RUnlock()
+	if pool == nil || value == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	q := fmt.Sprintf(`UPDATE ssfv.tbl_equipo
+	    SET %s = $1, hw_reported_at = NOW(), fecha_modif = NOW()
+	    WHERE nombre_topic = $2 AND fecha_baja IS NULL
+	      AND %s IS DISTINCT FROM $1`, column, column)
+	tag, err := pool.Exec(ctx, q, value, entity)
+	if err != nil {
+		log.Printf("ssfv: device identity %s on %q: %v", column, entity, err)
+		return false
+	}
+	return tag.RowsAffected() > 0
 }
 
 // SetMissFn registers a callback invoked when a metric's topic is a known SSFV
