@@ -2,7 +2,10 @@
    Nunito (rounded geometric, Futura-alt) for UI/display · JetBrains Mono for data.
    Verde Cítrico (#9FCF67) primary · Verde Bosque (#0D9648) deep · Gris (#A1A1A5) neutral. */
 
-@import url('https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* Self-hosted fonts (bundled by Vite) — devices run offline, no Google CDN. */
+@import '@fontsource-variable/nunito/wght.css';
+@import '@fontsource-variable/nunito/wght-italic.css';
+@import '@fontsource-variable/jetbrains-mono/wght.css';
 
 @import "tailwindcss";
 
@@ -137,9 +140,9 @@
   --radius-md: calc(var(--radius) - 3px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 6px);
-  --font-sans: 'Nunito', ui-sans-serif, system-ui, sans-serif;
-  --font-heading: 'Nunito', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: 'Nunito Variable', 'Nunito', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Nunito Variable', 'Nunito', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
