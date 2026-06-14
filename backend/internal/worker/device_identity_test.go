@@ -1,6 +1,36 @@
 package worker
 
-import "testing"
+import (
+	"testing"
+
+	"goGateway/internal/sparkplug"
+)
+
+// collectMetricMeta must capture the string value only for device-identity
+// metrics, so the approve UI can show the reported hardware identity.
+func TestCollectMetricMetaIdentityValue(t *testing.T) {
+	metrics := []sparkplug.Metric{
+		{Name: "System/Device/PartNumber", StringValue: "ICR-3232"},
+		{Name: "System/Device/Firmware", StringValue: "6.6.1 (2026-04-24)"},
+		{Name: "PLC/CAUDAL"},                          // process signal: no value capture
+		{Name: "System/CPU/Usage_pct"},                // host metric: no value capture
+	}
+	meta := collectMetricMeta(metrics)
+	got := map[string]string{}
+	for _, m := range meta {
+		got[m.Name] = m.Value
+	}
+	if got["System/Device/PartNumber"] != "ICR-3232" {
+		t.Errorf("PartNumber value = %q, want ICR-3232", got["System/Device/PartNumber"])
+	}
+	if got["System/Device/Firmware"] != "6.6.1 (2026-04-24)" {
+		t.Errorf("Firmware value = %q, want 6.6.1 (2026-04-24)", got["System/Device/Firmware"])
+	}
+	if got["PLC/CAUDAL"] != "" || got["System/CPU/Usage_pct"] != "" {
+		t.Errorf("non-identity metrics should carry no value, got %q / %q",
+			got["PLC/CAUDAL"], got["System/CPU/Usage_pct"])
+	}
+}
 
 func TestParseDeviceIdentity(t *testing.T) {
 	cases := []struct {

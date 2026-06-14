@@ -461,6 +461,11 @@ func collectMetricMeta(metrics []sparkplug.Metric) []MetricMeta {
 			mm.DeviceTopic = m.Properties["device_topic"]
 			mm.DeviceType = m.Properties["device_type"]
 		}
+		// Capture the string value for device-identity metrics so the approve UI
+		// can display the actual hardware identity (only set for string metrics).
+		if _, ok := parseDeviceIdentity(m.Name); ok {
+			mm.Value = m.StringValue
+		}
 		out = append(out, mm)
 	}
 	return out

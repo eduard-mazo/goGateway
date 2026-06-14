@@ -30,6 +30,10 @@ type MetricMeta struct {
 	DeviceTopic string `json:"device_topic,omitempty"`
 	// DeviceType is the tipo_equipo name for the device owning this metric.
 	DeviceType string `json:"device_type,omitempty"`
+	// Value is the birth string value, captured for device-identity metrics
+	// (Device/* strings, contract §5) so the approve UI can show the actual
+	// hardware identity (PartNumber, Firmware, Serial, …) before approval.
+	Value string `json:"value,omitempty"`
 }
 
 // AutoDiscoveryService tracks Sparkplug B nodes/devices seen on the bus.

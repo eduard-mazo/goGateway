@@ -672,6 +672,7 @@ interface MetricMetaItem {
   uns_instance?: string   // producer-declared entity instance/channel (→ nombre_instancia)
   device_topic?: string
   device_type?: string
+  value?: string          // birth string value (device-identity metrics)
 }
 
 interface AutodiscEntity {
@@ -745,6 +746,7 @@ interface ReviewMetric {
   unsName?: string        // producer-declared display name (→ nombre)
   unsCode?: string        // producer-declared attribute (→ codigo_senal)
   unsInstance?: string    // producer-declared instance/channel (→ nombre_instancia)
+  value?: string          // birth string value (device-identity metrics)
   kind: MetricKind
 }
 
@@ -767,6 +769,7 @@ function buildReviewMetrics(e: AutodiscEntity): ReviewMetric[] {
       unsName:      m?.uns_name || undefined,
       unsCode:      m?.uns_code || undefined,
       unsInstance:  m?.uns_instance || undefined,
+      value:        m?.value || undefined,
       kind: metricKind(name),
     }
   })
@@ -2768,6 +2771,15 @@ function tipoEquipoIcon(nombre: string) {
                     title="Telemetría del host. Activa «Registrar métricas de Sistema» arriba para crearla como señal."
                     @click="includeSystem = true">
                     <Cog class="h-3 w-3" /> host
+                  </span>
+                  <!-- Device hardware identity (Device/* strings): not a signal —
+                       show the reported value; captured onto the equipo on approval. -->
+                  <span v-else-if="m.kind === 'identidad'"
+                    class="shrink-0 flex items-center gap-1.5 pt-0.5"
+                    title="Identidad de hardware del dispositivo — se guarda en el equipo al aprobar">
+                    <Cpu class="h-3 w-3 text-[color:var(--epm-citrico)]" />
+                    <span v-if="m.value" class="font-mono text-[11px] text-foreground">{{ m.value }}</span>
+                    <span v-else class="text-[9px] text-muted-foreground italic">identidad</span>
                   </span>
                   <span v-else-if="!approveReadOnly && m.kind !== 'proceso'"
                     class="shrink-0 text-[9px] text-muted-foreground italic pt-1">no aplica</span>
