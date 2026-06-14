@@ -367,6 +367,14 @@ func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(ctx)
 
 	for _, q := range []string{
+		// Deactivate the plant's signal bindings so they stop ingesting (the
+		// mapping cache filters sxe.activo=TRUE) and the UI tree dims them. The
+		// tbl_valores history stays addressable via equisenal_id. Without this
+		// the bindings linger as active "trash" after the plant is gone.
+		`UPDATE ssfv.tbl_senales_x_equipo
+		    SET activo = FALSE
+		    WHERE activo = TRUE
+		      AND equipo_id IN (SELECT equipo_id FROM ssfv.tbl_equipo WHERE planta_id = $1)`,
 		`UPDATE ssfv.tbl_equipo
 		    SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
 		    WHERE planta_id = $1 AND fecha_baja IS NULL`,
@@ -772,10 +780,30 @@ func (h *SSFVHandler) deleteEquipo(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	if _, err := pool.Exec(ctx, `
-		UPDATE ssfv.tbl_equipo
-		   SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
-		 WHERE equipo_id = $1 AND fecha_baja IS NULL`, id); err != nil {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	for _, q := range []string{
+		// Deactivate this equipo's signal bindings (see deletePlanta) so they stop
+		// ingesting and the UI tree dims them, instead of lingering as active trash.
+		`UPDATE ssfv.tbl_senales_x_equipo
+		    SET activo = FALSE
+		    WHERE equipo_id = $1 AND activo = TRUE`,
+		`UPDATE ssfv.tbl_equipo
+		    SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
+		    WHERE equipo_id = $1 AND fecha_baja IS NULL`,
+	} {
+		if _, err := tx.Exec(ctx, q, id); err != nil {
+			errResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
 	}
