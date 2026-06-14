@@ -42,12 +42,12 @@ ON CONFLICT (nombre) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS ssfv.tbl_metricas_host (
     timestamp_utc TIMESTAMPTZ  NOT NULL,
-    node_topic    VARCHAR(150) NOT NULL,            -- gateway node: group/node
-    categoria     VARCHAR(40)  NOT NULL,            -- CPU, Memory, Disk, Network, Host…
-    subkey        VARCHAR(60)  NOT NULL DEFAULT '', -- interface / mount; '' for scalars
-    metrica       VARCHAR(60)  NOT NULL,            -- Usage_pct, Rx_MB, Free_MB…
+    node_topic    TEXT         NOT NULL,            -- gateway node: group/node
+    categoria     TEXT         NOT NULL,            -- CPU, Memory, Disk, Network, Host…
+    subkey        TEXT         NOT NULL DEFAULT '', -- interface / mount; '' for scalars
+    metrica       TEXT         NOT NULL,            -- Usage_pct, Rx_MB, Free_MB…
     valor         NUMERIC(18,6),
-    calidad       VARCHAR(10)  NOT NULL DEFAULT 'Buena'
+    calidad       TEXT         NOT NULL DEFAULT 'Buena'
                                CHECK (calidad IN ('Buena', 'Dudosa', 'Mala')),
 
     CONSTRAINT pk_metricas_host
