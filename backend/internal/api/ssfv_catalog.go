@@ -1962,17 +1962,22 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 		if nombre == "" {
 			nombre = cs.CodigoSenal
 		}
+		// One catalog row per codigo_senal, regardless of tipo_variable: reuse an
+		// existing señal instead of keying creation on (codigo_senal, tipovar_id).
+		// The composite key spawned duplicates whenever a re-approval picked a
+		// different fallback variable, or when the code format changed (legacy
+		// full-path "CPU/Usage_pct" vs contract-v3 leaf "Usage_pct").
 		var senalID int
-		if err := pool.QueryRow(ctx, `
+		if err := pool.QueryRow(ctx,
+			`SELECT senal_id FROM ssfv.tbl_senales WHERE codigo_senal=$1`, cs.CodigoSenal).Scan(&senalID); err == nil {
+			pool.Exec(ctx, `UPDATE ssfv.tbl_senales SET activo=TRUE WHERE senal_id=$1`, senalID) //nolint:errcheck
+		} else if insErr := pool.QueryRow(ctx, `
 			INSERT INTO ssfv.tbl_senales
 			    (tipovar_id, unidad_id, nombre, descripcion, tipo_valor, codigo_senal, es_indexada, activo)
 			VALUES ($1,$2,$3,$4,$5,$6,FALSE,TRUE)
-			ON CONFLICT (codigo_senal, tipovar_id) DO UPDATE SET
-			    nombre = EXCLUDED.nombre,
-			    activo = TRUE
 			RETURNING senal_id`,
-			cs.TipoVarID, cs.UnidadID, nombre, cs.Descripcion, tipoValor, cs.CodigoSenal).Scan(&senalID); err != nil {
-			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db insert: " + err.Error()})
+			cs.TipoVarID, cs.UnidadID, nombre, cs.Descripcion, tipoValor, cs.CodigoSenal).Scan(&senalID); insErr != nil {
+			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db insert: " + insErr.Error()})
 			continue
 		}
 
@@ -2376,17 +2381,19 @@ func (h *SSFVHandler) provisionOneEquipo(
 			continue
 		}
 
+		// One catalog row per codigo_senal (see approveAutodiscovered): reuse an
+		// existing señal rather than keying on (codigo_senal, tipovar_id).
 		var senalID int
-		if err := pool.QueryRow(ctx, `
+		if err := pool.QueryRow(ctx,
+			`SELECT senal_id FROM ssfv.tbl_senales WHERE codigo_senal=$1`, codigoSenal).Scan(&senalID); err == nil {
+			pool.Exec(ctx, `UPDATE ssfv.tbl_senales SET activo=TRUE WHERE senal_id=$1`, senalID) //nolint:errcheck
+		} else if insErr := pool.QueryRow(ctx, `
 			INSERT INTO ssfv.tbl_senales
 			    (tipovar_id, unidad_id, nombre, tipo_valor, codigo_senal, es_indexada, activo)
 			VALUES ($1,$2,$3,$4,$5,FALSE,TRUE)
-			ON CONFLICT (codigo_senal, tipovar_id) DO UPDATE SET
-			    nombre = excluded.nombre,
-			    activo = TRUE
 			RETURNING senal_id`,
-			tipovarID, unidadID, nombre, tipoValor, codigoSenal).Scan(&senalID); err != nil {
-			log.Printf("autodiscovery: provisionOneEquipo signal %q: %v", codigoSenal, err)
+			tipovarID, unidadID, nombre, tipoValor, codigoSenal).Scan(&senalID); insErr != nil {
+			log.Printf("autodiscovery: provisionOneEquipo signal %q: %v", codigoSenal, insErr)
 			continue
 		}
 		if _, err := pool.Exec(ctx, `
