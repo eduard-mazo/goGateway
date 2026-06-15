@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -12,7 +13,13 @@ import (
 
 const (
 	monitorCap      = 1000
-	maxPayloadStore = 2048 // max bytes stored per event
+	maxPayloadStore = 2048 // max bytes of decoded text stored per event
+	// maxDecodeBytes caps the wire size we will protobuf-decode + JSON-marshal
+	// for the monitor. Push runs synchronously on the MQTT receive goroutine, so
+	// an unbounded decode of a huge NBIRTH/DDATA frame would stall ingestion and
+	// allocate megabytes only to truncate to maxPayloadStore. Oversized frames
+	// are recorded with metadata (topic/size/kind) but no decoded body.
+	maxDecodeBytes = 128 * 1024
 )
 
 // BrokerEvent is one captured MQTT message metadata record.
@@ -70,12 +77,19 @@ func (b *BrokerMonitor) Push(topic, kind string, payload []byte, ssfvHits int) {
 	case "sparkplug":
 		// Decode binary protobuf to human-readable JSON for the monitor UI.
 		// The original binary length is still used for PayloadSize below.
-		if p, err := sparkplug.DecodePayload(payload); err == nil {
-			if js, err := p.ToJSON(); err == nil {
-				if len(js) <= maxPayloadStore {
-					payloadStr = string(js)
-				} else {
-					payloadStr = string(js[:maxPayloadStore]) + "\n…(truncado)"
+		// Guard the cost: skip oversized frames so a flood of large NBIRTH/DDATA
+		// can't stall the MQTT receive goroutine (Push runs inline on it).
+		switch {
+		case len(payload) > maxDecodeBytes:
+			payloadStr = fmt.Sprintf("…(trama de %d bytes — demasiado grande para decodificar en el monitor)", len(payload))
+		default:
+			if p, err := sparkplug.DecodePayload(payload); err == nil {
+				if js, err := p.ToJSON(); err == nil {
+					if len(js) <= maxPayloadStore {
+						payloadStr = string(js)
+					} else {
+						payloadStr = string(js[:maxPayloadStore]) + "\n…(truncado)"
+					}
 				}
 			}
 		}
@@ -143,11 +157,18 @@ func (b *BrokerMonitor) snapshot() []BrokerEvent {
 	return out
 }
 
-// ServeSnapshot returns the last ≤1000 broker events as JSON.
+// ServeSnapshot returns the most recent broker events as JSON (oldest first).
+// Defaults to the full buffer; ?limit=N returns only the last N (the UI shows
+// ~300, so it need not pull the whole ~MB buffer on every load/reconnect).
 func (b *BrokerMonitor) ServeSnapshot(w http.ResponseWriter, r *http.Request) {
 	events := b.snapshot()
 	if events == nil {
 		events = []BrokerEvent{}
+	}
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 && n < len(events) {
+			events = events[len(events)-n:]
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(events) //nolint:errcheck
