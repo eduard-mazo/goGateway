@@ -341,7 +341,7 @@ async function saveEquipo() {
       toast.success('Equipo actualizado')
     } else {
       await api.post('/ssfv/equipos', payload)
-      toast.success('Equipo creado — señales auto-instanciadas según tipo')
+      toast.success('Equipo creado — las señales se vinculan al descubrir el equipo (NBIRTH/DBIRTH)')
     }
     equipoDialog.value = false
     await loadEquiposByPlanta(equipoForm.planta_id)

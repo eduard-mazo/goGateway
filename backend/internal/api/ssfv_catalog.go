@@ -496,7 +496,10 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	rows, err := pool.Query(ctx, `
+	// Soft-deleted equipos (fecha_baja IS NOT NULL) are hidden unless the caller
+	// asks for the audit view with ?include_deleted=1 (matches listPlantas /
+	// listEquipos). Without this the UI keeps rendering a just-deleted equipo.
+	query := `
 		SELECT e.equipo_id, e.planta_id, e.tipo_id, e.nombre_equipo,
 		       e.nombre_topic, e.fabricante, e.modelo, e.nro_serie,
 		       e.estado, e.fecha_creacion, e.fecha_modif,
@@ -505,7 +508,12 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 		       te.nombre AS tipo_nombre
 		FROM ssfv.tbl_equipo e
 		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id = e.tipo_id
-		WHERE e.planta_id=$1 ORDER BY e.equipo_id`, plantaID)
+		WHERE e.planta_id=$1`
+	if r.URL.Query().Get("include_deleted") != "1" {
+		query += ` AND e.fecha_baja IS NULL`
+	}
+	query += ` ORDER BY e.equipo_id`
+	rows, err := pool.Query(ctx, query, plantaID)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -650,82 +658,11 @@ func (h *SSFVHandler) createEquipo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-instanciate signals from Tbl_Senales_x_Tipo_Equipo.
-	if autoErr := h.autoInstanciarSenales(ctx, pool, id, body.TipoID); autoErr != nil {
-		log.Printf("ssfv: auto-instanciar equipo %d tipo %d: %v", id, body.TipoID, autoErr)
-	}
-
+	// No catalog-template pre-population: a new equipo starts with zero signal
+	// bindings. Its real signals are discovered from the device's NBIRTH/DBIRTH
+	// and bound on autodiscovery approval (approveAutodiscovered / AutoProvision).
 	h.triggerReload()
 	jsonResp(w, http.StatusCreated, map[string]any{"equipo_id": id})
-}
-
-// autoInstanciarSenales creates Tbl_Senales_x_Equipo rows for every signal
-// in the tipo_equipo catalog, handling indexed signals by expanding channels.
-func (h *SSFVHandler) autoInstanciarSenales(ctx context.Context, pool *pgxpool.Pool, equipoID, tipoID int) error {
-	rows, err := pool.Query(ctx, `
-		SELECT s.senal_id, s.codigo_senal, s.es_indexada, st.num_canales
-		FROM public.tbl_senales_x_tipo_equipo st
-		JOIN ssfv.tbl_senales s ON s.senal_id = st.senal_id
-		WHERE st.tipo_id = $1 AND s.activo = TRUE`, tipoID)
-	if err != nil {
-		return fmt.Errorf("query senales x tipo: %w", err)
-	}
-	defer rows.Close()
-
-	type senal struct {
-		senalID     int
-		codigoSenal string
-		esIndexada  bool
-		numCanales  int
-	}
-	var senales []senal
-	for rows.Next() {
-		var s senal
-		if err := rows.Scan(&s.senalID, &s.codigoSenal, &s.esIndexada, &s.numCanales); err != nil {
-			continue
-		}
-		senales = append(senales, s)
-	}
-
-	for _, s := range senales {
-		if s.esIndexada {
-			base := strings.TrimSuffix(s.codigoSenal, "_x")
-			for i := 1; i <= s.numCanales; i++ {
-				instancia := base + "_" + strconv.Itoa(i)
-				_, err := pool.Exec(ctx, `
-					INSERT INTO ssfv.tbl_senales_x_equipo
-					    (senal_id, equipo_id, indice_canal, nombre_instancia, activo)
-					VALUES ($1,$2,$3,$4,TRUE)
-					ON CONFLICT DO NOTHING`,
-					s.senalID, equipoID, i, instancia)
-				if err != nil {
-					log.Printf("ssfv: insert sxe %s idx %d: %v", instancia, i, err)
-				}
-			}
-		} else {
-			// NULL != NULL in PostgreSQL, so ON CONFLICT DO NOTHING on
-			// UNIQUE(senal_id, equipo_id, indice_canal) never fires when
-			// indice_canal IS NULL. Use WHERE NOT EXISTS to guarantee idempotency.
-			// $3 and $4 carry the same value; split avoids 42P08 (inconsistent
-			// type inference when the same parameter appears in SELECT and WHERE).
-			// C1: a flat (non-indexed) signal binds with nombre_instancia='default';
-			// the attribute lives in codigo_senal. (Indexed signals above use the
-			// channel name as the instance.)
-			_, err := pool.Exec(ctx, `
-				INSERT INTO ssfv.tbl_senales_x_equipo
-				    (senal_id, equipo_id, nombre_instancia, activo)
-				SELECT $1,$2,'default',TRUE
-				WHERE NOT EXISTS (
-				    SELECT 1 FROM ssfv.tbl_senales_x_equipo
-				    WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia='default'
-				)`,
-				s.senalID, equipoID)
-			if err != nil {
-				log.Printf("ssfv: insert sxe %s: %v", s.codigoSenal, err)
-			}
-		}
-	}
-	return nil
 }
 
 func (h *SSFVHandler) updateEquipo(w http.ResponseWriter, r *http.Request) {
@@ -2009,51 +1946,40 @@ func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		if instance == "default" {
-			// Flat signal (C1 instance "default"): link to the tipo template so all
-			// equipos of this type inherit it; autoInstanciarSenales binds it.
-			if _, err := pool.Exec(ctx, `
-				INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
-				VALUES ($1,$2,1) ON CONFLICT (senal_id, tipo_id) DO NOTHING`, senalID, body.TipoID); err != nil {
-				rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db link: " + err.Error()})
-				continue
-			}
-		} else {
-			// Channelized signal: the instance is specific to THIS equipo, not the
-			// type. Bind it directly with nombre_instancia = the pure instance (C1).
-			if _, err := pool.Exec(ctx, `
-				INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
-				SELECT $1,$2,$3,TRUE
-				WHERE NOT EXISTS (SELECT 1 FROM ssfv.tbl_senales_x_equipo
-				                  WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia=$4)`,
-				senalID, equipoID, instance, instance); err != nil {
-				rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db instance bind: " + err.Error()})
-				continue
-			}
+		// Bind the signal directly to THIS equipo (no tipo-template detour). Flat
+		// signals use nombre_instancia='default' (the attribute lives in
+		// codigo_senal); channelized signals use the pure instance (C1). NOT EXISTS
+		// keeps re-approval idempotent (NULL!=NULL defeats ON CONFLICT here).
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
+			SELECT $1,$2,$3,TRUE
+			WHERE NOT EXISTS (SELECT 1 FROM ssfv.tbl_senales_x_equipo
+			                  WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia=$4)`,
+			senalID, equipoID, instance, instance); err != nil {
+			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db bind: " + err.Error()})
+			continue
 		}
 		created++
 	}
 
-	// ── Link existing catalog signals into the tipo template ──────────────
+	// ── Bind existing catalog signals directly to this equipo ─────────────
+	// (Previously these were added to the tipo template and instantiated; with
+	// N/DBIRTH-driven discovery we bind them straight to the equipo.)
 	linked := 0
 	for _, senalID := range body.LinkSignals {
 		if senalID == 0 {
 			continue
 		}
 		if _, err := pool.Exec(ctx, `
-			INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
-			VALUES ($1,$2,1)
-			ON CONFLICT (senal_id, tipo_id) DO NOTHING`, senalID, body.TipoID); err != nil {
-			log.Printf("autodiscovery: link signal %d to tipo %d: %v", senalID, body.TipoID, err)
+			INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
+			SELECT $1,$2,'default',TRUE
+			WHERE NOT EXISTS (SELECT 1 FROM ssfv.tbl_senales_x_equipo
+			                  WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia='default')`,
+			senalID, equipoID); err != nil {
+			log.Printf("autodiscovery: bind signal %d to equipo %d: %v", senalID, equipoID, err)
 			continue
 		}
 		linked++
-	}
-
-	// Instantiate the full tipo template (now including the just-linked signals)
-	// into ssfv.tbl_senales_x_equipo for this equipo. Idempotent.
-	if autoErr := h.autoInstanciarSenales(ctx, pool, equipoID, body.TipoID); autoErr != nil {
-		log.Printf("autodiscovery: auto-instanciar equipo %d: %v", equipoID, autoErr)
 	}
 
 	if _, dbErr := h.db.ExecContext(r.Context(),
@@ -2345,10 +2271,8 @@ func (h *SSFVHandler) provisionOneEquipo(
 		return 0
 	}
 
-	// Link standard catalog signals for this tipo_equipo.
-	if err := h.autoInstanciarSenales(ctx, pool, equipoID, tipoID); err != nil {
-		log.Printf("autodiscovery: provisionOneEquipo %q — autoInstanciarSenales: %v", nombreTopic, err)
-	}
+	// Signals are derived entirely from the device's NBIRTH/DBIRTH metric_meta
+	// below — no catalog-template pre-population.
 
 	// Create and link custom signals from metric_meta.
 	// For solar mode the nombre_instancia is the signal element code (last path segment of Name).
@@ -2396,16 +2320,16 @@ func (h *SSFVHandler) provisionOneEquipo(
 			}
 		}
 
-		// Skip signals already linked by autoInstanciarSenales (e.g. indexed
-		// signals like IDC_1, IDC_2 expanded from IDC_x in the catalog). Inserting
-		// a second row with a different senal_id would create duplicate mappings
-		// that corrupt the SSFVMappingCache lookup.
+		// Idempotency: skip if this equipo already has a binding for this instance
+		// (e.g. a prior provisioning pass, or re-provision of the same NBIRTH).
+		// Inserting a second row with a different senal_id would create duplicate
+		// mappings that corrupt the SSFVMappingCache lookup.
 		var alreadyLinked int
 		if err := pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM ssfv.tbl_senales_x_equipo
 			 WHERE equipo_id=$1 AND nombre_instancia=$2`,
 			equipoID, instancia).Scan(&alreadyLinked); err == nil && alreadyLinked > 0 {
-			linked++ // count it as linked (it was handled by autoInstanciarSenales)
+			linked++ // already bound
 			continue
 		}
 
