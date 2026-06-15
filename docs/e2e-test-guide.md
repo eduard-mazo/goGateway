@@ -181,9 +181,12 @@ ssfv: mapping cache loaded (… signal entries, … equipos known)
 mqtt sparkplug connected, subscribing spBv1.0/plant-floor/#
 ```
 
-> The seeded catalog already contains demo equipment types (Inversor, Medidor, …)
-> and a planta (`EPM Sede 30`, `planta_id=1`). We will register new stations against
-> `tipo_id=2` (Medidor) and `planta_id=1`.
+> The seeded catalog contains demo equipment **types** (Inversor, Medidor, …),
+> units, and señal **definitions** — but **no plantas or equipos**. Nothing is
+> pre-populated: a planta, its equipos, and their signal bindings are all created
+> from the device's NBIRTH/DBIRTH when you approve an autodiscovered entity (the
+> first approval creates the planta inline — see Iteration 2). We register
+> stations against `tipo_id=2` (Medidor).
 
 You can do steps 2–3 from the **UI** instead (see §7), but SQL is fastest for a
 scripted run.
@@ -299,13 +302,18 @@ Do it from the UI (§7, **Pendientes** tab) or via the API:
 MID=$(sqlite3 gw.db "SELECT id FROM autodiscovered_entities WHERE device_id='meter-01';")
 NID=$(sqlite3 gw.db "SELECT id FROM autodiscovered_entities WHERE device_id='' AND node_id='edge-1';")
 
-# device station meter-01: register Energy_kWh + Relay1
+# device station meter-01: create the planta inline (planta_id:0 + create_planta,
+# since a fresh deployment has none) and register Energy_kWh + Relay1.
 curl -s -X POST "http://localhost:8091/api/ssfv/autodiscovered/$MID/approve" \
   -H 'Content-Type: application/json' -d '{
-   "planta_id":1,"tipo_id":2,"nombre_equipo":"meter-01","nombre_topic":"plant-floor/edge-1/meter-01",
+   "planta_id":0,"create_planta":{"nombre":"Plant Floor","broker_base":"plant-floor"},
+   "tipo_id":2,"nombre_equipo":"meter-01","nombre_topic":"plant-floor/edge-1/meter-01",
    "create_signals":[
      {"codigo_senal":"Energy_kWh","nombre":"Energia","tipavar_id":6,"unidad_id":3,"tipo_valor":"Acumulado"},
      {"codigo_senal":"Relay1","nombre":"Rele","tipavar_id":10,"unidad_id":3,"tipo_valor":"Instantaneo"}]}'
+
+# the planta now exists; reuse its id for the host station below
+PID=$(TS "SELECT planta_id FROM ssfv.tbl_planta WHERE broker_base='plant-floor';" | tr -d ' ')
 
 # host station = the edge node itself. UNS/FIWARE split (sparkplug-contract.md
 # §5.1, contract v3): codigo_senal = the LEAF attribute (uns/code),
@@ -316,11 +324,11 @@ curl -s -X POST "http://localhost:8091/api/ssfv/autodiscovered/$MID/approve" \
 # with different instancias. From the UI the approve dialog PRE-FILLS codigo,
 # instancia, nombre and descripcion from the producer's uns/* — you confirm.
 curl -s -w ' [HTTP %{http_code}]' -X POST "http://localhost:8091/api/ssfv/autodiscovered/$NID/approve" \
-  -H 'Content-Type: application/json' -d '{
-   "planta_id":1,"tipo_id":2,"nombre_equipo":"edge-1-host","nombre_topic":"plant-floor/edge-1",
-   "create_signals":[
-     {"codigo_senal":"Usage_pct","nombre":"Porcentaje utilizado","nombre_instancia":"CPU","tipavar_id":7,"unidad_id":13},
-     {"codigo_senal":"Rx_MB","nombre":"NetRx","nombre_instancia":"Network/docker0","tipavar_id":7,"unidad_id":13}]}'
+  -H 'Content-Type: application/json' -d "{
+   \"planta_id\":$PID,\"tipo_id\":2,\"nombre_equipo\":\"edge-1-host\",\"nombre_topic\":\"plant-floor/edge-1\",
+   \"create_signals\":[
+     {\"codigo_senal\":\"Usage_pct\",\"nombre\":\"Porcentaje utilizado\",\"nombre_instancia\":\"CPU\",\"tipavar_id\":7,\"unidad_id\":13},
+     {\"codigo_senal\":\"Rx_MB\",\"nombre\":\"NetRx\",\"nombre_instancia\":\"Network/docker0\",\"tipavar_id\":7,\"unidad_id\":13}]}"
 
 sleep 6
 TS "SELECT e.nombre_topic AS station, s.codigo_senal AS attribute, sxe.nombre_instancia AS channel,
@@ -413,11 +421,22 @@ echo "rebirth=$(grep -c 'requesting rebirth' gogw.log)  out-of-seq=$(grep -c 'ou
 approval both stations write to `tbl_valores`; steady-state rebirths stay ~0
 (brief join resyncs aside).
 
-> **Tip — tipo templates scale to fleets:** a signal registered on a `tipo_equipo`
-> propagates to *every* equipo of that type. Approving `edge-2-host` against
-> `tipo_id=2` after edge-1 auto-instantiates the System signals you already linked.
+> **Note — bindings are per-equipo, from discovery:** there is no template
+> auto-instantiation. Each equipo's signals are bound from *its own*
+> NBIRTH/DBIRTH at approval, so `edge-2-host` only gets the metrics edge-2
+> actually publishes — never a fleet template's worth of signals it doesn't.
+> `tipo_equipo` is a classification/label, not a signal source.
 
 ### Soak test — birth storms, retries, storage performance
+
+> **Shortcut — `scripts/soak.sh`:** the whole flow above (build → throwaway
+> TSDB + edge + sim → autodiscover → approve with inline planta → timed soak
+> that deletes the planta mid-run → teardown) is automated. Run
+> `scripts/soak.sh run 10` for a 10-min soak, `scripts/soak.sh up` to just stand
+> the stack up, or `scripts/soak.sh down` to clean up. It writes a CSV tracking
+> ingest delta, planta visibility, and active-binding count (which drops to 0
+> after the delete — proving bindings don't leak). The manual steps below are
+> the same thing, spelled out.
 
 After the iterations, hold the pipeline **10 minutes** and watch for rebirth
 storms and write health. Sample every 30 s:
@@ -511,7 +530,7 @@ What to look at, mapped to the test:
 | **TSDB** view | backend = TimescaleDB, DSN, pipeline status: writeRate, DLQ depth, circuit, WAL | §4 step 3 + health |
 | **Broker Monitor** view | live stream of decoded Sparkplug frames (NBIRTH/NDATA/DBIRTH/DDATA), per-topic | Iteration 1 (watch frames arrive) |
 | **SSFV → Pendientes** tab | autodiscovered nodes/devices in `pending`; **Approve** dialog (pick planta + tipo, create/link signals) | **This is the "create station" UI** — Iterations 1, 2, 4 |
-| **SSFV → Catálogo / Plantas / Tipos** tabs | registered señales, equipos, plantas, tipo templates + units | the catalog you build by approving |
+| **SSFV → Catálogo / Plantas / Tipos** tabs | registered señales, equipos, plantas, tipos + units | the catalog you build by approving |
 | **SSFV → Estado** tab | live status **and the Descartados list** (known equipment, unregistered signal) | Iteration 3 (`Power_kW` shows here) |
 
 Walkthrough:
@@ -519,8 +538,9 @@ Walkthrough:
 1. **Iteration 1** — open **Broker Monitor**: frames from `edge-1` stream in.
    Open **SSFV → Pendientes**: `edge-1` (node) and `meter-01` (device) are listed
    `pending`. **TSDB** view shows the pipeline healthy but no plant writes yet.
-2. **Iteration 2** — in **Pendientes**, click **Approve** on `meter-01`: choose
-   *Planta* = EPM Sede 30, *Tipo* = Medidor. Each signal's **`codigo_senal` and
+2. **Iteration 2** — in **Pendientes**, click **Approve** on `meter-01`: since a
+   fresh deployment has no planta, use **➕ Crear planta para el group** (alias
+   pre-filled from `uns/planta`), *Tipo* = Medidor. Each signal's **`codigo_senal` and
    `nombre_instancia` are pre-filled** from the producer's `uns/*` properties
    (sparkplug-contract.md §5.1) — you confirm rather than type. Repeat for the
    node (`edge-1`): channelized System metrics show their channel, e.g.
