@@ -49,6 +49,14 @@ type Manager struct {
 	// answers with as many full NBIRTH+DBIRTH bursts.
 	rebirthMu   sync.Mutex
 	lastRebirth map[string]time.Time
+	// rebirthHits is a sliding window of recent rebirth *requests* per node and
+	// lastStormWarn rate-limits the duplicate-identity warning. A sustained storm
+	// (a rebirth that never "sticks") is the signature of two producers claiming
+	// the same group/node/device: the gateway keys identity off the Sparkplug
+	// topic alone (it cannot see a producer's MQTT clientId), so their interleaved
+	// seq counters collide forever. See detectRebirthStorm.
+	rebirthHits   map[string][]time.Time
+	lastStormWarn map[string]time.Time
 
 	// SSFV JSON handler — intercepts equipment topics before generic dispatch.
 	ssfvHandler *worker.SSFVHandler
@@ -421,6 +429,45 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 // within the window is the same gap (or the burst itself racing the detector).
 const rebirthCooldown = 5 * time.Second
 
+// Duplicate-identity detection: a healthy node trips at most a handful of
+// rebirths around a reconnect. A sustained run within stormWindow means the
+// rebirth never resolves the gap — the classic signature of two producers
+// publishing under the same group/node/device (their seq counters clobber each
+// other). We warn (rate-limited per node) so the operator can fix the broker
+// ACLs / node naming instead of silently losing interleaved data.
+const (
+	stormWindow       = 30 * time.Second
+	stormThreshold    = 6
+	stormWarnInterval = 60 * time.Second
+)
+
+// detectRebirthStorm records a rebirth request for key and returns true (once
+// per stormWarnInterval) when the recent rate indicates a duplicate node id.
+// Caller must hold rebirthMu.
+func (m *Manager) detectRebirthStorm(key string, now time.Time) bool {
+	if m.rebirthHits == nil {
+		m.rebirthHits = make(map[string][]time.Time)
+		m.lastStormWarn = make(map[string]time.Time)
+	}
+	cutoff := now.Add(-stormWindow)
+	hits := m.rebirthHits[key][:0:0]
+	for _, t := range m.rebirthHits[key] {
+		if t.After(cutoff) {
+			hits = append(hits, t)
+		}
+	}
+	hits = append(hits, now)
+	m.rebirthHits[key] = hits
+	if len(hits) < stormThreshold {
+		return false
+	}
+	if last, ok := m.lastStormWarn[key]; ok && now.Sub(last) < stormWarnInterval {
+		return false
+	}
+	m.lastStormWarn[key] = now
+	return true
+}
+
 // publishRebirth sends an NCMD message requesting the EoN node to re-publish
 // its NBIRTH.  Called by SparkplugHandler on out-of-sequence NDATA.
 func (m *Manager) publishRebirth(groupID, nodeID string) {
@@ -434,17 +481,29 @@ func (m *Manager) publishRebirth(groupID, nodeID string) {
 	}
 
 	key := groupID + "/" + nodeID
+	now := time.Now()
 	m.rebirthMu.Lock()
-	if t, ok := m.lastRebirth[key]; ok && time.Since(t) < rebirthCooldown {
+	storm := m.detectRebirthStorm(key, now)
+	if t, ok := m.lastRebirth[key]; ok && now.Sub(t) < rebirthCooldown {
 		m.rebirthMu.Unlock()
+		if storm {
+			log.Printf("sparkplug: WARNING rebirth storm for %s — likely DUPLICATE node id "+
+				"(two producers on the same group/node/device). Sender identity is the Sparkplug "+
+				"topic, not the MQTT clientId; enforce per-client broker ACLs / unique node ids.", key)
+		}
 		log.Printf("sparkplug: rebirth for %s suppressed (cooldown)", key)
 		return
 	}
 	if m.lastRebirth == nil {
 		m.lastRebirth = make(map[string]time.Time)
 	}
-	m.lastRebirth[key] = time.Now()
+	m.lastRebirth[key] = now
 	m.rebirthMu.Unlock()
+	if storm {
+		log.Printf("sparkplug: WARNING rebirth storm for %s — likely DUPLICATE node id "+
+			"(two producers on the same group/node/device). Sender identity is the Sparkplug "+
+			"topic, not the MQTT clientId; enforce per-client broker ACLs / unique node ids.", key)
+	}
 	topic := fmt.Sprintf("%s/%s/NCMD/%s", sparkplug.Namespace, groupID, nodeID)
 	payload := sparkplug.EncodeNCMDRebirth()
 	// QoS 1: a dropped rebirth leaves the node out-of-sync until the next gap
