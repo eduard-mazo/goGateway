@@ -26,6 +26,9 @@ type SparkplugHandler struct {
 	// rebirthFn is called when the handler needs to publish an NCMD Rebirth.
 	// The mqtt.Manager sets this field after creating the handler.
 	rebirthFn func(groupID, nodeID string)
+	// dupFn reports a suspected duplicate node id (two producers on one topic).
+	// Optional; set by mqtt.Manager.
+	dupFn func(groupID, nodeID, reason string)
 }
 
 // NewSparkplugHandler returns a handler ready to process Sparkplug B messages.
@@ -46,6 +49,12 @@ func NewSparkplugHandler(
 // mqtt.Manager after the handler is created.
 func (h *SparkplugHandler) SetRebirthFn(fn func(groupID, nodeID string)) {
 	h.rebirthFn = fn
+}
+
+// SetDuplicateFn registers a callback invoked when a duplicate node id is
+// suspected (e.g. a bdSeq regression while the node is online). Optional.
+func (h *SparkplugHandler) SetDuplicateFn(fn func(groupID, nodeID, reason string)) {
+	h.dupFn = fn
 }
 
 // SetSSFVHandler wires an SSFV handler so that metrics whose UNS path matches
@@ -106,7 +115,15 @@ func (h *SparkplugHandler) handleNBIRTH(topic sparkplug.Topic, raw []byte) int {
 
 	key := sparkplug.NodeKey{GroupID: topic.GroupID, EdgeNodeID: topic.EdgeNodeID}
 	session := h.registry.Session(key)
-	session.SetBirth(p)
+	if _, regressed := session.SetBirth(p); regressed {
+		log.Printf("sparkplug: WARNING NBIRTH bdSeq regressed for %s/%s while online — likely "+
+			"DUPLICATE node id (a second producer on the same topic). Sender identity is the "+
+			"Sparkplug topic, not the MQTT clientId; enforce per-client broker ACLs.",
+			topic.GroupID, topic.EdgeNodeID)
+		if h.dupFn != nil {
+			h.dupFn(topic.GroupID, topic.EdgeNodeID, "bdseq-regression")
+		}
+	}
 
 	if h.autoDisc != nil {
 		names := collectMetricNames(p.Metrics)

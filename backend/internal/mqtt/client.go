@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,12 @@ type Manager struct {
 	rebirthHits   map[string][]time.Time
 	lastStormWarn map[string]time.Time
 
+	// dupSuspects records node ids that two producers appear to be sharing
+	// (rebirth storm and/or bdSeq regression). Surfaced via Status() so the
+	// operator/UI sees the collision instead of only a log line.
+	dupMu       sync.Mutex
+	dupSuspects map[string]*DuplicateSuspect
+
 	// SSFV JSON handler — intercepts equipment topics before generic dispatch.
 	ssfvHandler *worker.SSFVHandler
 
@@ -103,9 +110,24 @@ type Status struct {
 	Topics    int    `json:"topics"`
 	Messages  int64  `json:"messages"`
 	LastMsgAt int64  `json:"last_msg_at"` // unix nano, 0 if none
+	// Suspects lists node ids two producers appear to share (duplicate identity).
+	Suspects []DuplicateSuspect `json:"duplicate_suspects,omitempty"`
+}
+
+// DuplicateSuspect records a node id that two producers appear to be sharing.
+// Sender identity is the Sparkplug topic (group/node/device), not the MQTT
+// clientId, so a duplicate cannot be prevented here — only surfaced.
+type DuplicateSuspect struct {
+	Group     string    `json:"group"`
+	Node      string    `json:"node"`
+	Count     int       `json:"count"`
+	Reasons   []string  `json:"reasons"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
 }
 
 func (m *Manager) Status() Status {
+	suspects := m.duplicateSuspects() // own lock; gather before holding m.mu
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return Status{
@@ -114,7 +136,52 @@ func (m *Manager) Status() Status {
 		Topics:    len(m.subs),
 		Messages:  m.messages.Load(),
 		LastMsgAt: m.lastMsg.Load(),
+		Suspects:  suspects,
 	}
+}
+
+// recordDuplicateSuspect upserts a suspected duplicate node id with its reason.
+func (m *Manager) recordDuplicateSuspect(groupID, nodeID, reason string) {
+	key := groupID + "/" + nodeID
+	now := time.Now()
+	m.dupMu.Lock()
+	defer m.dupMu.Unlock()
+	if m.dupSuspects == nil {
+		m.dupSuspects = make(map[string]*DuplicateSuspect)
+	}
+	s := m.dupSuspects[key]
+	if s == nil {
+		s = &DuplicateSuspect{Group: groupID, Node: nodeID, FirstSeen: now}
+		m.dupSuspects[key] = s
+	}
+	s.Count++
+	s.LastSeen = now
+	seen := false
+	for _, r := range s.Reasons {
+		if r == reason {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		s.Reasons = append(s.Reasons, reason)
+	}
+}
+
+// duplicateSuspects returns a stable snapshot of suspected duplicate node ids.
+func (m *Manager) duplicateSuspects() []DuplicateSuspect {
+	m.dupMu.Lock()
+	defer m.dupMu.Unlock()
+	out := make([]DuplicateSuspect, 0, len(m.dupSuspects))
+	for _, s := range m.dupSuspects {
+		cp := *s
+		cp.Reasons = append([]string(nil), s.Reasons...)
+		out = append(out, cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Group+"/"+out[i].Node < out[j].Group+"/"+out[j].Node
+	})
+	return out
 }
 
 func NewManager(db *sqlx.DB, cache *worker.MappingCache, d worker.Dispatcher) *Manager {
@@ -195,6 +262,7 @@ func (m *Manager) reload() error {
 		}
 		m.spHandler = worker.NewSparkplugHandler(m.registry, m.cache, m.d)
 		m.spHandler.SetRebirthFn(m.publishRebirth)
+		m.spHandler.SetDuplicateFn(m.recordDuplicateSuspect)
 		if m.ssfvHandler != nil {
 			m.spHandler.SetSSFVHandler(m.ssfvHandler)
 		}
@@ -487,6 +555,7 @@ func (m *Manager) publishRebirth(groupID, nodeID string) {
 	if t, ok := m.lastRebirth[key]; ok && now.Sub(t) < rebirthCooldown {
 		m.rebirthMu.Unlock()
 		if storm {
+			m.recordDuplicateSuspect(groupID, nodeID, "rebirth-storm")
 			log.Printf("sparkplug: WARNING rebirth storm for %s — likely DUPLICATE node id "+
 				"(two producers on the same group/node/device). Sender identity is the Sparkplug "+
 				"topic, not the MQTT clientId; enforce per-client broker ACLs / unique node ids.", key)
@@ -500,6 +569,7 @@ func (m *Manager) publishRebirth(groupID, nodeID string) {
 	m.lastRebirth[key] = now
 	m.rebirthMu.Unlock()
 	if storm {
+		m.recordDuplicateSuspect(groupID, nodeID, "rebirth-storm")
 		log.Printf("sparkplug: WARNING rebirth storm for %s — likely DUPLICATE node id "+
 			"(two producers on the same group/node/device). Sender identity is the Sparkplug "+
 			"topic, not the MQTT clientId; enforce per-client broker ACLs / unique node ids.", key)

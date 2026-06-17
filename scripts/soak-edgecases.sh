@@ -112,6 +112,13 @@ note "distinct equipos for topic $GROUP/edge-1/meter-01 (UNIQUE nombre_topic):"
 TS "SELECT count(*) FROM ssfv.tbl_equipo WHERE nombre_topic='$GROUP/edge-1/meter-01';" | sed 's/^/     /'
 note "EXPECT: Δ out-of-seq / Δ rebirths spike (two senders share ONE node seq);"
 note "        still exactly 1 equipo row — the 2nd sender is silently merged."
+note "duplicate_suspects surfaced via /api/status (was silent before):"
+curl -s "$API/status" | python3 -c "
+import sys,json
+for s in json.load(sys.stdin).get('mqtt',{}).get('duplicate_suspects',[]) or []:
+    print('     %s/%s  count=%d  reasons=%s' % (s['group'], s['node'], s['count'], ','.join(s['reasons'])))" 2>/dev/null || true
+note "storm/bdSeq WARNINGs in gw.log:"
+grep -aE "rebirth storm|bdSeq regressed" "$WORK/gw.log" | tail -2 | sed 's/^/     /' || true
 kill_edge dup
 note "killed edge-DUP."
 

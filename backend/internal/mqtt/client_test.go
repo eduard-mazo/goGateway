@@ -5,6 +5,32 @@ import (
 	"time"
 )
 
+// recordDuplicateSuspect upserts per node, dedupes reasons, and surfaces through
+// Status() so the operator/UI sees the collision.
+func TestDuplicateSuspectRegistry(t *testing.T) {
+	m := &Manager{}
+	m.recordDuplicateSuspect("EPM_SOAK", "edge-1", "rebirth-storm")
+	m.recordDuplicateSuspect("EPM_SOAK", "edge-1", "bdseq-regression")
+	m.recordDuplicateSuspect("EPM_SOAK", "edge-1", "rebirth-storm") // dup reason
+	m.recordDuplicateSuspect("EPM_SOAK", "edge-2", "rebirth-storm")
+
+	got := m.duplicateSuspects()
+	if len(got) != 2 {
+		t.Fatalf("want 2 suspect nodes, got %d", len(got))
+	}
+	// Sorted by group/node → edge-1 first.
+	e1 := got[0]
+	if e1.Node != "edge-1" || e1.Count != 3 {
+		t.Fatalf("edge-1: node=%s count=%d (want edge-1/3)", e1.Node, e1.Count)
+	}
+	if len(e1.Reasons) != 2 {
+		t.Fatalf("edge-1 reasons should dedupe to 2, got %v", e1.Reasons)
+	}
+	if s := m.Status(); len(s.Suspects) != 2 {
+		t.Fatalf("Status should surface 2 suspects, got %d", len(s.Suspects))
+	}
+}
+
 // detectRebirthStorm should stay quiet under the threshold, warn once when a
 // sustained run within the window indicates a duplicate node id, rate-limit
 // repeat warnings, and forget hits that age out of the window.

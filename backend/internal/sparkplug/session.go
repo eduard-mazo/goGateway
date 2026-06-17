@@ -46,14 +46,23 @@ func (s *NodeSession) Online() bool {
 
 // SetBirth records a successful NBIRTH, seeds the alias map, and advances
 // the birth/death sequence counter.
-// Returns the seq value contained in the payload (must be 0 for a valid NBIRTH).
-func (s *NodeSession) SetBirth(payload *Payload) {
+//
+// It also reports a bdSeq REGRESSION while the node was still considered online:
+// a commanded rebirth reuses the same MQTT session (same bdSeq), and a genuine
+// reconnect first delivers the Last-Will NDEATH (→ offline) then an NBIRTH with
+// a higher bdSeq — so a *lower* bdSeq arriving while we still think the node is
+// online means a second producer is publishing under the same node id (its
+// independent bdSeq counter started lower). This is a strong duplicate-identity
+// signal (caller logs/records it). Wrap-around (255→0) can rarely false-positive;
+// it is a warning only, never a hard action.
+func (s *NodeSession) SetBirth(payload *Payload) (bdSeq uint64, regressedWhileOnline bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.online = true
-	s.seq = payload.Seq
+	wasOnline := s.online
+	prevBd := s.bdSeq
 
-	// Rebuild alias map from the NBIRTH metric list.
+	// Extract the incoming bdSeq before mutating session state.
+	newBd := prevBd
 	s.aliasMap = make(map[uint64]string, len(payload.Metrics))
 	for _, m := range payload.Metrics {
 		if m.HasAlias && m.Name != "" {
@@ -62,10 +71,16 @@ func (s *NodeSession) SetBirth(payload *Payload) {
 		// bdSeq metric carries the birth/death sequence number.
 		if m.Name == "bdSeq" {
 			if v, ok := m.Float64(); ok {
-				s.bdSeq = uint64(v)
+				newBd = uint64(v)
 			}
 		}
 	}
+
+	regressedWhileOnline = wasOnline && newBd < prevBd
+	s.online = true
+	s.seq = payload.Seq
+	s.bdSeq = newBd
+	return newBd, regressedWhileOnline
 }
 
 // SetDeath marks the node offline.

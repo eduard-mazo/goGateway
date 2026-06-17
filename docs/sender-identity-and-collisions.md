@@ -94,17 +94,27 @@ sender identity; the broker must. Per Sparkplug security guidance:
   `NCMD`); restrict those too.
 
 **2. Application-level detection in goGateway (defense in depth — implemented).**
-A duplicate cannot be *prevented* here, but it can be *surfaced* instead of
-silently corrupting data: `publishRebirth` now runs `detectRebirthStorm`, which
-watches the per-node rebirth-request rate and logs a rate-limited **WARNING**
-naming the likely cause (duplicate node id) when a sustained storm is detected
-(see `internal/mqtt/client.go`). This converts the silent collision into an
-actionable operator signal.
+A duplicate cannot be *prevented* here, but it is now *detected and surfaced*
+instead of silently corrupting data — via two independent signals:
+
+- **Rebirth storm** (`detectRebirthStorm`, `internal/mqtt/client.go`):
+  `publishRebirth` watches the per-node rebirth-request rate and, on a sustained
+  run within the window, logs a rate-limited **WARNING** naming the likely cause.
+- **bdSeq regression** (`NodeSession.SetBirth`, `internal/sparkplug/session.go`):
+  an NBIRTH whose `bdSeq` is *lower* than the current one **while the node is
+  still online** means a second producer (with its own, lower counter) is
+  publishing under the same node id — a commanded rebirth reuses the same bdSeq,
+  and a real reconnect first delivers the Last-Will NDEATH. Logged as a WARNING.
+
+Both signals feed a **duplicate-suspect registry** on the MQTT manager, surfaced
+through `GET /api/status` as `mqtt.duplicate_suspects[]`
+(`{group, node, count, reasons, first_seen, last_seen}`) so the operator/UI sees
+the collision rather than just a log line. All three are unit-tested and
+reproduced by `scripts/soak-edgecases.sh` (scenario B).
 
 **3. Possible future hardening (not yet implemented).**
-- Validate `bdSeq`: track it per node, require monotonic advance on re-birth,
-  and flag an NBIRTH whose bdSeq regresses while the session is online.
-- Surface the storm warning as an SSFV alarm / UI banner, not just a log line.
+- Promote a `duplicate_suspects` entry to an SSFV alarm / persistent UI banner
+  (the data is already exposed via `/api/status`).
 - Optional "node lock": after first NBIRTH, pin an expected source fingerprint
   (only meaningful alongside broker-side identity, e.g. via cert CN propagated
   by the broker).
