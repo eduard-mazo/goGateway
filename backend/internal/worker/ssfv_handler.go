@@ -170,6 +170,9 @@ type SSFVHandler struct {
 	alarmMgr *AlarmManager                   // guarded by mu; nil until TSDB connects
 	missFn   func(signalPath, equipo string) // guarded by mu; optional miss callback
 	pool     *pgxpool.Pool                   // guarded by mu; for device-identity writes
+	// samplePub, when set, fans every accepted sample out to the NATS spine
+	// (FIWARE Orion etc.). Optional; the direct TSDB write above is unaffected.
+	samplePub func(SSFVSample) // guarded by mu
 }
 
 func NewSSFVHandler(cache *SSFVMappingCache, pipe *tsdb.WritePipeline, alarms *AlarmManager) *SSFVHandler {
@@ -255,6 +258,15 @@ func (h *SSFVHandler) UpdateDeviceIdentity(entity, column, value string) bool {
 	return tag.RowsAffected() > 0
 }
 
+// SetSamplePublisher registers an optional fan-out callback invoked for every
+// accepted sample (in addition to the direct TSDB write). Wire it to the NATS
+// SSFV publisher; nil disables fan-out.
+func (h *SSFVHandler) SetSamplePublisher(fn func(SSFVSample)) {
+	h.mu.Lock()
+	h.samplePub = fn
+	h.mu.Unlock()
+}
+
 // SetMissFn registers a callback invoked when a metric's topic is a known SSFV
 // equipment but the signal code has no catalog entry. Called from HandleMetric.
 // Wire this to SSFVAdapter.RecordMiss after the adapter is created.
@@ -333,6 +345,7 @@ func (h *SSFVHandler) HandleMetric(entity, codigo, instance string, value float6
 	h.mu.RLock()
 	pipe := h.pipe
 	alarmMgr := h.alarmMgr
+	samplePub := h.samplePub
 	h.mu.RUnlock()
 
 	if mapping.EsAlarma && alarmMgr != nil {
@@ -349,6 +362,13 @@ func (h *SSFVHandler) HandleMetric(entity, codigo, instance string, value float6
 			},
 			Fields:    map[string]float64{"value": value},
 			Timestamp: ts,
+		})
+	}
+	// Fan the accepted sample out to the NATS spine (Orion etc.), if wired.
+	if samplePub != nil {
+		samplePub(SSFVSample{
+			Entity: entity, Codigo: codigo, Instance: instance,
+			Value: value, Quality: quality, Timestamp: ts,
 		})
 	}
 	return true

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"goGateway/internal/auth"
 	"goGateway/internal/config"
 	"goGateway/internal/db"
+	"goGateway/internal/fiware"
 	"goGateway/internal/iec104"
 	"goGateway/internal/models"
 	"goGateway/internal/mqtt"
@@ -80,6 +82,10 @@ func main() {
 	go calcEng.Run(ctx)
 	go threshEng.Run(ctx)
 
+	// FIWARE Orion sink (env-configured MVP): a NATS-fed consumer that upserts
+	// decoded SSFV samples into an Orion context broker. Requires NATS enabled.
+	orionCfg := loadOrionConfig()
+
 	var natsClient *nats.Client
 	var innerDispatcher worker.Dispatcher = worker.NewDirectDispatcher(iecMgr, hist)
 
@@ -87,6 +93,7 @@ func main() {
 		natsClient = nats.NewClient(natsCfg)
 		if err := natsClient.Connect(); err != nil {
 			log.Printf("nats: connect error (falling back to direct dispatch): %v", err)
+			natsClient = nil
 		} else {
 			innerDispatcher = worker.NewNatsDispatcher(natsClient, natsCfg.StreamName)
 			// Start NATS workers.
@@ -103,7 +110,21 @@ func main() {
 					log.Printf("tsdb worker: %v", err)
 				}
 			}()
+
+			if orionCfg.enabled {
+				orionClient := fiware.NewHTTPClient(orionCfg.url, orionCfg.entityType, orionCfg.service, orionCfg.servicePath)
+				orionWorker := worker.NewOrionWorker(natsClient, natsCfg.StreamName, orionClient)
+				go func() {
+					if err := orionWorker.Run(ctx); err != nil {
+						log.Printf("orion worker: %v", err)
+					}
+				}()
+				log.Printf("fiware: Orion sink enabled → %s (type %s)", orionCfg.url, orionCfg.entityType)
+			}
 		}
+	}
+	if orionCfg.enabled && natsClient == nil {
+		log.Printf("fiware: ORION_ENABLED set but NATS is not available — Orion sink disabled (it consumes the NATS stream)")
 	}
 
 	// Wrap the chosen inner dispatcher with edge-compute filtering.
@@ -134,6 +155,11 @@ func main() {
 		if err := ssfvCache.Reload(sa.Pool()); err != nil {
 			log.Printf("ssfv cache reload: %v", err)
 		}
+	}
+	// Fan accepted SSFV samples out to the NATS spine when there is a consumer
+	// (Orion today). The direct TimescaleDB write above remains the source of truth.
+	if natsClient != nil && orionCfg.enabled {
+		ssfvHandler.SetSamplePublisher(worker.NewNatsSSFVPublisher(natsClient, natsCfg.StreamName).Publish)
 	}
 	mqttMgr.SetSSFVHandler(ssfvHandler)
 
@@ -279,6 +305,37 @@ func seedDefaultAdmin(database *sqlx.DB) {
 		return
 	}
 	log.Println("AUTH: default user created — username: admin, password: admin — CHANGE IMMEDIATELY")
+}
+
+// orionConfig holds the FIWARE Orion sink settings (env-configured MVP).
+type orionConfig struct {
+	enabled     bool
+	url         string
+	entityType  string
+	service     string
+	servicePath string
+}
+
+// loadOrionConfig reads the Orion sink config from the environment:
+//
+//	ORION_ENABLED=1|true        enable the sink (requires NATS enabled)
+//	ORION_URL=http://host:1026  context broker base URL (default http://localhost:1026)
+//	ORION_ENTITY_TYPE=...        NGSI entity type (default SSFVEquipo)
+//	ORION_SERVICE=...            Fiware-Service tenant header (optional)
+//	ORION_SERVICE_PATH=...       Fiware-ServicePath header (optional)
+func loadOrionConfig() orionConfig {
+	enabled := os.Getenv("ORION_ENABLED") == "1" || strings.EqualFold(os.Getenv("ORION_ENABLED"), "true")
+	url := os.Getenv("ORION_URL")
+	if url == "" {
+		url = "http://localhost:1026"
+	}
+	return orionConfig{
+		enabled:     enabled,
+		url:         url,
+		entityType:  os.Getenv("ORION_ENTITY_TYPE"),
+		service:     os.Getenv("ORION_SERVICE"),
+		servicePath: os.Getenv("ORION_SERVICE_PATH"),
+	}
 }
 
 // loadIEC104 reloads the manager from DB: gateway-wide listen IP + every

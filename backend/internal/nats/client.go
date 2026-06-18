@@ -68,8 +68,10 @@ func (c *Client) initStream() error {
 	defer cancel()
 
 	streamCfg := jetstream.StreamConfig{
-		Name:     c.cfg.StreamName,
-		Subjects: []string{c.cfg.StreamName + ".metrics.>"},
+		Name: c.cfg.StreamName,
+		// .metrics.> = IEC-104 fan-out (NatsDispatcher);
+		// .ssfv.>    = decoded SSFV samples for the fan-out spine (Orion etc.).
+		Subjects: []string{c.cfg.StreamName + ".metrics.>", c.cfg.StreamName + ".ssfv.>"},
 		// Retention: limits size/age to prevent disk exhaustion in edge scenarios.
 		MaxAge:    24 * time.Hour,
 		Storage:   jetstream.FileStorage,
