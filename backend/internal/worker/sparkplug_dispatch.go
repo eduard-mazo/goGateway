@@ -375,7 +375,7 @@ func (h *SparkplugHandler) dispatchMetric(
 		}
 		ssfvTopic = entity
 		val, _ := m.Float64()
-		ssfvHandled = h.ssfvHandler.HandleMetric(entity, codigo, instance, val, ts)
+		ssfvHandled = h.ssfvHandler.HandleMetric(entity, codigo, instance, val, m.IEC104Quality(), ts)
 	}
 
 	var nodeBase string

@@ -307,7 +307,12 @@ func (h *SSFVHandler) IsKnownTopic(topic string) bool {
 // using the C1 composite identity (entity, codigo, instance). Writes to
 // ssfv.tbl_valores on a catalog hit; an unregistered signal on a known entity is
 // quarantined to Descartados. Returns true on a catalog hit.
-func (h *SSFVHandler) HandleMetric(entity, codigo, instance string, value float64, ts time.Time) bool {
+//
+// quality is the IEC-104 QDS byte derived from the Sparkplug metric
+// (0=good, 0x80=invalid/comm-lost, 0x40=not-topical); it is carried on the
+// "quality" tag so the SSFV adapter records calidad (Buena/Mala/Dudosa) instead
+// of defaulting every sample to Buena.
+func (h *SSFVHandler) HandleMetric(entity, codigo, instance string, value float64, quality int, ts time.Time) bool {
 	if instance == "" {
 		instance = "default"
 	}
@@ -340,6 +345,7 @@ func (h *SSFVHandler) HandleMetric(entity, codigo, instance string, value float6
 				"equipo":    entity,
 				"codigo":    codigo,
 				"instancia": instance,
+				"quality":   strconv.Itoa(quality),
 			},
 			Fields:    map[string]float64{"value": value},
 			Timestamp: ts,
