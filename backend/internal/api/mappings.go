@@ -43,12 +43,41 @@ func deriveIEC104Type(variableType string) string {
 
 // nextFreeIOA returns the next unused IOA on a server (max+1, starting at 1).
 // IOA 0 is reserved in IEC-104, so the first assigned address is 1.
-func (h *MappingHandler) nextFreeIOA(serverID int64) (int, error) {
+func nextFreeIOA(db *sqlx.DB, serverID int64) (int, error) {
 	var maxIOA int
-	if err := h.DB.Get(&maxIOA, `SELECT COALESCE(MAX(ioa),0) FROM signal_mappings WHERE server_id=?`, serverID); err != nil {
+	if err := db.Get(&maxIOA, `SELECT COALESCE(MAX(ioa),0) FROM signal_mappings WHERE server_id=?`, serverID); err != nil {
 		return 0, err
 	}
 	return maxIOA + 1, nil
+}
+
+// assignMapping writes a minimal IEC-104 mapping (only the wire-relevant columns;
+// everything else keeps its DB default) and returns the stored row. When ioa<=0
+// the next free IOA on the server is assigned; scale<=0 defaults to 1.0. Shared
+// by the HTTP assign endpoint and the SSFV→IEC-104 bridge.
+func assignMapping(db *sqlx.DB, serverID, topicID int64, metricName, iecType string, ioa int, scale float64, unit string) (models.SignalMapping, error) {
+	if ioa <= 0 {
+		n, err := nextFreeIOA(db, serverID)
+		if err != nil {
+			return models.SignalMapping{}, err
+		}
+		ioa = n
+	}
+	if scale == 0 {
+		scale = 1.0
+	}
+	res, err := db.Exec(
+		`INSERT INTO signal_mappings(server_id,topic_id,metric_name,iec104_type,ioa,scale,unit,enabled) VALUES(?,?,?,?,?,?,?,1)`,
+		serverID, topicID, metricName, iecType, ioa, scale, unit)
+	if err != nil {
+		return models.SignalMapping{}, err
+	}
+	id, _ := res.LastInsertId()
+	var m models.SignalMapping
+	if err := db.Get(&m, `SELECT `+mapCols+` FROM signal_mappings WHERE id=?`, id); err != nil {
+		return models.SignalMapping{}, err
+	}
+	return m, nil
 }
 
 // assignReq is the minimal input to expose a Sparkplug signal on IEC-104.
@@ -98,33 +127,12 @@ func (h *MappingHandler) assign(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "unknown topic")
 		return
 	}
-	ioa := req.IOA
-	if ioa <= 0 {
-		n, err := h.nextFreeIOA(serverID)
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		ioa = n
-	}
-	scale := req.Scale
-	if scale == 0 {
-		scale = 1.0
-	}
-	res, err := h.DB.Exec(
-		`INSERT INTO signal_mappings(server_id,topic_id,metric_name,iec104_type,ioa,scale,unit,enabled) VALUES(?,?,?,?,?,?,?,1)`,
-		serverID, req.TopicID, req.MetricName, iecType, ioa, scale, req.Unit)
+	m, err := assignMapping(h.DB, serverID, req.TopicID, req.MetricName, iecType, req.IOA, req.Scale, req.Unit)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	id, _ := res.LastInsertId()
 	h.notify()
-	var m models.SignalMapping
-	if err := h.DB.Get(&m, `SELECT `+mapCols+` FROM signal_mappings WHERE id=?`, id); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
 	writeJSON(w, 201, m)
 }
 

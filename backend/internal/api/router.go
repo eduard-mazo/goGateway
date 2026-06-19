@@ -96,6 +96,7 @@ func NewRouter(d Deps) http.Handler {
 
 			ssfvApiH := NewSSFVHandler(d.TSDBMgr)
 			ssfvApiH.SetReloader(d.NotifySSFV)
+			ssfvApiH.SetMappingNotifier(d.NotifyMappings)
 			ssfvApiH.SetDB(d.DB)
 			if d.AutoDisc != nil {
 				// Wire rebirth so operator approval triggers NCMD Rebirth immediately.

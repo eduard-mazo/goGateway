@@ -24,10 +24,11 @@ import (
 // SSFVHandler serves CRUD endpoints for the ssfv schema catalog.
 // It obtains the pool lazily from TSDBMgr so it survives pipeline reloads.
 type SSFVHandler struct {
-	mgr       *tsdb.Manager
-	db        *sqlx.DB // SQLite, for autodiscovery queries
-	reloader  func()   // reloads the worker SSFVMappingCache; set via SetReloader
-	rebirthFn func(groupID, nodeID string) // sends NCMD Rebirth after approval
+	mgr           *tsdb.Manager
+	db            *sqlx.DB // SQLite, for autodiscovery queries
+	reloader      func()   // reloads the worker SSFVMappingCache; set via SetReloader
+	mappingReload func()   // reloads the worker IEC-104 MappingCache; set via SetMappingNotifier
+	rebirthFn     func(groupID, nodeID string) // sends NCMD Rebirth after approval
 }
 
 func NewSSFVHandler(mgr *tsdb.Manager) *SSFVHandler {
@@ -73,6 +74,11 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 	r.Put("/equipos/{id}", h.updateEquipo)
 	r.Delete("/equipos/{id}", h.deleteEquipo)
 	r.Get("/equipos/{id}/senales", h.listSenalesByEquipo)
+
+	// SSFV → IEC-104 bridge: expose catalog signals on an IEC-104 server,
+	// deriving type + auto-assigning IOA. Per equipo (bulk) or per asignación.
+	r.Post("/equipos/{id}/expose-iec104", h.exposeEquipoIEC104)
+	r.Post("/asignaciones/{id}/expose-iec104", h.exposeAsignacionIEC104)
 
 	// Señales (catálogo)
 	r.Get("/senales", h.listSenales)
