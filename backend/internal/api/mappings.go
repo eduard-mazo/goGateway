@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
@@ -20,8 +21,111 @@ type MappingHandler struct {
 func (h *MappingHandler) Mount(r chi.Router) {
 	r.Get("/", h.list)
 	r.Post("/", h.create)
+	r.Post("/assign", h.assign)
 	r.Put("/{id}", h.update)
 	r.Delete("/{id}", h.delete)
+}
+
+// deriveIEC104Type maps a signal's variable type (as carried in the SSFV
+// catalog / gateway_signals) to the default IEC-104 monitored type for that
+// class of point. Returns "" when the type is unknown so the caller can require
+// an explicit iec104_type instead of guessing wrong.
+func deriveIEC104Type(variableType string) string {
+	switch strings.ToLower(strings.TrimSpace(variableType)) {
+	case "analog", "analogica", "analógica", "ai", "measured", "instantaneo", "instantáneo", "acumulado":
+		return "M_ME_NC_1" // measured value, short float, no time
+	case "digital", "binary", "di", "bool", "boolean", "single", "single-point":
+		return "M_SP_NA_1" // single point, no time
+	default:
+		return ""
+	}
+}
+
+// nextFreeIOA returns the next unused IOA on a server (max+1, starting at 1).
+// IOA 0 is reserved in IEC-104, so the first assigned address is 1.
+func (h *MappingHandler) nextFreeIOA(serverID int64) (int, error) {
+	var maxIOA int
+	if err := h.DB.Get(&maxIOA, `SELECT COALESCE(MAX(ioa),0) FROM signal_mappings WHERE server_id=?`, serverID); err != nil {
+		return 0, err
+	}
+	return maxIOA + 1, nil
+}
+
+// assignReq is the minimal input to expose a Sparkplug signal on IEC-104.
+// Only the fields that actually reach the wire are accepted; everything else in
+// signal_mappings keeps its DB default. A producer of these values (e.g. an
+// SSFV signal) supplies topic_id + metric_name + variable_type and lets the
+// gateway derive the type and assign the address.
+type assignReq struct {
+	TopicID      int64   `json:"topic_id"`      // required: the spBv1.0 node/device topic row
+	MetricName   string  `json:"metric_name"`   // required: Sparkplug metric (instancia/codigo)
+	VariableType string  `json:"variable_type"` // analog|digital → derives iec104_type
+	IEC104Type   string  `json:"iec104_type"`   // optional: explicit override of the derived type
+	IOA          int     `json:"ioa"`           // optional: <=0 auto-assigns the next free IOA
+	Scale        float64 `json:"scale"`         // optional: default 1.0
+	Unit         string  `json:"unit"`          // optional metadata
+}
+
+// assign creates a minimal IEC-104 mapping: it derives server_id from the
+// topic, derives the wire type from variable_type when not given, auto-assigns
+// the next free IOA when omitted, and enables the point. All non-wire columns
+// (business/company/json_key/quality_key/device_name/…) are left at their DB
+// defaults — only the necessary fields are written.
+func (h *MappingHandler) assign(w http.ResponseWriter, r *http.Request) {
+	var req assignReq
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.TopicID == 0 {
+		writeErr(w, 400, "topic_id required")
+		return
+	}
+	if req.MetricName == "" {
+		writeErr(w, 400, "metric_name required")
+		return
+	}
+	iecType := req.IEC104Type
+	if iecType == "" {
+		iecType = deriveIEC104Type(req.VariableType)
+	}
+	if iecType == "" {
+		writeErr(w, 400, "iec104_type required (or set variable_type to analog|digital)")
+		return
+	}
+	var serverID int64
+	if err := h.DB.Get(&serverID, `SELECT d.server_id FROM topics t JOIN devices d ON d.id = t.device_id WHERE t.id=?`, req.TopicID); err != nil {
+		writeErr(w, 400, "unknown topic")
+		return
+	}
+	ioa := req.IOA
+	if ioa <= 0 {
+		n, err := h.nextFreeIOA(serverID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		ioa = n
+	}
+	scale := req.Scale
+	if scale == 0 {
+		scale = 1.0
+	}
+	res, err := h.DB.Exec(
+		`INSERT INTO signal_mappings(server_id,topic_id,metric_name,iec104_type,ioa,scale,unit,enabled) VALUES(?,?,?,?,?,?,?,1)`,
+		serverID, req.TopicID, req.MetricName, iecType, ioa, scale, req.Unit)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	id, _ := res.LastInsertId()
+	h.notify()
+	var m models.SignalMapping
+	if err := h.DB.Get(&m, `SELECT `+mapCols+` FROM signal_mappings WHERE id=?`, id); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 201, m)
 }
 
 func (h *MappingHandler) notify() {
