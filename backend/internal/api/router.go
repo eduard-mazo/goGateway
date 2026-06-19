@@ -23,7 +23,6 @@ type Deps struct {
 	NotifyIEC104   func() // reload IEC 104 server on cfg change
 	NotifyMappings func() // reload mapping cache on mapping change
 	NotifyTSDB     func() // reload TSDB pipeline on cfg change
-	NotifyNATS     func() // reload NATS/workers on cfg change
 	NotifySSFV     func() // reload worker SSFVMappingCache on catalog change
 
 	MQTT      *mqtt.Manager
@@ -82,7 +81,6 @@ func NewRouter(d Deps) http.Handler {
 			r.Route("/topics", (&TopicHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
 			r.Route("/gateway-signals", (&GatewaySignalHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)
 			r.Route("/mqtt-config", (&MQTTConfigHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
-			r.Route("/nats-config", (&NATSConfigHandler{DB: d.DB, Notify: d.NotifyNATS}).Mount)
 			r.Route("/iec104-gateway", (&IEC104GatewayHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
 			r.Route("/iec104-servers", (&IEC104ServersHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
 			r.Route("/mappings", (&MappingHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)

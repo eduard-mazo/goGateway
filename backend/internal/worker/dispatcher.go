@@ -1,13 +1,10 @@
 package worker
 
 import (
-	"encoding/json"
-	"fmt"
 	"log"
 	"time"
 
 	"goGateway/internal/iec104"
-	"goGateway/internal/nats"
 )
 
 // FilteringDispatcher wraps any Dispatcher and applies edge-compute filters
@@ -58,21 +55,6 @@ func (d *FilteringDispatcher) Dispatch(tm TopicMapping, val float64, quality int
 	d.inner.Dispatch(tm, val, quality, ts)
 }
 
-// InternalPoint is the unified message format published to NATS.
-type InternalPoint struct {
-	MappingID  int64     `json:"mapping_id"`
-	ServerID   int64     `json:"server_id"`
-	Topic      string    `json:"topic"`
-	IOA        int       `json:"ioa"`
-	TypeID     string    `json:"type_id"`
-	Value      float64   `json:"value"`
-	Quality    int       `json:"quality"`
-	Timestamp  time.Time `json:"timestamp"`
-	SignalPath string    `json:"signal_path"`
-	Business   string    `json:"business"`
-	Company    string    `json:"company"`
-}
-
 // Dispatcher abstracts the destination for decoded samples.
 type Dispatcher interface {
 	Dispatch(tm TopicMapping, val float64, quality int, ts time.Time)
@@ -108,43 +90,5 @@ func (d *DirectDispatcher) Dispatch(tm TopicMapping, val float64, quality int, t
 		Company:    tm.Company,
 	}) {
 		log.Printf("history buffer full, dropped %s", tm.SignalPath)
-	}
-}
-
-// NatsDispatcher publishes samples to a NATS JetStream topic.
-type NatsDispatcher struct {
-	client     *nats.Client
-	streamName string
-}
-
-func NewNatsDispatcher(client *nats.Client, streamName string) *NatsDispatcher {
-	return &NatsDispatcher{client: client, streamName: streamName}
-}
-
-func (d *NatsDispatcher) Dispatch(tm TopicMapping, val float64, quality int, ts time.Time) {
-	pt := InternalPoint{
-		MappingID:  tm.MappingID,
-		ServerID:   tm.ServerID,
-		Topic:      tm.Topic,
-		IOA:        tm.IOA,
-		TypeID:     tm.IEC104Type,
-		Value:      val,
-		Quality:    quality,
-		Timestamp:  ts,
-		SignalPath: tm.SignalPath,
-		Business:   tm.Business,
-		Company:    tm.Company,
-	}
-
-	data, err := json.Marshal(pt)
-	if err != nil {
-		log.Printf("nats: marshal error: %v", err)
-		return
-	}
-
-	// Subject format: {STREAM}.metrics.{server_id}.{ioa}
-	subject := fmt.Sprintf("%s.metrics.%d.%d", d.streamName, tm.ServerID, tm.IOA)
-	if err := d.client.Publish(subject, data); err != nil {
-		log.Printf("nats: publish error on subject %s: %v", subject, err)
 	}
 }

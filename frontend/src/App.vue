@@ -3,7 +3,7 @@ import { computed, ref, onMounted, watch } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Toaster } from '@/components/ui/sonner'
 import {
-  Radio, Server, Layers, Activity, Users, Database, Zap,
+  Radio, Server, Layers, Activity, Users, Database,
   PanelLeftClose, PanelLeftOpen, Moon, Sun, Menu, X, WifiOff,
 } from 'lucide-vue-next'
 import { useStatus } from '@/composables/useStatus'
@@ -21,7 +21,6 @@ const baseNav = [
   { to: '/signals',       label: 'Señales SSFV',            icon: Layers },
   { to: '/iec104',        label: t.nav.iec104,               icon: Server },
   { to: '/tsdb',          label: 'Pipeline TSDB',            icon: Database },
-  { to: '/nats',          label: 'NATS JetStream',           icon: Zap },
   { to: '/monitor',       label: 'Monitor',                  icon: Activity },
 ]
 

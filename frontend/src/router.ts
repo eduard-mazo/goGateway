@@ -6,7 +6,6 @@ import Iec104Config     from './views/Iec104Config.vue'
 import BrokerMonitorView from './views/BrokerMonitorView.vue'
 import UsersView        from './views/UsersView.vue'
 import TSDBView         from './views/TSDBView.vue'
-import NatsConfig       from './views/NatsConfig.vue'
 
 // LoginView stays lazy: it's only needed before auth and is never part of the
 // authenticated shell, so there's no benefit in bundling it upfront.
@@ -51,7 +50,6 @@ export const router = createRouter({
     // ── Admin / secondary routes ──────────────────────────────────────────────
     { path: '/users', component: UsersView,  meta: { title: 'Gestión de Usuarios' } },
     { path: '/tsdb',  component: TSDBView,   meta: { title: 'Pipeline TSDB' } },
-    { path: '/nats',  component: NatsConfig, meta: { title: 'NATS JetStream' } },
 
     // ── Redirects: keep old URLs alive ────────────────────────────────────────
     { path: '/',               redirect: '/subscriptions' },

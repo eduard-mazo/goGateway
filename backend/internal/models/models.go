@@ -237,15 +237,6 @@ type TSDBConfig struct {
 	Enabled    bool   `db:"enabled" json:"enabled"`
 }
 
-// NATSConfig = settings for the NATS JetStream fan-out buffer. Singleton (id=1).
-type NATSConfig struct {
-	ID         int64  `db:"id" json:"id"`
-	Host       string `db:"host" json:"host"`
-	Port       int    `db:"port" json:"port"`
-	StreamName string `db:"stream_name" json:"stream_name"`
-	Enabled    bool   `db:"enabled" json:"enabled"`
-}
-
 
 // AutodiscoveredEntity is a Sparkplug B node or device seen on the bus that
 // has no matching SSFV catalog entry yet. metric_names is a JSON-encoded array.

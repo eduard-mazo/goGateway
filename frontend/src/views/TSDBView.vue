@@ -80,9 +80,9 @@ async function save() {
     // Restore typed credentials; if we just cleared the DSN the field stays blank.
     cfg.value = { ...updated, ts_dsn: clearDsn.value ? '' : localDsn, vm_password: localPass }
     clearDsn.value = false
-    toast.success(t.nats.saved)
+    toast.success(t.tsdb.saved)
   } catch (e: any) {
-    toast.error(t.nats.saveFailed + (e?.response?.data?.error ?? e?.message ?? e))
+    toast.error(t.tsdb.saveFailed + (e?.response?.data?.error ?? e?.message ?? e))
   } finally {
     saving.value = false
   }

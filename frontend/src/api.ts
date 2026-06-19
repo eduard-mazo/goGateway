@@ -222,14 +222,6 @@ export interface TSDBTestResult {
   message: string
 }
 
-export interface NATSConfig {
-  id: number
-  host: string
-  port: number
-  stream_name: string
-  enabled: boolean
-}
-
 // ─── SSFV (Sistemas Solares Fotovoltaicos) ────────────────────────────────────
 
 export interface SSFVStatus {
