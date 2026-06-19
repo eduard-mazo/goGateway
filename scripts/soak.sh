@@ -107,7 +107,7 @@ start_edge(){
   say "starting Modbus sim + edge producer (group $GROUP)"
   cat >"$WORK/edge.json" <<JSON
 {
-  "mqtt": { "broker": "$MQTT", "clientId": "edge-soak", "qos": 1, "keepalive": 60, "tls": { "enabled": false } },
+  "mqtt": { "broker": "$MQTT", "clientId": "edge-soak", "qos": 1, "keepalive": 60, "publishBatchMs": 200, "tls": { "enabled": false } },
   "sparkplug": { "groupId": "$GROUP", "nodeId": "edge-1", "plantaAlias": "Soak Plant", "birthOnConfigChange": true },
   "outstations": [],
   "modbusDevices": [
