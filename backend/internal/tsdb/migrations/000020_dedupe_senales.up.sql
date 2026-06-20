@@ -87,6 +87,14 @@ BEGIN
     END LOOP;
 END $$;
 
+-- The DO block re-pointed/deleted rows through the DEFERRABLE INITIALLY DEFERRED
+-- senal_id FK (migration 008), so its constraint-check trigger events are still
+-- queued in this transaction. PostgreSQL refuses to ALTER a table that has
+-- pending trigger events (SQLSTATE 55006), and the whole migration file runs in
+-- one implicit transaction. Force the deferred checks to run now, clearing the
+-- queue, so the constraint swap below can proceed.
+SET CONSTRAINTS ALL IMMEDIATE;
+
 -- Replace UNIQUE(codigo_senal, tipovar_id) with codigo_senal alone.
 ALTER TABLE ssfv.tbl_senales DROP CONSTRAINT IF EXISTS uq_senal_codigo_tipvar;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_senal_codigo ON ssfv.tbl_senales (codigo_senal);
