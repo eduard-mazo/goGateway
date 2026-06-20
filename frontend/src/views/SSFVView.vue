@@ -7,7 +7,7 @@ import {
   type SSFVFrontera,
   type SSFVTipoEquipo, type SSFVTipoVariable, type SSFVUnidad,
   type SSFVSenalXTipo,
-  type IEC104Server, type PlantaIEC104Link, type IEC104MirrorResult,
+  type IEC104Server,
 } from '@/api'
 import { Button }  from '@/components/ui/button'
 import { Input }   from '@/components/ui/input'
@@ -34,6 +34,8 @@ import {
 import { useConfirm } from '@/composables/useConfirm'
 import SignalTree from '@/components/SignalTree.vue'
 import HwIdentity from '@/components/HwIdentity.vue'
+import FleetSummaryBar from '@/components/ssfv/FleetSummaryBar.vue'
+import PlantaIec104Link from '@/components/ssfv/PlantaIec104Link.vue'
 
 const { confirm } = useConfirm()
 
@@ -167,67 +169,17 @@ function togglePlanta(id: number) {
   if (plantaOpen.value === id) {
     loadEquiposByPlanta(id)
     loadFronterasByPlanta(id)
-    loadPlantaLink(id)
   }
 }
 
-// ─── IEC-104 link (SSFV plant → 104 server mirror) ─────────────────────────────
-// Plants are linked to one IEC-104 server (operator-chosen); their signals are
-// mirrored as 104 points. SSFV is the principal — deleting the plant/signal
-// removes the mirrors (handled server-side). Plants may share a server.
+// IEC-104 server list, passed to the per-plant <PlantaIec104Link> control which
+// owns the link/mirror lifecycle itself.
 const iec104Servers = ref<IEC104Server[]>([])
-const plantaLinks   = ref<Record<number, PlantaIEC104Link>>({})
-const linkServerSel = ref<Record<number, string>>({}) // per-planta dropdown selection
-const linkBusy      = ref<Record<number, boolean>>({})
-
 async function fetchIec104Servers() {
   try {
     const r = await api.get<IEC104Server[]>('/iec104-servers')
     iec104Servers.value = r.data ?? []
   } catch { /* servers tab handles its own errors */ }
-}
-
-async function loadPlantaLink(pid: number) {
-  try {
-    const r = await api.get<PlantaIEC104Link>(`/ssfv/plantas/${pid}/iec104-link`)
-    plantaLinks.value = { ...plantaLinks.value, [pid]: r.data }
-    if (r.data.linked) linkServerSel.value[pid] = String(r.data.server_id)
-  } catch { /* leave unknown */ }
-}
-
-async function linkPlanta(pid: number) {
-  const sel = Number(linkServerSel.value[pid])
-  if (!sel) { toast.error('Selecciona un servidor IEC-104'); return }
-  linkBusy.value[pid] = true
-  try {
-    const r = await api.post<IEC104MirrorResult>(`/ssfv/plantas/${pid}/iec104-link`, { server_id: sel })
-    const n = r.data.created?.length ?? 0
-    toast.success(`Planta vinculada a IEC-104 — ${n} punto(s) espejados`)
-    await loadPlantaLink(pid)
-  } catch (e: any) {
-    toast.error(e.response?.data?.error ?? 'Error vinculando a IEC-104')
-  } finally {
-    linkBusy.value[pid] = false
-  }
-}
-
-async function unlinkPlanta(pid: number) {
-  const ok = await confirm({
-    title: 'Desvincular de IEC-104',
-    message: 'Se eliminarán los puntos IEC-104 espejados de esta planta. ¿Continuar?',
-    confirmText: 'Desvincular', variant: 'danger',
-  })
-  if (!ok) return
-  linkBusy.value[pid] = true
-  try {
-    await api.delete(`/ssfv/plantas/${pid}/iec104-link`)
-    toast.success('Planta desvinculada — espejo IEC-104 eliminado')
-    await loadPlantaLink(pid)
-  } catch (e: any) {
-    toast.error(e.response?.data?.error ?? 'Error desvinculando')
-  } finally {
-    linkBusy.value[pid] = false
-  }
 }
 
 // Planta dialog
@@ -1610,34 +1562,7 @@ function tipoEquipoIcon(nombre: string) {
     ═══════════════════════════════════════════════════════════════════════ -->
     <div v-if="tab === 'plantas'" class="space-y-4">
       <!-- Resumen de flota -->
-      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <div class="card-soft p-3 space-y-1">
-          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Plantas</div>
-          <div class="font-mono text-lg font-bold leading-none">{{ fleetSummary.activas }}<span class="text-xs font-normal text-muted-foreground"> / {{ fleetSummary.total }} activas</span></div>
-        </div>
-        <div class="card-soft p-3 space-y-1">
-          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Capacidad</div>
-          <div class="font-mono text-lg font-bold leading-none">{{ fleetSummary.kwp.toLocaleString() }}<span class="text-xs font-normal text-muted-foreground"> kWp</span></div>
-        </div>
-        <div class="card-soft p-3 space-y-1">
-          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Equipos</div>
-          <div class="font-mono text-lg font-bold leading-none">{{ fleetSummary.equipos }}</div>
-        </div>
-        <div class="card-soft p-3 space-y-1">
-          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Señales</div>
-          <div class="font-mono text-lg font-bold leading-none">{{ fleetSummary.senales }}</div>
-        </div>
-        <div class="card-soft p-3 space-y-1">
-          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">En línea</div>
-          <div class="font-mono text-lg font-bold leading-none" :class="fleetSummary.live ? 'text-emerald-500' : ''">
-            {{ fleetSummary.live }}<span class="text-xs font-normal text-muted-foreground"> / {{ fleetSummary.total }} &lt;2 min</span>
-          </div>
-        </div>
-        <div class="card-soft p-3 space-y-1" :class="fleetSummary.alarmas ? '!border-red-500/40' : ''">
-          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Alarmas activas</div>
-          <div class="font-mono text-lg font-bold leading-none" :class="fleetSummary.alarmas ? 'text-red-400' : ''">{{ fleetSummary.alarmas }}</div>
-        </div>
-      </div>
+      <FleetSummaryBar :summary="fleetSummary" />
 
       <!-- Toolbar: búsqueda + filtro de estado, pensado para miles de plantas -->
       <div class="flex flex-wrap items-center gap-3">
@@ -1777,54 +1702,13 @@ function tipoEquipoIcon(nombre: string) {
             </div>
           </div>
 
-          <!-- IEC-104 link section: mirror this plant's signals to a 104 server -->
-          <div class="px-4 py-3 border-b border-border/60">
-            <div class="flex items-center gap-2 mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-              <Radio class="h-3.5 w-3.5" /> Salida IEC-104
-              <span
-                v-if="plantaLinks[p.planta_id!]?.linked"
-                class="font-mono font-normal text-[color:var(--epm-citrico)]"
-              >({{ plantaLinks[p.planta_id!]?.mirror_count ?? 0 }} puntos espejados)</span>
-            </div>
-
-            <div class="flex flex-wrap items-center gap-2">
-              <Select v-model="linkServerSel[p.planta_id!]">
-                <SelectTrigger class="h-7 w-56 rounded-sm text-xs">
-                  <SelectValue placeholder="Servidor IEC-104…" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="s in iec104Servers"
-                    :key="s.id"
-                    :value="String(s.id)"
-                  >{{ s.name || ('Servidor ' + s.id) }} · :{{ s.port }} (ASDU {{ s.asdu_addr }})</SelectItem>
-                </SelectContent>
-              </Select>
-
-              <Button
-                variant="outline" size="sm" class="h-7 text-[11px] rounded-sm"
-                :disabled="linkBusy[p.planta_id!]"
-                @click="linkPlanta(p.planta_id!)"
-              >
-                <Loader2 v-if="linkBusy[p.planta_id!]" class="h-3 w-3 mr-1 animate-spin" />
-                <Radio v-else class="h-3 w-3 mr-1" />
-                {{ plantaLinks[p.planta_id!]?.linked ? 'Actualizar espejo' : 'Vincular' }}
-              </Button>
-
-              <Button
-                v-if="plantaLinks[p.planta_id!]?.linked"
-                variant="ghost" size="sm" class="h-7 text-[11px] rounded-sm text-destructive"
-                :disabled="linkBusy[p.planta_id!]"
-                @click="unlinkPlanta(p.planta_id!)"
-              >
-                <X class="h-3 w-3 mr-1" /> Desvincular
-              </Button>
-
-              <span class="text-[10px] text-muted-foreground">
-                Las señales SSFV se reflejan como puntos IEC-104; al borrar la planta o una señal se eliminan.
-              </span>
-            </div>
-          </div>
+          <!-- IEC-104 link: mirror this plant's signals to a 104 server (lazy:
+               mounts/loads only while the plant is expanded) -->
+          <PlantaIec104Link
+            v-if="plantaOpen === p.planta_id"
+            :planta-id="p.planta_id!"
+            :servers="iec104Servers"
+          />
 
           <!-- Equipos section -->
           <div class="px-4 py-3">
