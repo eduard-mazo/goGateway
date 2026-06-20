@@ -368,3 +368,22 @@ export interface User {
   created_at: string
   updated_at: string
 }
+
+// ── SSFV → IEC-104 mirror link ────────────────────────────────────────────────
+// A plant's association to one IEC-104 server. When linked, the plant's SSFV
+// signals are mirrored as IEC-104 points on that server; deleting the plant (or
+// the link) removes the mirrors. SSFV is the principal, IEC-104 the dependent.
+export interface PlantaIEC104Link {
+  planta_id: number
+  linked: boolean
+  server_id: number
+  mirror_count: number
+}
+
+// Result of linking a plant (or otherwise mirroring signals): the mappings
+// created and any signals skipped (already mirrored / unmappable).
+export interface IEC104MirrorResult {
+  server_id: number
+  created: SignalMapping[]
+  skipped: string[] | null
+}
