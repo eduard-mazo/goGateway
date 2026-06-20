@@ -79,8 +79,12 @@ func assignMapping(db *sqlx.DB, s mappingSpec) (models.SignalMapping, error) {
 	if scale == 0 {
 		scale = 1.0
 	}
+	// json_key is supplied explicitly ('' — these are Sparkplug, matched by
+	// metric_name, not JSON). The column is NOT NULL and, on DBs migrated through
+	// the multi-server table rebuild, has NO default, so omitting it fails with
+	// "NOT NULL constraint failed: signal_mappings.json_key".
 	res, err := db.Exec(
-		`INSERT INTO signal_mappings(server_id,topic_id,metric_name,iec104_type,ioa,scale,unit,enabled,ssfv_planta_id,ssfv_equipo_id,ssfv_equisenal_id) VALUES(?,?,?,?,?,?,?,1,?,?,?)`,
+		`INSERT INTO signal_mappings(server_id,topic_id,json_key,metric_name,iec104_type,ioa,scale,unit,enabled,ssfv_planta_id,ssfv_equipo_id,ssfv_equisenal_id) VALUES(?,?,'',?,?,?,?,?,1,?,?,?)`,
 		s.ServerID, s.TopicID, s.MetricName, s.IEC104Type, ioa, scale, s.Unit,
 		s.SSFVPlantaID, s.SSFVEquipoID, s.SSFVEquisenalID)
 	if err != nil {
