@@ -51,24 +51,38 @@ func nextFreeIOA(db *sqlx.DB, serverID int64) (int, error) {
 	return maxIOA + 1, nil
 }
 
-// assignMapping writes a minimal IEC-104 mapping (only the wire-relevant columns;
-// everything else keeps its DB default) and returns the stored row. When ioa<=0
-// the next free IOA on the server is assigned; scale<=0 defaults to 1.0. Shared
-// by the HTTP assign endpoint and the SSFV→IEC-104 bridge.
-func assignMapping(db *sqlx.DB, serverID, topicID int64, metricName, iecType string, ioa int, scale float64, unit string) (models.SignalMapping, error) {
+// mappingSpec is the input to assignMapping: only the wire-relevant fields plus
+// the optional SSFV linkage. Everything else keeps its DB default.
+type mappingSpec struct {
+	ServerID, TopicID            int64
+	MetricName, IEC104Type, Unit string
+	IOA                          int     // <=0 auto-assigns the next free IOA on the server
+	Scale                        float64 // <=0 defaults to 1.0
+	// SSFV linkage (0 = standalone mapping); set by the SSFV mirror path so the
+	// mapping is cascade-deleted when the SSFV source goes away.
+	SSFVPlantaID, SSFVEquipoID, SSFVEquisenalID int64
+}
+
+// assignMapping writes a minimal IEC-104 mapping (only the wire-relevant columns
+// + SSFV linkage; everything else keeps its DB default) and returns the stored
+// row. Shared by the HTTP assign endpoint and the SSFV→IEC-104 mirror.
+func assignMapping(db *sqlx.DB, s mappingSpec) (models.SignalMapping, error) {
+	ioa := s.IOA
 	if ioa <= 0 {
-		n, err := nextFreeIOA(db, serverID)
+		n, err := nextFreeIOA(db, s.ServerID)
 		if err != nil {
 			return models.SignalMapping{}, err
 		}
 		ioa = n
 	}
+	scale := s.Scale
 	if scale == 0 {
 		scale = 1.0
 	}
 	res, err := db.Exec(
-		`INSERT INTO signal_mappings(server_id,topic_id,metric_name,iec104_type,ioa,scale,unit,enabled) VALUES(?,?,?,?,?,?,?,1)`,
-		serverID, topicID, metricName, iecType, ioa, scale, unit)
+		`INSERT INTO signal_mappings(server_id,topic_id,metric_name,iec104_type,ioa,scale,unit,enabled,ssfv_planta_id,ssfv_equipo_id,ssfv_equisenal_id) VALUES(?,?,?,?,?,?,?,1,?,?,?)`,
+		s.ServerID, s.TopicID, s.MetricName, s.IEC104Type, ioa, scale, s.Unit,
+		s.SSFVPlantaID, s.SSFVEquipoID, s.SSFVEquisenalID)
 	if err != nil {
 		return models.SignalMapping{}, err
 	}
@@ -127,7 +141,10 @@ func (h *MappingHandler) assign(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "unknown topic")
 		return
 	}
-	m, err := assignMapping(h.DB, serverID, req.TopicID, req.MetricName, iecType, req.IOA, req.Scale, req.Unit)
+	m, err := assignMapping(h.DB, mappingSpec{
+		ServerID: serverID, TopicID: req.TopicID, MetricName: req.MetricName,
+		IEC104Type: iecType, IOA: req.IOA, Scale: req.Scale, Unit: req.Unit,
+	})
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -142,7 +159,7 @@ func (h *MappingHandler) notify() {
 	}
 }
 
-const mapCols = `id,server_id,topic_id,signal_id,device_name,variable_type,characteristic,json_key,quality_key,metric_name,iec104_type,ioa,unit,scale,enabled,business,company,deadband_abs,deadband_pct`
+const mapCols = `id,server_id,topic_id,signal_id,device_name,variable_type,characteristic,json_key,quality_key,metric_name,iec104_type,ioa,unit,scale,enabled,business,company,deadband_abs,deadband_pct,ssfv_planta_id,ssfv_equipo_id,ssfv_equisenal_id`
 
 func (h *MappingHandler) list(w http.ResponseWriter, r *http.Request) {
 	var out []models.SignalMapping

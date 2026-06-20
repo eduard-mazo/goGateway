@@ -75,10 +75,13 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 	r.Delete("/equipos/{id}", h.deleteEquipo)
 	r.Get("/equipos/{id}/senales", h.listSenalesByEquipo)
 
-	// SSFV → IEC-104 bridge: expose catalog signals on an IEC-104 server,
-	// deriving type + auto-assigning IOA. Per equipo (bulk) or per asignación.
-	r.Post("/equipos/{id}/expose-iec104", h.exposeEquipoIEC104)
-	r.Post("/asignaciones/{id}/expose-iec104", h.exposeAsignacionIEC104)
+	// SSFV → IEC-104 mirror: link a plant to an IEC-104 server (operator-chosen),
+	// which backfills mirrors for its signals; new signals then auto-mirror, and
+	// deleting the link removes them. Per-signal/equipo/plant deletes cascade
+	// (see deleteAsignacion/deleteEquipo/deletePlanta).
+	r.Get("/plantas/{id}/iec104-link", h.getPlantaIEC104Link)
+	r.Post("/plantas/{id}/iec104-link", h.linkPlantaIEC104)
+	r.Delete("/plantas/{id}/iec104-link", h.unlinkPlantaIEC104)
 
 	// Señales (catálogo)
 	r.Get("/senales", h.listSenales)
@@ -412,6 +415,13 @@ func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
 			log.Printf("ssfv: deletePlanta %d: suppress autodiscovery for group %q: %v", id, brokerBase, err)
 		}
 	}
+
+	// Cascade: SSFV is the principal, IEC-104 a dependent mirror — remove this
+	// plant's mirrors and its 104 link so no orphaned points remain on the SCADA.
+	if _, err := h.db.Exec(`DELETE FROM ssfv_iec104_link WHERE planta_id=?`, id); err != nil {
+		log.Printf("ssfv: deletePlanta %d: remove iec104 link: %v", id, err)
+	}
+	h.cascadeDeleteMirrors("ssfv_planta_id", int64(id))
 
 	h.triggerReload()
 	w.WriteHeader(http.StatusNoContent)
@@ -751,6 +761,9 @@ func (h *SSFVHandler) deleteEquipo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cascade: remove this equipo's IEC-104 mirrors (SSFV is the principal).
+	h.cascadeDeleteMirrors("ssfv_equipo_id", int64(id))
+
 	h.triggerReload()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1037,6 +1050,8 @@ func (h *SSFVHandler) createAsignacion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.triggerReload()
+	// Auto-mirror onto IEC-104 when this signal's plant is linked (no-op otherwise).
+	h.autoMirrorEquisenal(ctx, int64(id))
 	jsonResp(w, http.StatusCreated, map[string]any{"equisenal_id": id})
 }
 
@@ -1094,6 +1109,8 @@ func (h *SSFVHandler) deleteAsignacion(w http.ResponseWriter, r *http.Request) {
 		`DELETE FROM ssfv.tbl_senales_x_equipo WHERE equisenal_id=$1`, id)
 	switch {
 	case err == nil:
+		// Cascade: drop this assignment's IEC-104 mirror (SSFV is the principal).
+		h.cascadeDeleteMirrors("ssfv_equisenal_id", int64(id))
 		h.triggerReload()
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1107,6 +1124,8 @@ func (h *SSFVHandler) deleteAsignacion(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Deactivated → stops ingesting, so drop the IEC-104 mirror too.
+	h.cascadeDeleteMirrors("ssfv_equisenal_id", int64(id))
 	h.triggerReload()
 	jsonResp(w, http.StatusOK, map[string]any{"deactivated": true})
 }

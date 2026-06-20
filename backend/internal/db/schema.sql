@@ -135,10 +135,29 @@ CREATE TABLE IF NOT EXISTS signal_mappings (
     -- the two wins.  Zero means disabled for that mode.
     deadband_abs   REAL NOT NULL DEFAULT 0.0,
     deadband_pct   REAL NOT NULL DEFAULT 0.0,
+    -- SSFV linkage: when this mapping mirrors an SSFV catalog signal, these
+    -- reference the source planta/equipo/asignación so deleting the SSFV side
+    -- cascade-deletes the mirror. 0 = a standalone (non-SSFV) mapping.
+    ssfv_planta_id    INTEGER NOT NULL DEFAULT 0,
+    ssfv_equipo_id    INTEGER NOT NULL DEFAULT 0,
+    ssfv_equisenal_id INTEGER NOT NULL DEFAULT 0,
     UNIQUE (server_id, ioa)
 );
 CREATE INDEX IF NOT EXISTS idx_sigmap_topic ON signal_mappings(topic_id);
 CREATE INDEX IF NOT EXISTS idx_sigmap_server ON signal_mappings(server_id);
+CREATE INDEX IF NOT EXISTS idx_sigmap_ssfv_planta ON signal_mappings(ssfv_planta_id);
+CREATE INDEX IF NOT EXISTS idx_sigmap_ssfv_equipo ON signal_mappings(ssfv_equipo_id);
+CREATE INDEX IF NOT EXISTS idx_sigmap_ssfv_equisenal ON signal_mappings(ssfv_equisenal_id);
+
+-- ssfv_iec104_link: a plant's association to one IEC-104 server. When present,
+-- the plant's SSFV signals are auto-mirrored as IEC-104 points on that server
+-- (plants may share a server; IOAs stay unique per server). Removing a plant or
+-- its link removes the mirrors.
+CREATE TABLE IF NOT EXISTS ssfv_iec104_link (
+    planta_id  INTEGER PRIMARY KEY,
+    server_id  INTEGER NOT NULL REFERENCES iec104_servers(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 
 CREATE TABLE IF NOT EXISTS tsdb_config (

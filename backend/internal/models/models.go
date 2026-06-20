@@ -219,6 +219,11 @@ type SignalMapping struct {
 	Company        string   `db:"company"        json:"company"`
 	DeadbandAbs    float64  `db:"deadband_abs"   json:"deadband_abs"`
 	DeadbandPct    float64  `db:"deadband_pct"   json:"deadband_pct"`
+	// SSFV linkage (0 = standalone mapping). Set when this mapping mirrors an
+	// SSFV catalog signal so deleting the SSFV planta/equipo/asignación cascades.
+	SSFVPlantaID    int64 `db:"ssfv_planta_id"    json:"ssfv_planta_id"`
+	SSFVEquipoID    int64 `db:"ssfv_equipo_id"    json:"ssfv_equipo_id"`
+	SSFVEquisenalID int64 `db:"ssfv_equisenal_id" json:"ssfv_equisenal_id"`
 }
 
 // TSDBConfig = time-series pipeline settings. Singleton (id=1).

@@ -194,6 +194,9 @@ func migrate(db *sqlx.DB) error {
 		for _, col := range []struct{ name, def string }{
 			{"deadband_abs", "REAL NOT NULL DEFAULT 0.0"},
 			{"deadband_pct", "REAL NOT NULL DEFAULT 0.0"},
+			{"ssfv_planta_id", "INTEGER NOT NULL DEFAULT 0"},
+			{"ssfv_equipo_id", "INTEGER NOT NULL DEFAULT 0"},
+			{"ssfv_equisenal_id", "INTEGER NOT NULL DEFAULT 0"},
 		} {
 			var has int
 			if err := db.Get(&has, `SELECT COUNT(*) FROM pragma_table_info('signal_mappings') WHERE name=?`, col.name); err != nil {
