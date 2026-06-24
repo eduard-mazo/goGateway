@@ -22,15 +22,20 @@
 #   scripts/soak.sh up              # build + bring up + approve, no soak loop
 #   scripts/soak.sh down            # tear everything down
 #
+# The edge also serves a DNP3 outstation that go104 polls as a master — an
+# edge-direct path alongside the gateway-mediated IEC-104 one. It survives the
+# plant delete (independent of SSFV), proving the DNP3 outstation feature e2e.
+#
 # Env overrides (defaults in parens):
 #   GOGW_DIR (repo root)   EDGE_DIR (../goMqttModbus)   WORK (/tmp/e2e-soak)
-#   GO104_DIR (../go104)
+#   GO104_DIR (../go104)   GODNP3_DIR (../goDnp3)
 #   TSDB_PORT (5434)  GW_HTTP (:8091)  EDGE_HTTP (8090)  MODBUS_PORT (1502)
-#   GO104_HTTP (8092)  IEC_PORT (2404)
+#   GO104_HTTP (8092)  IEC_PORT (2404)  DNP3_OSTN_PORT (20100)
 #   MQTT (tcp://localhost:1883)  GROUP (EPM_SOAK)  DELETE_AT (8)
 #
-# Requires: docker, go, sqlite3, python3, curl, and an MQTT broker on :1883
-# (reused if already up — e.g. the shared mosquitto — else one is started).
+# Requires: docker, go, sqlite3, python3, curl, an MQTT broker on :1883 (reused
+# if already up — else one is started), plus g++ and the goDnp3 sibling checkout
+# for the DNP3 builds (opendnp3 is vendored on first run via `make opendnp3-vendor`).
 # =============================================================================
 set -euo pipefail
 
@@ -48,6 +53,11 @@ IEC_PORT="${IEC_PORT:-2404}"
 MQTT="${MQTT:-tcp://localhost:1883}"
 GROUP="${GROUP:-EPM_SOAK}"
 DELETE_AT="${DELETE_AT:-8}"
+# DNP3: the edge serves a DNP3 outstation that go104 polls as a master — the
+# edge-direct path alongside the gateway-mediated IEC-104 one.
+GODNP3_DIR="${GODNP3_DIR:-$(cd "$GOGW_DIR/../goDnp3" 2>/dev/null && pwd || true)}"
+DNP3_TRIPLE="${DNP3_TRIPLE:-x86_64-unknown-linux-gnu}"
+DNP3_OSTN_PORT="${DNP3_OSTN_PORT:-20100}"
 
 API="http://localhost${GW_HTTP}/api"
 DSN="postgres://postgres:pass@localhost:${TSDB_PORT}/gwtest"
@@ -68,14 +78,26 @@ down(){
 # ── build ───────────────────────────────────────────────────────────────────
 build(){
   [ -n "$EDGE_DIR" ] && [ -d "$EDGE_DIR" ] || die "goMqttModbus not found (set EDGE_DIR)"
+  [ -n "$GO104_DIR" ] && [ -d "$GO104_DIR" ] || die "go104 not found (set GO104_DIR)"
+  [ -n "$GODNP3_DIR" ] && [ -d "$GODNP3_DIR" ] || die "goDnp3 not found (set GODNP3_DIR)"
+  # Edge serves a DNP3 outstation and go104 polls it, so both link the real
+  # opendnp3 (-tags dnp3_ffi) from the shared goDnp3 module. Vendor it if missing.
+  local d3="$GODNP3_DIR/third_party/opendnp3/$DNP3_TRIPLE"
+  if [ ! -f "$d3/lib/libopendnp3.a" ]; then
+    say "vendoring opendnp3 (goDnp3)"
+    ( cd "$GODNP3_DIR" && make opendnp3-vendor )
+  fi
+  local FFI=(CGO_ENABLED=1
+    "CGO_CXXFLAGS=-std=c++17 -I$d3/include"
+    "CGO_LDFLAGS=-L$d3/lib -lopendnp3 -lssl -lcrypto -lstdc++ -lpthread -lm -ldl")
   mkdir -p "$WORK/data"
   say "building gateway (backend)"
   ( cd "$GOGW_DIR/backend" && go build -o "$WORK/gogw" ./cmd/gateway )
-  say "building edge + modbus sim"
-  ( cd "$EDGE_DIR" && go build -o "$WORK/edge" . && go build -o "$WORK/modbusslave" ./scripts/sim/modbusslave )
-  [ -n "$GO104_DIR" ] && [ -d "$GO104_DIR" ] || die "go104 not found (set GO104_DIR)"
-  say "building go104 (IEC-104 master)"
-  ( cd "$GO104_DIR" && go build -o "$WORK/go104" ./cmd/server )
+  say "building edge (DNP3 outstation) + modbus sim"
+  ( cd "$EDGE_DIR" && env "${FFI[@]}" go build -tags dnp3_ffi -o "$WORK/edge" . \
+      && go build -o "$WORK/modbusslave" ./scripts/sim/modbusslave )
+  say "building go104 (IEC-104 + DNP3 master)"
+  ( cd "$GO104_DIR" && env "${FFI[@]}" go build -tags dnp3_ffi -o "$WORK/go104" ./cmd/server )
 }
 
 # ── infra: TSDB (+ broker if none on :1883) ──────────────────────────────────
@@ -146,11 +168,15 @@ start_edge(){
       "scale": 1, "engineeringUnit": "m", "deadband": 0.05, "enabled": true },
     { "id": "d1", "metricName": "Medidas/Energy_kWh", "deviceId": "meter-01", "protocol": "modbus",
       "sourceId": "plc-sim", "function": "holding_register", "address": 0, "dataType": "float32",
-      "byteOrder": "ABCD", "scale": 1, "engineeringUnit": "kWh", "deadband": 0.05, "enabled": true },
+      "byteOrder": "ABCD", "scale": 1, "engineeringUnit": "kWh", "deadband": 0.05,
+      "serveDnp3": true, "outType": "analog", "outIndex": 0, "enabled": true },
     { "id": "d2", "metricName": "Medidas/Power_kW", "deviceId": "meter-01", "protocol": "modbus",
       "sourceId": "plc-sim", "function": "holding_register", "address": 2, "dataType": "uint16",
-      "scale": 1, "engineeringUnit": "kW", "deadband": 0.05, "enabled": true }
+      "scale": 1, "engineeringUnit": "kW", "deadband": 0.05,
+      "serveDnp3": true, "outType": "analog", "outIndex": 1, "enabled": true }
   ],
+  "dnp3Server": { "enabled": true, "bindHost": "127.0.0.1", "port": $DNP3_OSTN_PORT,
+    "localAddress": 1024, "masterAddress": 1, "eventBufferSize": 100 },
   "system": { "enabled": true, "intervalMs": 5000, "metricPrefix": "System/", "mounts": ["/"],
     "interfaces": ["docker0"],
     "metrics": { "cpu": true, "load": false, "memory": true, "swap": false, "disk": true,
@@ -189,11 +215,19 @@ PY
     sqlite3 "$WORK/go104.db" "INSERT INTO signals(line_id,name,ioa,type_id,signal_type,scale) SELECT id,'$name',$ioa,$typeid,'$kind',1.0 FROM lines WHERE name='gw-soak';"
   done
   echo "   go104 signals seeded: $(sqlite3 "$WORK/go104.db" 'SELECT count(*) FROM signals;')"
+  # DNP3 line: go104 polls the edge's DNP3 outstation directly (edge-direct path,
+  # independent of the SSFV plant). Two analog points mirror Energy#0 / Power#1.
+  sqlite3 "$WORK/go104.db" "INSERT INTO lines(name,host,port,protocol,dnp3_outstation_addr,dnp3_master_addr,gi_interval_s,enabled) VALUES('edge-dnp3','127.0.0.1',$DNP3_OSTN_PORT,'dnp3',1024,1,30,1);"
+  sqlite3 "$WORK/go104.db" "INSERT INTO signals(line_id,name,ioa,type_id,signal_type,point_type,scale) SELECT id,'Energy_kWh',0,0,'analog','analog',1.0 FROM lines WHERE name='edge-dnp3';"
+  sqlite3 "$WORK/go104.db" "INSERT INTO signals(line_id,name,ioa,type_id,signal_type,point_type,scale) SELECT id,'Power_kW',1,0,'analog','analog',1.0 FROM lines WHERE name='edge-dnp3';"
+  echo "   go104 DNP3 line seeded → 127.0.0.1:$DNP3_OSTN_PORT (outstation 1024)"
   setsid env DB_PATH="$WORK/go104.db" HTTP_PORT="$GO104_HTTP" "$WORK/go104" >"$WORK/go104.log" 2>&1 </dev/null & echo $! >"$WORK/.go104.pid"
   sleep 5
-  grep -aq "GI complete" "$WORK/go104.log" && echo "   go104 line ACTIVE (GI complete)" \
+  grep -aq "GI complete" "$WORK/go104.log" && echo "   go104 IEC-104 line ACTIVE (GI complete)" \
     || echo "   WARNING: go104 GI not completed yet (see $WORK/go104.log)"
   grep -aq "TCP accept" "$WORK/gw.log" && echo "   gateway accepted go104 connection" || true
+  grep -aq '\[DNP3\].*ACTIVE' "$WORK/go104.log" && echo "   go104 DNP3 line ACTIVE (polling edge outstation)" \
+    || echo "   WARNING: go104 DNP3 line not active yet (see $WORK/go104.log)"
 }
 
 # ── approve (create planta inline; bind the two discovered device signals) ────
@@ -248,7 +282,7 @@ soak(){
   local samples=$(( mins * 2 ))  # 30s cadence
   local csv="$WORK/soak.csv"
   say "soak: ${mins} min, sample/30s, delete planta $PID at sample $DELETE_AT"
-  echo "sample,elapsed_s,valores,delta,plantas_visible,p_visible,p_estado,active_bindings,pending,gw_maps,g104_pts,g104_val" >"$csv"
+  echo "sample,elapsed_s,valores,delta,plantas_visible,p_visible,p_estado,active_bindings,pending,gw_maps,g104_pts,g104_val,dnp3_pts,dnp3_val" >"$csv"
   local prev=0 start; start=$(date +%s)
   for i in $(seq 1 "$samples"); do
     local now el; now=$(date +%s); el=$((now-start))
@@ -256,7 +290,7 @@ soak(){
       local code; code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/ssfv/plantas/$PID")
       echo "   >>> T+${el}s sample $i: DELETE /ssfv/plantas/$PID -> HTTP $code"
     fi
-    local val delta pv pvis pest ab pend gwm g104n g104v
+    local val delta pv pvis pest ab pend gwm g104n g104v dnp3n dnp3v
     val=$(TS "SELECT count(*) FROM ssfv.tbl_valores;"); val=${val:-0}; delta=$((val-prev)); prev=$val
     pv=$(curl -s "$API/ssfv/plantas" | python3 -c "import sys,json;print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
     pvis=$(curl -s "$API/ssfv/plantas" | python3 -c "import sys,json;print(int(any(p['planta_id']==$PID for p in json.load(sys.stdin))))" 2>/dev/null || echo "?")
@@ -266,11 +300,15 @@ soak(){
     # Cascade proof: IEC-104 mirrors in the gateway for this plant. After the plant
     # delete this MUST drop to 0 (SSFV is principal; 104 is a dependent mirror).
     gwm=$(sqlite3 "$WORK/gw.db" "SELECT count(*) FROM signal_mappings WHERE ssfv_planta_id=$PID;" 2>/dev/null); gwm=${gwm:-0}
-    # Destination: datapoints go104 holds + a sample value (lowest IOA). go104 keeps
-    # its rows but they STOP updating once the mirrors are cascade-deleted.
-    g104n=$(sqlite3 "$WORK/go104.db" "SELECT count(*) FROM datapoints;" 2>/dev/null); g104n=${g104n:-0}
-    g104v=$(sqlite3 "$WORK/go104.db" "SELECT printf('%.2f',value) FROM datapoints ORDER BY ioa LIMIT 1;" 2>/dev/null); g104v=${g104v:-NA}
-    echo "$i,$el,$val,$delta,$pv,$pvis,$pest,$ab,$pend,$gwm,$g104n,$g104v" | tee -a "$csv"
+    # IEC-104 path (gateway-mediated): scope to the gw-soak line so the DNP3 line's
+    # IOA 0/1 don't collide. These STOP updating after the plant delete (cascade).
+    g104n=$(sqlite3 "$WORK/go104.db" "SELECT count(*) FROM datapoints WHERE line_id=(SELECT id FROM lines WHERE name='gw-soak');" 2>/dev/null); g104n=${g104n:-0}
+    g104v=$(sqlite3 "$WORK/go104.db" "SELECT printf('%.2f',value) FROM datapoints WHERE line_id=(SELECT id FROM lines WHERE name='gw-soak') ORDER BY ioa LIMIT 1;" 2>/dev/null); g104v=${g104v:-NA}
+    # DNP3 path (edge-direct): go104 polls the edge outstation; independent of the
+    # SSFV plant, so it KEEPS updating after the plant delete.
+    dnp3n=$(sqlite3 "$WORK/go104.db" "SELECT count(*) FROM datapoints WHERE line_id=(SELECT id FROM lines WHERE name='edge-dnp3');" 2>/dev/null); dnp3n=${dnp3n:-0}
+    dnp3v=$(sqlite3 "$WORK/go104.db" "SELECT printf('%.2f',value) FROM datapoints WHERE line_id=(SELECT id FROM lines WHERE name='edge-dnp3') ORDER BY ioa LIMIT 1;" 2>/dev/null); dnp3v=${dnp3v:-NA}
+    echo "$i,$el,$val,$delta,$pv,$pvis,$pest,$ab,$pend,$gwm,$g104n,$g104v,$dnp3n,$dnp3v" | tee -a "$csv"
     [ "$i" -lt "$samples" ] && sleep 30
   done
   say "soak done — CSV at $csv"
@@ -278,6 +316,9 @@ soak(){
   echo "          gw_maps drops 2->0 at the delete (mirror cascade), and g104_val"
   echo "          stops changing afterward — SSFV is principal, IEC-104 a dependent"
   echo "          mirror that is removed with its plant."
+  echo "          DNP3 path is edge-direct: dnp3_pts>=2 and dnp3_val keeps changing"
+  echo "          even AFTER the plant delete (the edge outstation is independent"
+  echo "          of SSFV) — proving the new DNP3 outstation served go104 e2e."
 }
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
