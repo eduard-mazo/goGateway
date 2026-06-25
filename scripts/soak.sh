@@ -26,6 +26,11 @@
 # edge-direct path alongside the gateway-mediated IEC-104 one. It survives the
 # plant delete (independent of SSFV), proving the DNP3 outstation feature e2e.
 #
+# Before the soak loop it also proves the Phase 8 control passthrough (SCADA →
+# field write-back): go104 operates an analog-output control on the edge's DNP3
+# outstation, the edge writes it through to a Modbus register, reads it back, and
+# re-serves it so go104 sees the value it commanded — a full bidirectional loop.
+#
 # Env overrides (defaults in parens):
 #   GOGW_DIR (repo root)   EDGE_DIR (../goMqttModbus)   WORK (/tmp/e2e-soak)
 #   GO104_DIR (../go104)   GODNP3_DIR (../goDnp3)
@@ -173,7 +178,16 @@ start_edge(){
     { "id": "d2", "metricName": "Medidas/Power_kW", "deviceId": "meter-01", "protocol": "modbus",
       "sourceId": "plc-sim", "function": "holding_register", "address": 2, "dataType": "uint16",
       "scale": 1, "engineeringUnit": "kW", "deadband": 0.05,
-      "serveDnp3": true, "outType": "analog", "outIndex": 1, "enabled": true }
+      "serveDnp3": true, "outType": "analog", "outIndex": 1, "enabled": true },
+    { "id": "rb", "metricName": "Control/setpoint_rb", "protocol": "modbus", "sourceId": "plc-sim",
+      "function": "holding_register", "address": 10, "dataType": "uint16", "scale": 1,
+      "engineeringUnit": "", "deadband": 0,
+      "serveDnp3": true, "outType": "analog", "outIndex": 2, "enabled": true }
+  ],
+  "controlMappings": [
+    { "id": "c1", "label": "Setpoint", "outType": "analog", "outIndex": 1,
+      "protocol": "modbus", "sourceId": "plc-sim", "function": "holding_register",
+      "address": 10, "scale": 1, "offset": 0, "enabled": true }
   ],
   "dnp3Server": { "enabled": true, "bindHost": "127.0.0.1", "port": $DNP3_OSTN_PORT,
     "localAddress": 1024, "masterAddress": 1, "eventBufferSize": 100 },
@@ -220,6 +234,9 @@ PY
   sqlite3 "$WORK/go104.db" "INSERT INTO lines(name,host,port,protocol,dnp3_outstation_addr,dnp3_master_addr,gi_interval_s,enabled) VALUES('edge-dnp3','127.0.0.1',$DNP3_OSTN_PORT,'dnp3',1024,1,30,1);"
   sqlite3 "$WORK/go104.db" "INSERT INTO signals(line_id,name,ioa,type_id,signal_type,point_type,scale) SELECT id,'Energy_kWh',0,0,'analog','analog',1.0 FROM lines WHERE name='edge-dnp3';"
   sqlite3 "$WORK/go104.db" "INSERT INTO signals(line_id,name,ioa,type_id,signal_type,point_type,scale) SELECT id,'Power_kW',1,0,'analog','analog',1.0 FROM lines WHERE name='edge-dnp3';"
+  # Readback point for the control round-trip: analog #2 mirrors edge holding[10],
+  # the register the SCADA→field setpoint control writes (see control_roundtrip).
+  sqlite3 "$WORK/go104.db" "INSERT INTO signals(line_id,name,ioa,type_id,signal_type,point_type,scale) SELECT id,'setpoint_rb',2,0,'analog','analog',1.0 FROM lines WHERE name='edge-dnp3';"
   echo "   go104 DNP3 line seeded → 127.0.0.1:$DNP3_OSTN_PORT (outstation 1024)"
   setsid env DB_PATH="$WORK/go104.db" HTTP_PORT="$GO104_HTTP" "$WORK/go104" >"$WORK/go104.log" 2>&1 </dev/null & echo $! >"$WORK/.go104.pid"
   sleep 5
@@ -228,6 +245,33 @@ PY
   grep -aq "TCP accept" "$WORK/gw.log" && echo "   gateway accepted go104 connection" || true
   grep -aq '\[DNP3\].*ACTIVE' "$WORK/go104.log" && echo "   go104 DNP3 line ACTIVE (polling edge outstation)" \
     || echo "   WARNING: go104 DNP3 line not active yet (see $WORK/go104.log)"
+}
+
+# ── control passthrough round-trip (SCADA → field write-back) ─────────────────
+# Proves Phase 8: go104 (SCADA master) operates an analog-output control on the
+# edge's DNP3 outstation; the edge's control mapping turns it into a Modbus
+# WriteSingleRegister to plc-sim holding[10]; the edge reads that register back
+# and re-serves it as DNP3 analog #2; go104 polls it and converges to the value
+# it wrote. One loop covers the DNP3-inbound control leg AND the Modbus-outbound
+# field-write leg of the three-protocol passthrough.
+SETPOINT="${SETPOINT:-4321}"
+control_roundtrip(){
+  say "control round-trip: go104 → edge DNP3 outstation → Modbus holding[10] → read back → go104 (setpoint $SETPOINT)"
+  local lid code got
+  lid=$(sqlite3 "$WORK/go104.db" "SELECT id FROM lines WHERE name='edge-dnp3';")
+  [ -n "$lid" ] || die "edge-dnp3 line not found in go104 db"
+  # C_SE_NC_1 (50) = analog setpoint; ioa 1 = the gateway's analog-output index 1.
+  code=$(curl -s -o "$WORK/cmd.json" -w "%{http_code}" -X POST "http://localhost:${GO104_HTTP}/api/commands" \
+    -H 'Content-Type: application/json' -d "{\"line_id\":$lid,\"ioa\":1,\"type_id\":50,\"value\":$SETPOINT}")
+  [ "$code" = "200" ] || { cat "$WORK/cmd.json" 2>/dev/null; die "go104 rejected the control (HTTP $code)"; }
+  echo "   command queued; waiting for the value to round-trip back (≤80s, GI every 30s)…"
+  for _ in $(seq 1 40); do
+    got=$(sqlite3 "$WORK/go104.db" "SELECT printf('%.0f',value) FROM datapoints WHERE line_id=$lid AND ioa=2;" 2>/dev/null || true)
+    [ "$got" = "$SETPOINT" ] && break
+    sleep 2
+  done
+  [ "$got" = "$SETPOINT" ] || die "control round-trip FAILED: readback=${got:-NA} want=$SETPOINT (see $WORK/edge.log / $WORK/go104.log)"
+  say "control round-trip OK — SCADA control reached the field and the written value came back"
 }
 
 # ── approve (create planta inline; bind the two discovered device signals) ────
@@ -324,8 +368,8 @@ soak(){
 # ── entrypoint ────────────────────────────────────────────────────────────────
 case "${1:-run}" in
   down) down ;;
-  up)   down; build; infra; start_gw; start_edge; approve; link_iec104; start_go104;
+  up)   down; build; infra; start_gw; start_edge; approve; link_iec104; start_go104; control_roundtrip;
         say "stack up. API $API · go104 :$GO104_HTTP · CSV target $WORK/soak.csv · 'scripts/soak.sh down' to clean" ;;
-  run)  down; build; infra; start_gw; start_edge; approve; link_iec104; start_go104; soak "${2:-10}" ;;
+  run)  down; build; infra; start_gw; start_edge; approve; link_iec104; start_go104; control_roundtrip; soak "${2:-10}" ;;
   *)    die "usage: $0 {run [MINUTES]|up|down}" ;;
 esac
