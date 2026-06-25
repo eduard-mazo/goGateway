@@ -1,0 +1,12 @@
+{
+  "_comment": "Decoded DBIRTH for a child device. Topic: spBv1.0/plant-floor/DBIRTH/dnp3-gw/meter-01. Published once after NBIRTH for each device (a SignalMapping whose deviceId is set). Declares that device's metrics with name+alias+datatype. Aliases share the node-session counter.",
+  "topic": "spBv1.0/plant-floor/DBIRTH/dnp3-gw/meter-01",
+  "timestamp": 1733220001000,
+  "seq": 1,
+  "device": "meter-01",
+  "metrics": [
+    { "name": "Energy_kWh",  "alias": 20, "datatype": 10, "value": 0, "_source": "modbus holding_register, scaled (deviceId=meter-01)" },
+    { "name": "Current_A",   "alias": 21, "datatype": 10, "value": 0, "_source": "modbus input_register, scaled" },
+    { "name": "Relay1",      "alias": 22, "datatype": 11, "value": false, "_source": "modbus coil" }
+  ]
+}

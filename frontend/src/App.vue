@@ -3,29 +3,34 @@ import { computed, ref, onMounted, watch } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Toaster } from '@/components/ui/sonner'
 import {
-  Gauge, Radio, Server, Table2, History as HistoryIcon, Cpu,
-  Database, Sun as SunIcon, Activity,
+  Radio, Server, Layers, Activity, Users, Database,
   PanelLeftClose, PanelLeftOpen, Moon, Sun, Menu, X, WifiOff,
 } from 'lucide-vue-next'
 import { useStatus } from '@/composables/useStatus'
+import { useAuth } from '@/composables/useAuth'
 import StatusPill from '@/components/StatusPill.vue'
+import UserBadge from '@/components/UserBadge.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { t } from '@/i18n'
 
 const { status, errorCount, isStale } = useStatus()
+const { role } = useAuth()
 
-const nav = [
-  { to: '/', label: t.nav.overview, icon: Gauge },
-  { to: '/mappings', label: t.nav.mappings, icon: Table2 },
-  { to: '/devices', label: t.nav.devices, icon: Cpu },
-  { to: '/mqtt', label: t.nav.mqtt, icon: Radio },
-  { to: '/nats', label: t.nav.nats, icon: Database },
-  { to: '/iec104', label: t.nav.iec104, icon: Server },
-  { to: '/history', label: t.nav.history, icon: HistoryIcon },
-  { to: '/tsdb', label: t.nav.tsdb, icon: Database },
-  { to: '/ssfv', label: 'Plantas Solares', icon: SunIcon },
-  { to: '/broker-monitor', label: 'Monitor Broker', icon: Activity },
+const baseNav = [
+  { to: '/subscriptions', label: 'Tópicos y Suscripciones', icon: Radio },
+  { to: '/signals',       label: 'Señales SSFV',            icon: Layers },
+  { to: '/iec104',        label: t.nav.iec104,               icon: Server },
+  { to: '/tsdb',          label: 'Pipeline TSDB',            icon: Database },
+  { to: '/monitor',       label: 'Monitor',                  icon: Activity },
 ]
+
+const nav = computed(() => {
+  const items = [...baseNav]
+  if (role.value === 'superadmin') {
+    items.push({ to: '/users', label: 'Usuarios', icon: Users })
+  }
+  return items
+})
 
 const collapsed = ref(false)
 const mobileOpen = ref(false)
@@ -113,8 +118,24 @@ function fmtBuildTime(bt?: string) {
 </script>
 
 <template>
-  <!-- Root: full viewport, clip overflow. Only <main> scrolls. -->
-  <div class="h-screen w-screen overflow-hidden flex bg-background text-foreground">
+  <!-- Auth layout: full-screen, no sidebar (login page). -->
+  <template v-if="route.meta?.layout === 'auth'">
+    <RouterView />
+    <Toaster
+      position="bottom-right"
+      :offset="20"
+      :toast-options="{
+        classes: {
+          toast: '!rounded-sm !border !border-border !bg-card !text-card-foreground !text-xs !py-2 !px-3 !shadow-md',
+          title: '!text-xs !font-medium',
+          description: '!text-[11px] !text-muted-foreground',
+        },
+      }"
+    />
+  </template>
+
+  <!-- Main layout: sidebar + header + content. -->
+  <div v-else class="h-screen w-screen overflow-hidden flex bg-background text-foreground">
     <!-- Mobile backdrop -->
     <div
       v-show="mobileOpen"
@@ -173,6 +194,9 @@ function fmtBuildTime(bt?: string) {
 
       <!-- Bottom controls -->
       <div class="border-t border-sidebar-border p-3 space-y-1 shrink-0">
+        <!-- User profile: avatar, name, role chip, logout -->
+        <UserBadge />
+        <div class="border-t border-sidebar-border/50 my-1" />
         <button
           class="w-full flex items-center gap-3 rounded-sm px-3 py-2 text-sm hover:bg-sidebar-accent transition-colors"
           :title="dark ? t.nav.lightMode : t.nav.darkMode"
@@ -257,11 +281,7 @@ function fmtBuildTime(bt?: string) {
         class="flex-1 min-h-0 overflow-auto"
         role="main"
       >
-        <RouterView v-slot="{ Component }">
-          <transition name="fade" mode="out-in">
-            <component :is="Component" />
-          </transition>
-        </RouterView>
+        <RouterView :key="route.path" />
       </main>
     </div>
 

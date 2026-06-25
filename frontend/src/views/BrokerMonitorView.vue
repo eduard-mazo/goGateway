@@ -84,6 +84,18 @@ function saveToStorage(evs: BrokerEvent[]) {
   } catch { /* quota exceeded */ }
 }
 
+// Persisting on every SSE message is a synchronous localStorage write per
+// message — at high broker rates that storms the main thread and janks the UI.
+// Instead mark dirty and flush on a timer (and on pause / unmount).
+let saveDirty = false
+let saveTimer: ReturnType<typeof setInterval> | null = null
+function markDirty() { saveDirty = true }
+function flushStorage() {
+  if (!saveDirty) return
+  saveDirty = false
+  saveToStorage(events.value)
+}
+
 function clearAll() {
   localStorage.removeItem(LS_KEY)
   events.value = []
@@ -91,13 +103,14 @@ function clearAll() {
   rateWindow = []
   eventsPerMin.value = 0
   selectedEvent.value = null
+  saveDirty = false
 }
 
 // ── Data loading ──────────────────────────────────────────────────────────────
 
 async function loadSnapshot() {
   try {
-    const r = await fetch('/api/broker/events')
+    const r = await fetch(`/api/broker/events?limit=${MAX_DISPLAYED}`)
     if (!r.ok) return
     const snap: BrokerEvent[] = await r.json()
     const stored = loadFromStorage()
@@ -147,7 +160,7 @@ function connect() {
       if (events.value.length > MAX_DISPLAYED) {
         events.value.splice(0, events.value.length - MAX_DISPLAYED)
       }
-      saveToStorage(events.value)
+      markDirty()
     } catch { /* malformed */ }
   }
 }
@@ -212,8 +225,13 @@ function onTabChange(t: 'live' | 'missed') {
 onMounted(async () => {
   await loadSnapshot()
   connect()
+  saveTimer = setInterval(flushStorage, 2000) // throttle localStorage writes
 })
-onUnmounted(disconnect)
+onUnmounted(() => {
+  disconnect()
+  if (saveTimer) { clearInterval(saveTimer); saveTimer = null }
+  flushStorage() // persist whatever is pending before leaving
+})
 </script>
 
 <template>

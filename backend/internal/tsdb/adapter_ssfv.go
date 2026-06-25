@@ -82,11 +82,12 @@ func NewSSFVAdapter(ctx context.Context, dsn string) (*SSFVAdapter, error) {
 		return nil, fmt.Errorf("ssfv_adapter migrations: %w", err)
 	}
 
-	return &SSFVAdapter{
+	a := &SSFVAdapter{
 		pool:        pool,
 		cache:       newSSFVCache(pool),
 		rateTracker: newRateTracker(10 * time.Second),
-	}, nil
+	}
+	return a, nil
 }
 
 func (a *SSFVAdapter) Name() string { return "ssfv" }
@@ -114,18 +115,21 @@ func (a *SSFVAdapter) WriteBatch(ctx context.Context, batch []DataPoint) error {
 	for _, p := range batch {
 		// IEC-104 history DataPoints (from HistoryLogger) carry no "equipo" tag.
 		// These are expected noise — skip silently, do NOT count as SSFV misses.
-		if p.Tags["equipo"] == "" {
+		entity := p.Tags["equipo"]
+		if entity == "" {
 			continue
 		}
-		signalPath := p.Tags["signal_path"]
-		if signalPath == "" {
-			signalPath = p.Measurement
+		// C1 composite identity (entity, codigo_senal, nombre_instancia).
+		codigo := p.Tags["codigo"]
+		instance := p.Tags["instancia"]
+		if instance == "" {
+			instance = "default"
 		}
-		equiID, ok := a.cache.Resolve(ctx, signalPath)
+		equiID, ok := a.cache.Resolve(ctx, entity, codigo, instance)
 		if !ok {
 			// Genuine SSFV signal with no catalog match: actionable miss.
 			dropped++
-			a.recordMiss(signalPath, p.Tags["equipo"])
+			a.recordMiss(entity+"/"+codigo+"@"+instance, entity)
 			continue
 		}
 

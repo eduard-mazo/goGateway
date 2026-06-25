@@ -3,8 +3,12 @@ package mqtt
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +17,7 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/jmoiron/sqlx"
 
+	"goGateway/internal/models"
 	"goGateway/internal/sparkplug"
 	"goGateway/internal/worker"
 )
@@ -39,13 +44,59 @@ type Manager struct {
 	bdSeq     atomic.Uint64 // birth/death sequence; increments on every MQTT CONNECT
 	cfg       worker.MQTTConfigSnapshot
 
+	// lastRebirth debounces NCMD Rebirth per node: one seq gap is detected
+	// independently by the NDATA and DDATA handlers (one node-level seq
+	// counter), so without a cooldown each gap sends 2+ NCMDs and the producer
+	// answers with as many full NBIRTH+DBIRTH bursts.
+	rebirthMu   sync.Mutex
+	lastRebirth map[string]time.Time
+	// rebirthHits is a sliding window of recent rebirth *requests* per node and
+	// lastStormWarn rate-limits the duplicate-identity warning. A sustained storm
+	// (a rebirth that never "sticks") is the signature of two producers claiming
+	// the same group/node/device: the gateway keys identity off the Sparkplug
+	// topic alone (it cannot see a producer's MQTT clientId), so their interleaved
+	// seq counters collide forever. See detectRebirthStorm.
+	rebirthHits   map[string][]time.Time
+	lastStormWarn map[string]time.Time
+
+	// dupSuspects records node ids that two producers appear to be sharing
+	// (rebirth storm and/or bdSeq regression). Surfaced via Status() so the
+	// operator/UI sees the collision instead of only a log line.
+	dupMu       sync.Mutex
+	dupSuspects map[string]*DuplicateSuspect
+
 	// SSFV JSON handler — intercepts equipment topics before generic dispatch.
 	ssfvHandler *worker.SSFVHandler
+
+	// autoDisc records NBIRTH/DBIRTH events in SQLite for operator review.
+	autoDisc *worker.AutoDiscoveryService
 
 	// monitorHook receives (topic, kind, payload, ssfvHits) for every inbound message.
 	// ssfvHits is the count of metrics forwarded to SSFV (sparkplug messages only).
 	// nil = disabled. Set via SetMonitorHook before Start().
 	monitorHook func(topic, kind string, payload []byte, ssfvHits int)
+
+	// dispatch is a lock-free snapshot of the three handler pointers read on the
+	// per-message hot path (onMessage). It is refreshed under mu whenever any of
+	// them changes, so onMessage never takes mu — decoupling message processing
+	// from config reloads (which hold mu while disconnecting the broker).
+	dispatch atomic.Pointer[dispatchSnapshot]
+}
+
+// dispatchSnapshot is the immutable set of handlers onMessage needs.
+type dispatchSnapshot struct {
+	sp   *worker.SparkplugHandler
+	ssfv *worker.SSFVHandler
+	hook func(topic, kind string, payload []byte, ssfvHits int)
+}
+
+// refreshDispatch publishes a fresh hot-path snapshot. Caller must hold m.mu.
+func (m *Manager) refreshDispatch() {
+	m.dispatch.Store(&dispatchSnapshot{
+		sp:   m.spHandler,
+		ssfv: m.ssfvHandler,
+		hook: m.monitorHook,
+	})
 }
 
 // MQTTConfigSnapshot is a copy of the config values the manager needs outside
@@ -59,9 +110,24 @@ type Status struct {
 	Topics    int    `json:"topics"`
 	Messages  int64  `json:"messages"`
 	LastMsgAt int64  `json:"last_msg_at"` // unix nano, 0 if none
+	// Suspects lists node ids two producers appear to share (duplicate identity).
+	Suspects []DuplicateSuspect `json:"duplicate_suspects,omitempty"`
+}
+
+// DuplicateSuspect records a node id that two producers appear to be sharing.
+// Sender identity is the Sparkplug topic (group/node/device), not the MQTT
+// clientId, so a duplicate cannot be prevented here — only surfaced.
+type DuplicateSuspect struct {
+	Group     string    `json:"group"`
+	Node      string    `json:"node"`
+	Count     int       `json:"count"`
+	Reasons   []string  `json:"reasons"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
 }
 
 func (m *Manager) Status() Status {
+	suspects := m.duplicateSuspects() // own lock; gather before holding m.mu
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return Status{
@@ -70,7 +136,52 @@ func (m *Manager) Status() Status {
 		Topics:    len(m.subs),
 		Messages:  m.messages.Load(),
 		LastMsgAt: m.lastMsg.Load(),
+		Suspects:  suspects,
 	}
+}
+
+// recordDuplicateSuspect upserts a suspected duplicate node id with its reason.
+func (m *Manager) recordDuplicateSuspect(groupID, nodeID, reason string) {
+	key := groupID + "/" + nodeID
+	now := time.Now()
+	m.dupMu.Lock()
+	defer m.dupMu.Unlock()
+	if m.dupSuspects == nil {
+		m.dupSuspects = make(map[string]*DuplicateSuspect)
+	}
+	s := m.dupSuspects[key]
+	if s == nil {
+		s = &DuplicateSuspect{Group: groupID, Node: nodeID, FirstSeen: now}
+		m.dupSuspects[key] = s
+	}
+	s.Count++
+	s.LastSeen = now
+	seen := false
+	for _, r := range s.Reasons {
+		if r == reason {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		s.Reasons = append(s.Reasons, reason)
+	}
+}
+
+// duplicateSuspects returns a stable snapshot of suspected duplicate node ids.
+func (m *Manager) duplicateSuspects() []DuplicateSuspect {
+	m.dupMu.Lock()
+	defer m.dupMu.Unlock()
+	out := make([]DuplicateSuspect, 0, len(m.dupSuspects))
+	for _, s := range m.dupSuspects {
+		cp := *s
+		cp.Reasons = append([]string(nil), s.Reasons...)
+		out = append(out, cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Group+"/"+out[i].Node < out[j].Group+"/"+out[j].Node
+	})
+	return out
 }
 
 func NewManager(db *sqlx.DB, cache *worker.MappingCache, d worker.Dispatcher) *Manager {
@@ -82,6 +193,15 @@ func NewManager(db *sqlx.DB, cache *worker.MappingCache, d worker.Dispatcher) *M
 func (m *Manager) SetSSFVHandler(h *worker.SSFVHandler) {
 	m.mu.Lock()
 	m.ssfvHandler = h
+	m.refreshDispatch()
+	m.mu.Unlock()
+}
+
+// SetAutoDiscovery registers the auto-discovery service so that NBIRTH/DBIRTH
+// events are recorded in SQLite. Must be called before Start().
+func (m *Manager) SetAutoDiscovery(a *worker.AutoDiscoveryService) {
+	m.mu.Lock()
+	m.autoDisc = a
 	m.mu.Unlock()
 }
 
@@ -92,6 +212,7 @@ func (m *Manager) SetSSFVHandler(h *worker.SSFVHandler) {
 func (m *Manager) SetMonitorHook(fn func(topic, kind string, payload []byte, ssfvHits int)) {
 	m.mu.Lock()
 	m.monitorHook = fn
+	m.refreshDispatch()
 	m.mu.Unlock()
 }
 
@@ -141,19 +262,26 @@ func (m *Manager) reload() error {
 		}
 		m.spHandler = worker.NewSparkplugHandler(m.registry, m.cache, m.d)
 		m.spHandler.SetRebirthFn(m.publishRebirth)
+		m.spHandler.SetDuplicateFn(m.recordDuplicateSuspect)
 		if m.ssfvHandler != nil {
 			m.spHandler.SetSSFVHandler(m.ssfvHandler)
+		}
+		if m.autoDisc != nil {
+			m.spHandler.SetAutoDiscovery(m.autoDisc)
+			m.autoDisc.SetRebirthFn(m.publishRebirth)
 		}
 		m.cfg = worker.MQTTConfigSnapshot{
 			SpGroupID: cfg.SpGroupID,
 			SpHostID:  cfg.SpHostID,
 			SpTopics:  cfg.SpTopics,
+			SpQoS:     spQoS(cfg.QoS),
 		}
 	} else {
 		m.registry = nil
 		m.spHandler = nil
-		m.cfg = worker.MQTTConfigSnapshot{SpTopics: cfg.SpTopics}
+		m.cfg = worker.MQTTConfigSnapshot{SpTopics: cfg.SpTopics, SpQoS: spQoS(cfg.QoS)}
 	}
+	m.refreshDispatch() // publish the new handler set to the lock-free hot path
 
 	scheme := "tcp"
 	if cfg.UseTLS {
@@ -168,12 +296,34 @@ func (m *Manager) reload() error {
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
-		SetKeepAlive(5 * time.Second).
+		SetMaxReconnectInterval(60 * time.Second). // cap auto-reconnect backoff
+		SetConnectTimeout(15 * time.Second).
+		// Keepalive loosened from 5s: under a burst the single in-order message
+		// handler can briefly stall; a tight keepalive would then read the link
+		// as dead → disconnect → mass re-subscribe/rebirth. 30s + a ping timeout
+		// still detects genuinely dead links promptly.
+		SetKeepAlive(30 * time.Second).
+		SetPingTimeout(10 * time.Second).
+		SetWriteTimeout(10 * time.Second). // a Publish on a half-open socket can't hang forever
+		// Deep inbound buffer so a rebirth burst across many nodes is absorbed
+		// rather than back-pressuring the network read loop into a keepalive miss.
+		SetMessageChannelDepth(4096).
+		// Order matters: Sparkplug sequence tracking requires in-order, single
+		// goroutine delivery. Do NOT enable concurrent handlers.
+		SetOrderMatters(true).
 		SetOnConnectHandler(m.onConnect).
 		SetConnectionLostHandler(m.onConnectionLost)
 
 	if cfg.Username != "" {
 		opts.SetUsername(cfg.Username).SetPassword(cfg.Password)
+	}
+
+	if cfg.UseTLS {
+		tlsCfg, terr := buildTLSConfig(cfg)
+		if terr != nil {
+			return fmt.Errorf("mqtt tls config: %w", terr)
+		}
+		opts.SetTLSConfig(tlsCfg)
 	}
 
 	// Sparkplug B: register LWT as "STATE/{hostID}" = "OFFLINE", retained, QoS 1.
@@ -239,7 +389,7 @@ func (m *Manager) onConnectSparkplug(c paho.Client, cfg worker.MQTTConfigSnapsho
 		wildcard := sparkplug.WildcardFor(gid)
 		log.Printf("mqtt sparkplug connected, subscribing %s", wildcard)
 		wc := wildcard
-		subTok := c.Subscribe(wc, 0, func(_ paho.Client, msg paho.Message) {
+		subTok := c.Subscribe(wc, cfg.SpQoS, func(_ paho.Client, msg paho.Message) {
 			m.onMessage(msg.Topic(), msg.Payload())
 		})
 		go func() {
@@ -302,11 +452,12 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 	m.messages.Add(1)
 	m.lastMsg.Store(time.Now().UnixNano())
 
-	m.mu.Lock()
-	spHandler := m.spHandler
-	ssfvHandler := m.ssfvHandler
-	hook := m.monitorHook
-	m.mu.Unlock()
+	var spHandler *worker.SparkplugHandler
+	var ssfvHandler *worker.SSFVHandler
+	var hook func(topic, kind string, payload []byte, ssfvHits int)
+	if snap := m.dispatch.Load(); snap != nil {
+		spHandler, ssfvHandler, hook = snap.sp, snap.ssfv, snap.hook
+	}
 
 	if spHandler != nil {
 		t, ok := sparkplug.ParseTopic(topic)
@@ -341,6 +492,50 @@ func (m *Manager) onMessage(topic string, payload []byte) {
 	worker.ParseAndDispatch(topic, payload, maps, m.d)
 }
 
+// rebirthCooldown is the per-node minimum interval between NCMD Rebirth
+// requests. A birth burst takes well under a second; anything re-detected
+// within the window is the same gap (or the burst itself racing the detector).
+const rebirthCooldown = 5 * time.Second
+
+// Duplicate-identity detection: a healthy node trips at most a handful of
+// rebirths around a reconnect. A sustained run within stormWindow means the
+// rebirth never resolves the gap — the classic signature of two producers
+// publishing under the same group/node/device (their seq counters clobber each
+// other). We warn (rate-limited per node) so the operator can fix the broker
+// ACLs / node naming instead of silently losing interleaved data.
+const (
+	stormWindow       = 30 * time.Second
+	stormThreshold    = 6
+	stormWarnInterval = 60 * time.Second
+)
+
+// detectRebirthStorm records a rebirth request for key and returns true (once
+// per stormWarnInterval) when the recent rate indicates a duplicate node id.
+// Caller must hold rebirthMu.
+func (m *Manager) detectRebirthStorm(key string, now time.Time) bool {
+	if m.rebirthHits == nil {
+		m.rebirthHits = make(map[string][]time.Time)
+		m.lastStormWarn = make(map[string]time.Time)
+	}
+	cutoff := now.Add(-stormWindow)
+	hits := m.rebirthHits[key][:0:0]
+	for _, t := range m.rebirthHits[key] {
+		if t.After(cutoff) {
+			hits = append(hits, t)
+		}
+	}
+	hits = append(hits, now)
+	m.rebirthHits[key] = hits
+	if len(hits) < stormThreshold {
+		return false
+	}
+	if last, ok := m.lastStormWarn[key]; ok && now.Sub(last) < stormWarnInterval {
+		return false
+	}
+	m.lastStormWarn[key] = now
+	return true
+}
+
 // publishRebirth sends an NCMD message requesting the EoN node to re-publish
 // its NBIRTH.  Called by SparkplugHandler on out-of-sequence NDATA.
 func (m *Manager) publishRebirth(groupID, nodeID string) {
@@ -352,9 +547,38 @@ func (m *Manager) publishRebirth(groupID, nodeID string) {
 	if c == nil || !connected {
 		return
 	}
+
+	key := groupID + "/" + nodeID
+	now := time.Now()
+	m.rebirthMu.Lock()
+	storm := m.detectRebirthStorm(key, now)
+	if t, ok := m.lastRebirth[key]; ok && now.Sub(t) < rebirthCooldown {
+		m.rebirthMu.Unlock()
+		if storm {
+			m.recordDuplicateSuspect(groupID, nodeID, "rebirth-storm")
+			log.Printf("sparkplug: WARNING rebirth storm for %s — likely DUPLICATE node id "+
+				"(two producers on the same group/node/device). Sender identity is the Sparkplug "+
+				"topic, not the MQTT clientId; enforce per-client broker ACLs / unique node ids.", key)
+		}
+		log.Printf("sparkplug: rebirth for %s suppressed (cooldown)", key)
+		return
+	}
+	if m.lastRebirth == nil {
+		m.lastRebirth = make(map[string]time.Time)
+	}
+	m.lastRebirth[key] = now
+	m.rebirthMu.Unlock()
+	if storm {
+		m.recordDuplicateSuspect(groupID, nodeID, "rebirth-storm")
+		log.Printf("sparkplug: WARNING rebirth storm for %s — likely DUPLICATE node id "+
+			"(two producers on the same group/node/device). Sender identity is the Sparkplug "+
+			"topic, not the MQTT clientId; enforce per-client broker ACLs / unique node ids.", key)
+	}
 	topic := fmt.Sprintf("%s/%s/NCMD/%s", sparkplug.Namespace, groupID, nodeID)
 	payload := sparkplug.EncodeNCMDRebirth()
-	tok := c.Publish(topic, 0, false, payload)
+	// QoS 1: a dropped rebirth leaves the node out-of-sync until the next gap
+	// re-triggers it. Reliable delivery is worth the small overhead.
+	tok := c.Publish(topic, 1, false, payload)
 	go func() {
 		tok.Wait()
 		if err := tok.Error(); err != nil {
@@ -376,7 +600,7 @@ func (m *Manager) subscribeExtra(c paho.Client, cfg worker.MQTTConfigSnapshot) {
 	log.Printf("mqtt: subscribing %d extra topic(s)", len(patterns))
 	for _, pat := range patterns {
 		p := pat
-		tok := c.Subscribe(p, 0, func(_ paho.Client, msg paho.Message) {
+		tok := c.Subscribe(p, cfg.SpQoS, func(_ paho.Client, msg paho.Message) {
 			m.onMessage(msg.Topic(), msg.Payload())
 		})
 		go func() {
@@ -389,6 +613,46 @@ func (m *Manager) subscribeExtra(c paho.Client, cfg worker.MQTTConfigSnapshot) {
 		m.subs[p] = struct{}{}
 		m.mu.Unlock()
 	}
+}
+
+// spQoS clamps the configured MQTT QoS to the Sparkplug B range. Sparkplug
+// forbids QoS 2; any value ≥1 maps to QoS 1, everything else to QoS 0.
+func spQoS(q int) byte {
+	if q >= 1 {
+		return 1
+	}
+	return 0
+}
+
+// buildTLSConfig assembles a *tls.Config from the stored MQTT config. It
+// supports a custom CA (private/self-signed brokers — the norm in OT networks),
+// an optional client certificate (mutual TLS), and an explicit insecure escape
+// hatch. With no CA file it uses the system root pool. crypto/tls is pure Go, so
+// this works in the fully-static edge builds too.
+func buildTLSConfig(cfg models.MQTTConfig) (*tls.Config, error) {
+	t := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: cfg.TLSInsecure, //nolint:gosec // operator opt-in for self-signed brokers
+	}
+	if cfg.CAFile != "" {
+		pem, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read ca file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("ca file %s: no certificates parsed", cfg.CAFile)
+		}
+		t.RootCAs = pool
+	}
+	if cfg.CertFile != "" && cfg.KeyFile != "" {
+		crt, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert/key: %w", err)
+		}
+		t.Certificates = []tls.Certificate{crt}
+	}
+	return t, nil
 }
 
 // parseTopicList splits a newline/comma-separated topic pattern string,

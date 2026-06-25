@@ -1,0 +1,63 @@
+{
+  "_comment": "Decoded NDATA. Topic: spBv1.0/plant-floor/NDATA/dnp3-gw. Names are OMITTED — resolve each metric via its alias against the last NBIRTH. PropertySet values are TYPED (quality/dnp3.flags=UInt32, dnp3.*=Boolean, engUnit=String).",
+  "topic": "spBv1.0/plant-floor/NDATA/dnp3-gw",
+  "timestamp": 1733220005000,
+  "seq": 1,
+  "metrics": [
+    {
+      "alias": 1,
+      "datatype": 10,
+      "timestamp": 1733220004987,
+      "value": 13802.5,
+      "_resolves_to": "Feeder1/Voltage",
+      "properties": {
+        "quality": 192,
+        "dnp3.flags": 1,
+        "dnp3.online": true,
+        "dnp3.restart": false,
+        "dnp3.comm_lost": false,
+        "engUnit": "V"
+      }
+    },
+    {
+      "alias": 2,
+      "datatype": 11,
+      "timestamp": 1733220004990,
+      "value": true,
+      "_resolves_to": "Feeder1/Breaker",
+      "properties": {
+        "quality": 192,
+        "dnp3.flags": 1,
+        "dnp3.online": true,
+        "dnp3.restart": false,
+        "dnp3.comm_lost": false
+      }
+    },
+    {
+      "alias": 5,
+      "datatype": 10,
+      "timestamp": 1733220005000,
+      "value": 33.79,
+      "_resolves_to": "System/CPU/Usage_pct",
+      "properties": {
+        "quality": 192,
+        "dnp3.online": true,
+        "engUnit": "%"
+      }
+    },
+    {
+      "alias": 1,
+      "datatype": 10,
+      "timestamp": 1733220006000,
+      "is_null": true,
+      "_resolves_to": "Feeder1/Voltage",
+      "_note": "BAD-quality sample: is_null set, quality=0",
+      "properties": {
+        "quality": 0,
+        "dnp3.flags": 0,
+        "dnp3.online": false,
+        "dnp3.comm_lost": true
+      }
+    }
+  ]
+}

@@ -21,9 +21,17 @@ func (a *TimescaleAdapter) runMigrations(ctx context.Context) error {
 }
 
 // applyMigrations is the pool-agnostic core shared by all adapters.
+//
+// The bookkeeping table MUST be schema-qualified: the SSFV adapter's pool sets
+// search_path = ssfv, public, so an unqualified CREATE TABLE lands in `ssfv`
+// once that schema exists. That is exactly what happened pre-fix: boot 1 (no
+// ssfv yet) tracked versions in public; every later boot created a fresh empty
+// ssfv.schema_migrations, saw zero applied versions, and re-ran ALL migrations
+// — duplicating the generic pipeline (signals, caggs, retention/columnstore
+// jobs) inside the ssfv schema. Migration 0017 cleans those duplicates up.
 func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
+		CREATE TABLE IF NOT EXISTS public.schema_migrations (
 			version    INT PRIMARY KEY,
 			applied_at TIMESTAMPTZ DEFAULT NOW()
 		)`); err != nil {
@@ -52,7 +60,7 @@ func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 
 	for _, m := range migs {
 		var count int
-		pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=$1`,
+		pool.QueryRow(ctx, `SELECT count(*) FROM public.schema_migrations WHERE version=$1`,
 			m.version).Scan(&count) //nolint:errcheck
 		if count > 0 {
 			continue
@@ -64,7 +72,7 @@ func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		if _, err := pool.Exec(ctx, string(data)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", m.name, err)
 		}
-		pool.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES($1)`, m.version) //nolint:errcheck
+		pool.Exec(ctx, `INSERT INTO public.schema_migrations(version) VALUES($1)`, m.version) //nolint:errcheck
 		log.Printf("tsdb: applied migration %s", m.name)
 	}
 	return nil

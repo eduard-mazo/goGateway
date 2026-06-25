@@ -11,18 +11,20 @@ import (
 
 // TopicMapping = resolved row for dispatch (joins topic + mapping).
 type TopicMapping struct {
-	MappingID  int64
-	ServerID   int64 // IEC-104 slave that receives this point.
-	TopicID    int64
-	Topic      string
-	JSONKey    string
-	QualityKey string // optional: JSON key for per-signal quality; overrides payload-level "quality"
-	MetricName string // Sparkplug B metric name; used when SparkplugEnabled=true
-	IEC104Type string
-	IOA        int
-	Scale      float64
-	Business   string
-	Company    string
+	MappingID   int64
+	ServerID    int64 // IEC-104 slave that receives this point.
+	TopicID     int64
+	Topic       string
+	JSONKey     string
+	QualityKey  string  // optional: JSON key for per-signal quality; overrides payload-level "quality"
+	MetricName  string  // Sparkplug B metric name; used when SparkplugEnabled=true
+	IEC104Type  string
+	IOA         int
+	Scale       float64
+	DeadbandAbs float64 // absolute deadband threshold (engineering units)
+	DeadbandPct float64 // percentage deadband threshold (0.01 = 1 %)
+	Business    string
+	Company     string
 	// SignalPath = full signal identity: business/company/B1/.../signal.
 	// Pre-computed for JSON mode; set at dispatch time for Sparkplug mode.
 	SignalPath string
@@ -55,6 +57,7 @@ func (c *MappingCache) Reload() error {
 	rows, err := c.db.Queryx(`
         SELECT sm.id, sm.server_id, sm.topic_id, t.topic, t.qos, sm.json_key,
                sm.quality_key, sm.metric_name, sm.iec104_type, sm.ioa, sm.scale,
+               sm.deadband_abs, sm.deadband_pct,
                sm.device_name, sm.business, sm.company
           FROM signal_mappings sm
           JOIN topics t ON t.id = sm.topic_id
@@ -78,6 +81,7 @@ func (c *MappingCache) Reload() error {
 			&tm.MappingID, &tm.ServerID, &tm.TopicID, &tm.Topic, &topicQoS,
 			&tm.JSONKey, &tm.QualityKey, &tm.MetricName,
 			&tm.IEC104Type, &tm.IOA, &tm.Scale,
+			&tm.DeadbandAbs, &tm.DeadbandPct,
 			&deviceName, &tm.Business, &tm.Company,
 		); err != nil {
 			return err
@@ -155,13 +159,15 @@ type MQTTConfigSnapshot struct {
 	SpGroupID string
 	SpHostID  string
 	SpTopics  string // newline/comma-separated extra MQTT topic patterns
+	SpQoS     byte   // MQTT subscribe QoS for Sparkplug/extra topics (0 or 1)
 }
 
 // LoadMQTTConfig = helper to read singleton config (all columns).
 func LoadMQTTConfig(db *sqlx.DB) (models.MQTTConfig, error) {
 	var c models.MQTTConfig
 	err := db.Get(&c, `SELECT id,host,port,username,password,client_id,use_tls,
-	                          sparkplug_enabled,sp_group_id,sp_host_id,sp_topics
+	                          sparkplug_enabled,sp_group_id,sp_host_id,sp_topics,qos,
+	                          tls_ca_file,tls_cert_file,tls_key_file,tls_insecure
 	                     FROM mqtt_config WHERE id=1`)
 	return c, err
 }

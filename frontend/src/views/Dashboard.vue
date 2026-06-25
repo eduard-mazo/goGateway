@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
-import { api, type History, type SignalMapping, type NATSConfig } from '@/api'
+import { api, type History, type SignalMapping } from '@/api'
 import { useStatus, type IEC104ServerStatus, type SystemHealth } from '@/composables/useStatus'
 import { t } from '@/i18n'
 import StatCard from '@/components/StatCard.vue'
@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { RouterLink } from 'vue-router'
 import {
   ArrowRight, Radio, Server, Activity, Clock, Layers, Gauge, Database,
-  AlertTriangle, WifiOff, Zap, Workflow,
+  AlertTriangle, WifiOff,
 } from 'lucide-vue-next'
 
 const { status, systemHealth } = useStatus()
@@ -19,24 +19,6 @@ const { status, systemHealth } = useStatus()
 const recent = ref<History[]>([])
 const mappings = ref<SignalMapping[]>([])
 const mapById = computed(() => Object.fromEntries(mappings.value.map(m => [m.id, m])))
-
-// ── NATS config (lightweight fetch — only need enabled flag) ──────────────────
-const natsEnabled = ref(false)
-const natsConnected = ref<boolean | null>(null)
-
-async function loadNatsConfig() {
-  try {
-    const { data } = await api.get<NATSConfig>('/nats-config')
-    natsEnabled.value = data.enabled
-    // Runtime connection state may be available via status endpoint extension
-    const s = status.value as any
-    if (typeof s?.nats?.connected === 'boolean') {
-      natsConnected.value = s.nats.connected
-    } else {
-      natsConnected.value = data.enabled ? null : false
-    }
-  } catch { /* NATS config is optional — gateway works without it */ }
-}
 
 // ── Msg rate tracking + sparkline ─────────────────────────────────────────────
 const prevMsgCount = ref(0)
@@ -120,7 +102,6 @@ async function loadMappings() {
 onMounted(() => {
   loadMappings()
   loadRecent()
-  loadNatsConfig()
   pollTimer = setInterval(() => { loadRecent(); tickRate() }, 2500)
 })
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
@@ -210,23 +191,6 @@ const healthBanner = computed<HealthBanner | null>(() => {
     return { severity: 'fault', message: 'Uno o más servidores IEC-104 habilitados no pudieron hacer bind — masters SCADA sin conexión.' }
   }
   return { severity: 'warn', message: 'Flota IEC-104 parcialmente activa — revisar listeners en la sección de configuración.' }
-})
-
-// ── NATS dispatch state ───────────────────────────────────────────────────────
-type NATSDispatch = 'fan-out' | 'direct' | 'unavailable' | 'disabled'
-const natsDispatch = computed<NATSDispatch>(() => {
-  if (!natsEnabled.value) return 'disabled'
-  if (natsConnected.value === false) return 'unavailable'
-  if (natsConnected.value === true) return 'fan-out'
-  return 'fan-out' // assume connected if enabled and no explicit status
-})
-const natsDispatchMeta = computed(() => {
-  switch (natsDispatch.value) {
-    case 'fan-out':     return { state: 'ok' as const,   label: t.dashboard.natsFanOut,        detail: 'JetStream · buffer resiliente activo' }
-    case 'direct':      return { state: 'warn' as const,  label: t.dashboard.natsDirectDispatch, detail: 'Sin buffer — despacho síncrono' }
-    case 'unavailable': return { state: 'fault' as const, label: t.dashboard.natsNotAvailable,   detail: 'Servidor NATS inalcanzable · modo fallback' }
-    case 'disabled':    return { state: 'idle' as const,  label: t.dashboard.natsDisabled,       detail: 'Fan-Out deshabilitado' }
-  }
 })
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -319,19 +283,6 @@ function fmtNumber(n?: number | null) {
           <div class="flex flex-col gap-2 items-start md:items-end">
             <StatusPill label="MQTT" :state="brokerState" :value="status?.mqtt.broker || '—'" />
             <StatusPill label="IEC 104" :state="iecState" :value="iecSummary" />
-            <!-- NATS dispatch mode indicator -->
-            <div
-              v-if="natsEnabled"
-              class="inline-flex items-center gap-2 rounded-sm border px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] transition-colors"
-              :class="natsDispatchMeta.state === 'ok'
-                ? 'border-[color:color-mix(in_srgb,var(--epm-bosque)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--epm-bosque)_8%,transparent)] text-[color:var(--epm-bosque)]'
-                : natsDispatchMeta.state === 'fault'
-                  ? 'border-[color:color-mix(in_srgb,var(--signal-fault)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--signal-fault)_8%,transparent)] text-[color:var(--signal-fault)]'
-                  : 'border-border bg-card text-muted-foreground'"
-            >
-              <Zap class="h-3 w-3" aria-hidden="true" />
-              NATS · {{ natsDispatchMeta.label }}
-            </div>
             <div class="font-mono text-[11px] text-muted-foreground mt-2">
               {{ msgRate.toFixed(2) }} msg/s · up {{ status?.uptime_seconds ?? 0 }}s
             </div>
@@ -493,49 +444,6 @@ function fmtNumber(n?: number | null) {
         <div class="px-6 py-3 border-t border-border text-right bg-[color:color-mix(in_srgb,var(--epm-bosque)_6%,transparent)]">
           <RouterLink to="/iec104" class="inline-flex items-center gap-1 text-xs font-bold text-[color:var(--epm-bosque)] hover:underline">
             {{ t.dashboard.serverConfig }} <ArrowRight class="h-3 w-3" aria-hidden="true" />
-          </RouterLink>
-        </div>
-      </div>
-    </section>
-
-    <!-- ── NATS DISPATCH MODE (only when NATS is configured) ──────────────── -->
-    <!-- Shows whether samples flow through JetStream (resilient) or direct
-         dispatch (synchronous). Hidden when NATS is not configured at all. -->
-    <section
-      v-if="natsEnabled"
-      class="card-soft overflow-hidden"
-      aria-label="Fan-Out NATS"
-    >
-      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-6 py-5">
-        <div class="flex items-center gap-3">
-          <div
-            class="grid place-items-center w-10 h-10 rounded-sm shrink-0"
-            :class="natsDispatchMeta.state === 'ok'
-              ? 'bg-[color:color-mix(in_srgb,var(--epm-bosque)_18%,transparent)]'
-              : natsDispatchMeta.state === 'fault'
-                ? 'bg-[color:color-mix(in_srgb,var(--signal-fault)_14%,transparent)]'
-                : 'bg-muted'"
-          >
-            <Workflow
-              class="h-4 w-4"
-              :class="natsDispatchMeta.state === 'ok' ? 'text-[color:var(--epm-bosque)]' : natsDispatchMeta.state === 'fault' ? 'text-[color:var(--signal-fault)]' : 'text-muted-foreground'"
-              aria-hidden="true"
-            />
-          </div>
-          <div>
-            <div class="text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-bold">{{ t.dashboard.natsBuffer }}</div>
-            <div class="font-sans font-extrabold text-base leading-none mt-1 tracking-tight">
-              {{ natsDispatchMeta.label }}
-            </div>
-            <div class="text-xs text-muted-foreground mt-1">{{ natsDispatchMeta.detail }}</div>
-          </div>
-        </div>
-        <div class="flex items-center gap-3">
-          <StatusPill :state="natsDispatchMeta.state" :label="natsDispatchMeta.label" />
-          <RouterLink to="/nats">
-            <Button variant="outline" size="sm" class="rounded-sm">
-              Config. NATS <ArrowRight class="h-3 w-3 ml-1" aria-hidden="true" />
-            </Button>
           </RouterLink>
         </div>
       </div>

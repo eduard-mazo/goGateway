@@ -1,0 +1,25 @@
+{
+  "_comment": "Decoded DDATA. Topic: spBv1.0/plant-floor/DDATA/dnp3-gw/meter-01. Names omitted — resolve via alias against this device's DBIRTH. Modbus reads are polls: a good read sets quality=192/dnp3.online=true; the remaining dnp3.* flags are present but false.",
+  "topic": "spBv1.0/plant-floor/DDATA/dnp3-gw/meter-01",
+  "timestamp": 1733220006000,
+  "seq": 2,
+  "device": "meter-01",
+  "metrics": [
+    {
+      "alias": 20,
+      "datatype": 10,
+      "timestamp": 1733220006000,
+      "value": 14820.4,
+      "_resolves_to": "Energy_kWh",
+      "properties": { "quality": 192, "dnp3.online": true, "engUnit": "kWh" }
+    },
+    {
+      "alias": 22,
+      "datatype": 11,
+      "timestamp": 1733220006000,
+      "value": true,
+      "_resolves_to": "Relay1",
+      "properties": { "quality": 192, "dnp3.online": true }
+    }
+  ]
+}

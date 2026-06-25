@@ -140,7 +140,9 @@ CREATE TABLE IF NOT EXISTS ssfv.tbl_valores (
     timestamp_utc TIMESTAMPTZ  NOT NULL,
     equisenal_id  INT          NOT NULL REFERENCES ssfv.tbl_senales_x_equipo(equisenal_id),
     valor         NUMERIC(18,6),
-    calidad       VARCHAR(10)  NOT NULL DEFAULT 'Buena'
+    -- TEXT (not VARCHAR) is TimescaleDB best practice for hypertable columns;
+    -- the CHECK still constrains the allowed values.
+    calidad       TEXT         NOT NULL DEFAULT 'Buena'
                                CHECK (calidad IN ('Buena', 'Dudosa', 'Mala')),
 
     CONSTRAINT pk_valores PRIMARY KEY (timestamp_utc, equisenal_id)
@@ -177,10 +179,10 @@ CREATE TABLE IF NOT EXISTS ssfv.tbl_alarmas (
     equisenal_id INT         NOT NULL REFERENCES ssfv.tbl_senales_x_equipo(equisenal_id),
     ts_inicio   TIMESTAMPTZ  NOT NULL,
     ts_fin      TIMESTAMPTZ,
-    tipo_alarma VARCHAR(20)  NOT NULL
+    tipo_alarma TEXT         NOT NULL
                              CHECK (tipo_alarma IN ('Dispositivo','Comunicacion','Proceso','Fabricante')),
-    descripcion VARCHAR(300),
-    severidad   VARCHAR(10)  NOT NULL DEFAULT 'Media'
+    descripcion TEXT,
+    severidad   TEXT         NOT NULL DEFAULT 'Media'
                              CHECK (severidad IN ('Critica','Alta','Media','Baja')),
     activa      BOOLEAN      NOT NULL DEFAULT TRUE,
 
@@ -203,9 +205,12 @@ CREATE INDEX IF NOT EXISTS idx_alarmas_activas
 
 DO $$
 BEGIN
+    -- Include alarma_id (the other PK column) in the ordering so TimescaleDB can
+    -- locate/uniquely order compressed rows — silences the "alarma_id should be
+    -- used for segmenting or ordering" advisory.
     ALTER TABLE ssfv.tbl_alarmas SET (
         timescaledb.compress,
-        timescaledb.compress_orderby   = 'ts_inicio DESC',
+        timescaledb.compress_orderby   = 'ts_inicio DESC, alarma_id',
         timescaledb.compress_segmentby = 'equisenal_id'
     );
 EXCEPTION WHEN OTHERS THEN NULL;

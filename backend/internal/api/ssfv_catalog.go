@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,26 +13,39 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jmoiron/sqlx"
 
 	"goGateway/internal/tsdb"
+	"goGateway/internal/worker"
 )
 
 // SSFVHandler serves CRUD endpoints for the ssfv schema catalog.
 // It obtains the pool lazily from TSDBMgr so it survives pipeline reloads.
 type SSFVHandler struct {
-	mgr      *tsdb.Manager
-	reloader func() // reloads the worker SSFVMappingCache; set via SetReloader
+	mgr           *tsdb.Manager
+	db            *sqlx.DB // SQLite, for autodiscovery queries
+	reloader      func()   // reloads the worker SSFVMappingCache; set via SetReloader
+	mappingReload func()   // reloads the worker IEC-104 MappingCache; set via SetMappingNotifier
+	rebirthFn     func(groupID, nodeID string) // sends NCMD Rebirth after approval
 }
 
 func NewSSFVHandler(mgr *tsdb.Manager) *SSFVHandler {
 	return &SSFVHandler{mgr: mgr}
 }
 
+// SetDB provides the SQLite connection used by the autodiscovery endpoints.
+func (h *SSFVHandler) SetDB(db *sqlx.DB) { h.db = db }
+
 // SetReloader registers a callback invoked after any catalog mutation so the
 // in-memory SSFVMappingCache (used by the Sparkplug B dispatch path) stays
 // in sync without a gateway restart.
 func (h *SSFVHandler) SetReloader(fn func()) { h.reloader = fn }
+
+// SetRebirthFn registers a callback that sends an NCMD Rebirth to a Sparkplug
+// B node after manual operator approval, so NBIRTH+NDATA flows immediately.
+func (h *SSFVHandler) SetRebirthFn(fn func(groupID, nodeID string)) { h.rebirthFn = fn }
 
 // triggerReload invalidates the adapter-level cache and reloads the worker
 // SSFVMappingCache if a reloader has been registered.
@@ -60,6 +75,14 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 	r.Delete("/equipos/{id}", h.deleteEquipo)
 	r.Get("/equipos/{id}/senales", h.listSenalesByEquipo)
 
+	// SSFV → IEC-104 mirror: link a plant to an IEC-104 server (operator-chosen),
+	// which backfills mirrors for its signals; new signals then auto-mirror, and
+	// deleting the link removes them. Per-signal/equipo/plant deletes cascade
+	// (see deleteAsignacion/deleteEquipo/deletePlanta).
+	r.Get("/plantas/{id}/iec104-link", h.getPlantaIEC104Link)
+	r.Post("/plantas/{id}/iec104-link", h.linkPlantaIEC104)
+	r.Delete("/plantas/{id}/iec104-link", h.unlinkPlantaIEC104)
+
 	// Señales (catálogo)
 	r.Get("/senales", h.listSenales)
 	r.Post("/senales", h.createSenal)
@@ -78,10 +101,26 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 	r.Put("/fronteras/{id}", h.updateFrontera)
 	r.Delete("/fronteras/{id}", h.deleteFrontera)
 
-	// Catálogos de soporte (solo lectura para el UI)
+	// Catálogos de soporte — CRUD completo
 	r.Get("/tipo-equipo", h.listTipoEquipo)
+	r.Post("/tipo-equipo", h.createTipoEquipo)
+	r.Put("/tipo-equipo/{id}", h.updateTipoEquipo)
+	r.Delete("/tipo-equipo/{id}", h.deleteTipoEquipo)
+
 	r.Get("/tipo-variable", h.listTipoVariable)
+	r.Post("/tipo-variable", h.createTipoVariable)
+	r.Put("/tipo-variable/{id}", h.updateTipoVariable)
+	r.Delete("/tipo-variable/{id}", h.deleteTipoVariable)
+
 	r.Get("/unidades", h.listUnidades)
+	r.Post("/unidades", h.createUnidad)
+	r.Put("/unidades/{id}", h.updateUnidad)
+	r.Delete("/unidades/{id}", h.deleteUnidad)
+
+	// Señales x Tipo Equipo (plantilla de auto-instanciación)
+	r.Get("/senales-x-tipo", h.listSenalesXTipo)
+	r.Post("/senales-x-tipo", h.createSenalXTipo)
+	r.Delete("/senales-x-tipo/{id}", h.deleteSenalXTipo)
 
 	// Alarmas
 	r.Get("/alarmas", h.listAlarmas)
@@ -93,6 +132,15 @@ func (h *SSFVHandler) Mount(r chi.Router) {
 
 	// Señales sin mapeo (ring buffer de los últimos 300 signal_paths descartados)
 	r.Get("/missed", h.getMissedSignals)
+
+	// Auto-discovery: Sparkplug B nodes/devices pending catalog assignment
+	r.Get("/autodiscovered", h.listAutodiscovered)
+	r.Post("/autodiscovered/{id}/approve", h.approveAutodiscovered)
+	r.Post("/autodiscovered/{id}/reject", h.rejectAutodiscovered)
+	r.Post("/autodiscovered/{id}/reset", h.resetAutodiscovered)
+	r.Delete("/autodiscovered/{id}", h.deleteAutodiscovered)
+
+	// Telemetría de host (métricas System/* del nodo gateway)
 
 	// Invalidar cache
 	r.Post("/cache/invalidate", h.invalidateCache)
@@ -136,11 +184,50 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	rows, err := pool.Query(ctx, `
-		SELECT planta_id, nombre, ubicacion, propietario,
-		       broker_base, capacidad_kwp, fecha_comisionamiento, estado,
-		       fecha_creacion, fecha_modif
-		FROM ssfv.tbl_planta ORDER BY planta_id`)
+	// Soft-deleted plantas (fecha_baja IS NOT NULL) are hidden unless the caller
+	// explicitly asks for the audit view with ?include_deleted=1.
+	//
+	// Fleet stats ride along in one pass (no N+1 from the UI): equipos y
+	// señales activos, alarmas abiertas y la última lectura por planta. La
+	// última lectura usa v_ultimas_lecturas (DISTINCT ON respaldado por
+	// idx_valores_equisenal_time), no un scan del hypertable completo.
+	query := `
+		WITH eq AS (
+		    SELECT planta_id, COUNT(*) AS n
+		    FROM ssfv.tbl_equipo WHERE fecha_baja IS NULL GROUP BY planta_id
+		), sx AS (
+		    SELECT e.planta_id, COUNT(*) AS n
+		    FROM ssfv.tbl_senales_x_equipo s
+		    JOIN ssfv.tbl_equipo e USING (equipo_id)
+		    WHERE s.activo AND e.fecha_baja IS NULL GROUP BY e.planta_id
+		), al AS (
+		    SELECT e.planta_id, COUNT(*) AS n
+		    FROM ssfv.tbl_alarmas a
+		    JOIN ssfv.tbl_senales_x_equipo s ON s.equisenal_id = a.equisenal_id
+		    JOIN ssfv.tbl_equipo e ON e.equipo_id = s.equipo_id
+		    WHERE a.activa GROUP BY e.planta_id
+		), ul AS (
+		    SELECT e.planta_id, MAX(v.timestamp_utc) AS ts
+		    FROM ssfv.v_ultimas_lecturas v
+		    JOIN ssfv.tbl_senales_x_equipo s ON s.equisenal_id = v.equisenal_id
+		    JOIN ssfv.tbl_equipo e ON e.equipo_id = s.equipo_id
+		    GROUP BY e.planta_id
+		)
+		SELECT p.planta_id, p.nombre, p.ubicacion, p.propietario,
+		       p.broker_base, p.capacidad_kwp, p.fecha_comisionamiento, p.estado,
+		       p.fecha_creacion, p.fecha_modif, p.fecha_baja,
+		       COALESCE(eq.n, 0), COALESCE(sx.n, 0), COALESCE(al.n, 0), ul.ts
+		FROM ssfv.tbl_planta p
+		LEFT JOIN eq USING (planta_id)
+		LEFT JOIN sx USING (planta_id)
+		LEFT JOIN al USING (planta_id)
+		LEFT JOIN ul USING (planta_id)`
+	if r.URL.Query().Get("include_deleted") != "1" {
+		query += ` WHERE p.fecha_baja IS NULL`
+	}
+	query += ` ORDER BY p.planta_id`
+
+	rows, err := pool.Query(ctx, query)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -150,13 +237,16 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 	var out []map[string]any
 	for rows.Next() {
 		var id, estado int
+		var nEquipos, nSenales, nAlarmas int64
 		var nombre, brokerBase string
 		var ubicacion, propietario, fechaCom *string
 		var capacidad *float64
 		var fechaCreacion, fechaModif time.Time
+		var fechaBaja, ultimaLectura *time.Time
 		if err := rows.Scan(&id, &nombre, &ubicacion, &propietario,
 			&brokerBase, &capacidad, &fechaCom, &estado,
-			&fechaCreacion, &fechaModif); err != nil {
+			&fechaCreacion, &fechaModif, &fechaBaja,
+			&nEquipos, &nSenales, &nAlarmas, &ultimaLectura); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -164,6 +254,9 @@ func (h *SSFVHandler) listPlantas(w http.ResponseWriter, r *http.Request) {
 			"propietario": propietario, "broker_base": brokerBase,
 			"capacidad_kWp": capacidad, "fecha_comisionamiento": fechaCom,
 			"estado": estado, "fecha_creacion": fechaCreacion, "fecha_modif": fechaModif,
+			"fecha_baja": fechaBaja,
+			"n_equipos": nEquipos, "n_senales": nSenales, "n_alarmas": nAlarmas,
+			"ultima_lectura": ultimaLectura,
 		})
 	}
 	if out == nil {
@@ -191,6 +284,12 @@ func (h *SSFVHandler) createPlanta(w http.ResponseWriter, r *http.Request) {
 		errResp(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Planta = group (contract §1.1): broker_base must be a single segment.
+	if reason := validateBrokerBase(body.BrokerBase); reason != "" {
+		errResp(w, http.StatusBadRequest, reason)
+		return
+	}
+	body.BrokerBase = strings.TrimSpace(body.BrokerBase)
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -247,8 +346,85 @@ func (h *SSFVHandler) updatePlanta(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deletePlanta soft-deletes a planta: it stamps fecha_baja and forces estado=0
+// (the ingestion pipeline only processes estado=1, so new data stops) on the
+// planta and all its equipos. The tbl_valores / tbl_alarmas history is kept
+// intact — a hard cascade DELETE of a planta's señales is millions of rows and
+// cannot finish inside an HTTP request (context deadline exceeded in prod).
 func (h *SSFVHandler) deletePlanta(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_planta WHERE planta_id=$1`)
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Capture broker_base (= the Sparkplug group_id, contract §1.1) so we can
+	// suppress this group's autodiscovery rows after the soft-delete commits. A
+	// missing planta leaves it empty and the suppression below is skipped.
+	var brokerBase string
+	_ = pool.QueryRow(ctx,
+		`SELECT broker_base FROM ssfv.tbl_planta WHERE planta_id = $1`, id).Scan(&brokerBase)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	for _, q := range []string{
+		// Deactivate the plant's signal bindings so they stop ingesting (the
+		// mapping cache filters sxe.activo=TRUE) and the UI tree dims them. The
+		// tbl_valores history stays addressable via equisenal_id. Without this
+		// the bindings linger as active "trash" after the plant is gone.
+		`UPDATE ssfv.tbl_senales_x_equipo
+		    SET activo = FALSE
+		    WHERE activo = TRUE
+		      AND equipo_id IN (SELECT equipo_id FROM ssfv.tbl_equipo WHERE planta_id = $1)`,
+		`UPDATE ssfv.tbl_equipo
+		    SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
+		    WHERE planta_id = $1 AND fecha_baja IS NULL`,
+		`UPDATE ssfv.tbl_planta
+		    SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
+		    WHERE planta_id = $1 AND fecha_baja IS NULL`,
+	} {
+		if _, err := tx.Exec(ctx, q, id); err != nil {
+			errResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Stop re-surfacing: a live producer keeps publishing NBIRTH/DBIRTH for this
+	// group, so its autodiscovered_entities rows would otherwise linger (orphaned
+	// 'approved') or invite re-approval that revives the planta. Mark them
+	// 'rejected' — the autodiscovery upsert only revives rows WHERE status =
+	// 'pending', so the live edge can no longer flip them back. Re-adding the
+	// plant later still works via explicit re-approval.
+	if brokerBase != "" && h.db != nil {
+		if _, err := h.db.ExecContext(ctx,
+			`UPDATE autodiscovered_entities SET status='rejected', last_seen=CURRENT_TIMESTAMP
+			 WHERE group_id=? AND status<>'rejected'`, brokerBase); err != nil {
+			log.Printf("ssfv: deletePlanta %d: suppress autodiscovery for group %q: %v", id, brokerBase, err)
+		}
+	}
+
+	// Cascade: SSFV is the principal, IEC-104 a dependent mirror — remove this
+	// plant's mirrors and its 104 link so no orphaned points remain on the SCADA.
+	if _, err := h.db.Exec(`DELETE FROM ssfv_iec104_link WHERE planta_id=?`, id); err != nil {
+		log.Printf("ssfv: deletePlanta %d: remove iec104 link: %v", id, err)
+	}
+	h.cascadeDeleteMirrors("ssfv_planta_id", int64(id))
+
+	h.triggerReload()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ─── Equipos ─────────────────────────────────────────────────────────────────
@@ -266,15 +442,25 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT e.equipo_id, e.planta_id, e.tipo_id, e.nombre_equipo,
 		       e.nombre_topic, e.fabricante, e.modelo, e.nro_serie,
-		       e.estado, e.fecha_creacion, e.fecha_modif,
+		       e.estado, e.fecha_creacion, e.fecha_modif, e.fecha_baja,
+		       e.hw_part_number, e.hw_product_type, e.hw_product_name,
+		       e.hw_firmware, e.hw_serial, e.hw_uuid, e.hw_reported_at,
 		       te.nombre AS tipo_nombre, p.nombre AS planta_nombre
 		FROM ssfv.tbl_equipo e
 		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id = e.tipo_id
 		JOIN ssfv.tbl_planta p ON p.planta_id = e.planta_id`
 	args := []any{}
+	conds := []string{}
 	if plantaID != "" {
-		query += ` WHERE e.planta_id=$1`
 		args = append(args, plantaID)
+		conds = append(conds, fmt.Sprintf("e.planta_id=$%d", len(args)))
+	}
+	// Soft-deleted equipos are hidden unless ?include_deleted=1.
+	if r.URL.Query().Get("include_deleted") != "1" {
+		conds = append(conds, "e.fecha_baja IS NULL")
+	}
+	if len(conds) > 0 {
+		query += ` WHERE ` + strings.Join(conds, " AND ")
 	}
 	query += ` ORDER BY e.equipo_id`
 
@@ -290,9 +476,12 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 		var eqID, plantaIDv, tipoID, estado int
 		var nombre, nombreTopic, tipoNombre, plantaNombre string
 		var fabricante, modelo, nroSerie *string
+		var hwPart, hwType, hwName, hwFw, hwSerial, hwUUID *string
 		var fechaC, fechaM time.Time
+		var fechaBaja, hwReportedAt *time.Time
 		if err := rows.Scan(&eqID, &plantaIDv, &tipoID, &nombre, &nombreTopic,
-			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM,
+			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM, &fechaBaja,
+			&hwPart, &hwType, &hwName, &hwFw, &hwSerial, &hwUUID, &hwReportedAt,
 			&tipoNombre, &plantaNombre); err != nil {
 			continue
 		}
@@ -301,7 +490,11 @@ func (h *SSFVHandler) listEquipos(w http.ResponseWriter, r *http.Request) {
 			"nombre_equipo": nombre, "nombre_topic": nombreTopic,
 			"fabricante": fabricante, "modelo": modelo, "nro_serie": nroSerie,
 			"estado": estado, "fecha_creacion": fechaC, "fecha_modif": fechaM,
-			"tipo_nombre": tipoNombre, "planta_nombre": plantaNombre,
+			"fecha_baja": fechaBaja,
+			"hw_part_number": hwPart, "hw_product_type": hwType, "hw_product_name": hwName,
+			"hw_firmware": hwFw, "hw_serial": hwSerial, "hw_uuid": hwUUID,
+			"hw_reported_at": hwReportedAt,
+			"tipo_nombre":    tipoNombre, "planta_nombre": plantaNombre,
 		})
 	}
 	if out == nil {
@@ -319,14 +512,24 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	rows, err := pool.Query(ctx, `
+	// Soft-deleted equipos (fecha_baja IS NOT NULL) are hidden unless the caller
+	// asks for the audit view with ?include_deleted=1 (matches listPlantas /
+	// listEquipos). Without this the UI keeps rendering a just-deleted equipo.
+	query := `
 		SELECT e.equipo_id, e.planta_id, e.tipo_id, e.nombre_equipo,
 		       e.nombre_topic, e.fabricante, e.modelo, e.nro_serie,
 		       e.estado, e.fecha_creacion, e.fecha_modif,
+		       e.hw_part_number, e.hw_product_type, e.hw_product_name,
+		       e.hw_firmware, e.hw_serial, e.hw_uuid, e.hw_reported_at,
 		       te.nombre AS tipo_nombre
 		FROM ssfv.tbl_equipo e
 		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id = e.tipo_id
-		WHERE e.planta_id=$1 ORDER BY e.equipo_id`, plantaID)
+		WHERE e.planta_id=$1`
+	if r.URL.Query().Get("include_deleted") != "1" {
+		query += ` AND e.fecha_baja IS NULL`
+	}
+	query += ` ORDER BY e.equipo_id`
+	rows, err := pool.Query(ctx, query, plantaID)
 	if err != nil {
 		errResp(w, http.StatusInternalServerError, err.Error())
 		return
@@ -337,9 +540,13 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 		var eqID, plantaIDv, tipoID, estado int
 		var nombre, nombreTopic, tipoNombre string
 		var fabricante, modelo, nroSerie *string
+		var hwPart, hwType, hwName, hwFw, hwSerial, hwUUID *string
 		var fechaC, fechaM time.Time
+		var hwReportedAt *time.Time
 		if err := rows.Scan(&eqID, &plantaIDv, &tipoID, &nombre, &nombreTopic,
-			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM, &tipoNombre); err != nil {
+			&fabricante, &modelo, &nroSerie, &estado, &fechaC, &fechaM,
+			&hwPart, &hwType, &hwName, &hwFw, &hwSerial, &hwUUID, &hwReportedAt,
+			&tipoNombre); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -347,7 +554,10 @@ func (h *SSFVHandler) listEquiposByPlanta(w http.ResponseWriter, r *http.Request
 			"nombre_equipo": nombre, "nombre_topic": nombreTopic,
 			"fabricante": fabricante, "modelo": modelo, "nro_serie": nroSerie,
 			"estado": estado, "fecha_creacion": fechaC, "fecha_modif": fechaM,
-			"tipo_nombre": tipoNombre,
+			"hw_part_number": hwPart, "hw_product_type": hwType, "hw_product_name": hwName,
+			"hw_firmware": hwFw, "hw_serial": hwSerial, "hw_uuid": hwUUID,
+			"hw_reported_at": hwReportedAt,
+			"tipo_nombre":    tipoNombre,
 		})
 	}
 	if out == nil {
@@ -443,6 +653,12 @@ func (h *SSFVHandler) createEquipo(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
+	// Prefix invariant (contract §1.1): nombre_topic must be under the group.
+	if reason := h.topicUnderPlanta(ctx, body.PlantaID, body.NombreTopic); reason != "" {
+		errResp(w, http.StatusUnprocessableEntity, reason)
+		return
+	}
+
 	// Insert equipo.
 	var id int
 	err := pool.QueryRow(ctx, `
@@ -458,71 +674,11 @@ func (h *SSFVHandler) createEquipo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-instanciate signals from Tbl_Senales_x_Tipo_Equipo.
-	if autoErr := h.autoInstanciarSenales(ctx, pool, id, body.TipoID); autoErr != nil {
-		log.Printf("ssfv: auto-instanciar equipo %d tipo %d: %v", id, body.TipoID, autoErr)
-	}
-
+	// No catalog-template pre-population: a new equipo starts with zero signal
+	// bindings. Its real signals are discovered from the device's NBIRTH/DBIRTH
+	// and bound on autodiscovery approval (approveAutodiscovered / AutoProvision).
 	h.triggerReload()
 	jsonResp(w, http.StatusCreated, map[string]any{"equipo_id": id})
-}
-
-// autoInstanciarSenales creates Tbl_Senales_x_Equipo rows for every signal
-// in the tipo_equipo catalog, handling indexed signals by expanding channels.
-func (h *SSFVHandler) autoInstanciarSenales(ctx context.Context, pool *pgxpool.Pool, equipoID, tipoID int) error {
-	rows, err := pool.Query(ctx, `
-		SELECT s.senal_id, s.codigo_senal, s.es_indexada, st.num_canales
-		FROM public.tbl_senales_x_tipo_equipo st
-		JOIN ssfv.tbl_senales s ON s.senal_id = st.senal_id
-		WHERE st.tipo_id = $1 AND s.activo = TRUE`, tipoID)
-	if err != nil {
-		return fmt.Errorf("query senales x tipo: %w", err)
-	}
-	defer rows.Close()
-
-	type senal struct {
-		senalID     int
-		codigoSenal string
-		esIndexada  bool
-		numCanales  int
-	}
-	var senales []senal
-	for rows.Next() {
-		var s senal
-		if err := rows.Scan(&s.senalID, &s.codigoSenal, &s.esIndexada, &s.numCanales); err != nil {
-			continue
-		}
-		senales = append(senales, s)
-	}
-
-	for _, s := range senales {
-		if s.esIndexada {
-			base := strings.TrimSuffix(s.codigoSenal, "_x")
-			for i := 1; i <= s.numCanales; i++ {
-				instancia := base + "_" + strconv.Itoa(i)
-				_, err := pool.Exec(ctx, `
-					INSERT INTO ssfv.tbl_senales_x_equipo
-					    (senal_id, equipo_id, indice_canal, nombre_instancia, activo)
-					VALUES ($1,$2,$3,$4,TRUE)
-					ON CONFLICT DO NOTHING`,
-					s.senalID, equipoID, i, instancia)
-				if err != nil {
-					log.Printf("ssfv: insert sxe %s idx %d: %v", instancia, i, err)
-				}
-			}
-		} else {
-			_, err := pool.Exec(ctx, `
-				INSERT INTO ssfv.tbl_senales_x_equipo
-				    (senal_id, equipo_id, nombre_instancia, activo)
-				VALUES ($1,$2,$3,TRUE)
-				ON CONFLICT DO NOTHING`,
-				s.senalID, equipoID, s.codigoSenal)
-			if err != nil {
-				log.Printf("ssfv: insert sxe %s: %v", s.codigoSenal, err)
-			}
-		}
-	}
-	return nil
 }
 
 func (h *SSFVHandler) updateEquipo(w http.ResponseWriter, r *http.Request) {
@@ -564,8 +720,52 @@ func (h *SSFVHandler) updateEquipo(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteEquipo soft-deletes a single equipo (see deletePlanta): fecha_baja is
+// stamped and estado forced to 0 so ingestion stops, while its tbl_valores /
+// tbl_alarmas history is preserved.
 func (h *SSFVHandler) deleteEquipo(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_equipo WHERE equipo_id=$1`)
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	for _, q := range []string{
+		// Deactivate this equipo's signal bindings (see deletePlanta) so they stop
+		// ingesting and the UI tree dims them, instead of lingering as active trash.
+		`UPDATE ssfv.tbl_senales_x_equipo
+		    SET activo = FALSE
+		    WHERE equipo_id = $1 AND activo = TRUE`,
+		`UPDATE ssfv.tbl_equipo
+		    SET estado = 0, fecha_baja = NOW(), fecha_modif = NOW()
+		    WHERE equipo_id = $1 AND fecha_baja IS NULL`,
+	} {
+		if _, err := tx.Exec(ctx, q, id); err != nil {
+			errResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Cascade: remove this equipo's IEC-104 mirrors (SSFV is the principal).
+	h.cascadeDeleteMirrors("ssfv_equipo_id", int64(id))
+
+	h.triggerReload()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ─── Señales ─────────────────────────────────────────────────────────────────
@@ -696,8 +896,63 @@ func (h *SSFVHandler) updateSenal(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteSenal removes a catalog señal. An unbound señal is hard-deleted
+// (204). A señal referenced by tbl_senales_x_equipo — and transitively by
+// tbl_valores history — cannot be deleted without destroying data, so the FK
+// violation downgrades the operation to a "baja": the señal and all its
+// bindings flip to activo=FALSE (ingestion stops, history stays) and the
+// response reports it (200 {deactivated, bindings}).
 func (h *SSFVHandler) deleteSenal(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_senales WHERE senal_id=$1`)
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := pool.Exec(ctx, `DELETE FROM ssfv.tbl_senales WHERE senal_id=$1`, id)
+	if err == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !isFKViolation(err) {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	ct, err := tx.Exec(ctx,
+		`UPDATE ssfv.tbl_senales_x_equipo SET activo=FALSE WHERE senal_id=$1`, id)
+	if err == nil {
+		_, err = tx.Exec(ctx,
+			`UPDATE ssfv.tbl_senales SET activo=FALSE WHERE senal_id=$1`, id)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.triggerReload()
+	jsonResp(w, http.StatusOK, map[string]any{
+		"deactivated": true,
+		"bindings":    ct.RowsAffected(),
+	})
+}
+
+// isFKViolation reports whether err is a PostgreSQL foreign-key violation
+// (SQLSTATE 23503).
+func isFKViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
 // ─── Asignaciones (Señales x Equipo) ─────────────────────────────────────────
@@ -795,6 +1050,8 @@ func (h *SSFVHandler) createAsignacion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.triggerReload()
+	// Auto-mirror onto IEC-104 when this signal's plant is linked (no-op otherwise).
+	h.autoMirrorEquisenal(ctx, int64(id))
 	jsonResp(w, http.StatusCreated, map[string]any{"equisenal_id": id})
 }
 
@@ -834,9 +1091,43 @@ func (h *SSFVHandler) updateAsignacion(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteAsignacion removes a señal↔equipo binding. A binding with no stored
+// values is hard-deleted (204); one referenced by tbl_valores history hits the
+// FK and is soft-deleted instead (activo=FALSE → ingestion stops, history
+// stays; 200 {deactivated}).
 func (h *SSFVHandler) deleteAsignacion(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := pool.Exec(ctx,
+		`DELETE FROM ssfv.tbl_senales_x_equipo WHERE equisenal_id=$1`, id)
+	switch {
+	case err == nil:
+		// Cascade: drop this assignment's IEC-104 mirror (SSFV is the principal).
+		h.cascadeDeleteMirrors("ssfv_equisenal_id", int64(id))
+		h.triggerReload()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case !isFKViolation(err):
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_senales_x_equipo SET activo=FALSE WHERE equisenal_id=$1`, id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Deactivated → stops ingesting, so drop the IEC-104 mirror too.
+	h.cascadeDeleteMirrors("ssfv_equisenal_id", int64(id))
 	h.triggerReload()
-	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_senales_x_equipo WHERE equisenal_id=$1`)
+	jsonResp(w, http.StatusOK, map[string]any{"deactivated": true})
 }
 
 // ─── Fronteras Comerciales ────────────────────────────────────────────────────
@@ -1087,7 +1378,736 @@ func (h *SSFVHandler) invalidateCache(w http.ResponseWriter, r *http.Request) {
 	jsonResp(w, http.StatusOK, map[string]any{"invalidated": true})
 }
 
+// ─── Tipo Equipo CRUD ─────────────────────────────────────────────────────────
+
+func (h *SSFVHandler) createTipoEquipo(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Nombre      string  `json:"nombre"`
+		Descripcion *string `json:"descripcion"`
+		Activo      bool    `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var id int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO ssfv.tbl_tipo_equipo (nombre, descripcion, activo) VALUES ($1,$2,$3) RETURNING tipo_id`,
+		body.Nombre, body.Descripcion, body.Activo).Scan(&id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusCreated, map[string]any{"tipo_id": id})
+}
+
+func (h *SSFVHandler) updateTipoEquipo(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Nombre      string  `json:"nombre"`
+		Descripcion *string `json:"descripcion"`
+		Activo      bool    `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_tipo_equipo SET nombre=$1, descripcion=$2, activo=$3, fecha_modif=NOW() WHERE tipo_id=$4`,
+		body.Nombre, body.Descripcion, body.Activo, id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *SSFVHandler) deleteTipoEquipo(w http.ResponseWriter, r *http.Request) {
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_tipo_equipo WHERE tipo_id=$1`)
+}
+
+// ─── Tipo Variable CRUD ───────────────────────────────────────────────────────
+
+func (h *SSFVHandler) createTipoVariable(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Nombre      string  `json:"nombre"`
+		Descripcion *string `json:"descripcion"`
+		Activo      bool    `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var id int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO ssfv.tbl_tipo_variable (nombre, descripcion, activo) VALUES ($1,$2,$3) RETURNING tipovar_id`,
+		body.Nombre, body.Descripcion, body.Activo).Scan(&id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusCreated, map[string]any{"tipovar_id": id})
+}
+
+func (h *SSFVHandler) updateTipoVariable(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Nombre      string  `json:"nombre"`
+		Descripcion *string `json:"descripcion"`
+		Activo      bool    `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_tipo_variable SET nombre=$1, descripcion=$2, activo=$3, fecha_modif=NOW() WHERE tipovar_id=$4`,
+		body.Nombre, body.Descripcion, body.Activo, id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *SSFVHandler) deleteTipoVariable(w http.ResponseWriter, r *http.Request) {
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_tipo_variable WHERE tipovar_id=$1`)
+}
+
+// ─── Unidades CRUD ────────────────────────────────────────────────────────────
+
+func (h *SSFVHandler) createUnidad(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Simbolo  string `json:"simbolo"`
+		Nombre   string `json:"nombre"`
+		Magnitud string `json:"magnitud"`
+		Activo   bool   `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var id int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO ssfv.tbl_unidades (simbolo, nombre, magnitud, activo) VALUES ($1,$2,$3,$4) RETURNING unidad_id`,
+		body.Simbolo, body.Nombre, body.Magnitud, body.Activo).Scan(&id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusCreated, map[string]any{"unidad_id": id})
+}
+
+func (h *SSFVHandler) updateUnidad(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		Simbolo  string `json:"simbolo"`
+		Nombre   string `json:"nombre"`
+		Magnitud string `json:"magnitud"`
+		Activo   bool   `json:"activo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_unidades SET simbolo=$1, nombre=$2, magnitud=$3, activo=$4 WHERE unidad_id=$5`,
+		body.Simbolo, body.Nombre, body.Magnitud, body.Activo, id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *SSFVHandler) deleteUnidad(w http.ResponseWriter, r *http.Request) {
+	h.deleteRow(w, r, `DELETE FROM ssfv.tbl_unidades WHERE unidad_id=$1`)
+}
+
+// ─── Señales x Tipo Equipo ────────────────────────────────────────────────────
+
+func (h *SSFVHandler) listSenalesXTipo(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	tipoID := r.URL.Query().Get("tipo_id")
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT st.senaltipo_id, st.senal_id, st.tipo_id, st.num_canales,
+		       s.nombre AS senal_nombre, s.codigo_senal,
+		       te.nombre AS tipo_nombre
+		FROM public.tbl_senales_x_tipo_equipo st
+		JOIN ssfv.tbl_senales     s  ON s.senal_id  = st.senal_id
+		JOIN ssfv.tbl_tipo_equipo te ON te.tipo_id  = st.tipo_id`
+	args := []any{}
+	if tipoID != "" {
+		query += ` WHERE st.tipo_id=$1`
+		args = append(args, tipoID)
+	}
+	query += ` ORDER BY te.nombre, s.codigo_senal`
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var senaltipoID, senalID, tipoIDv, numCanales int
+		var senalNombre, codigoSenal, tipoNombre string
+		if err := rows.Scan(&senaltipoID, &senalID, &tipoIDv, &numCanales,
+			&senalNombre, &codigoSenal, &tipoNombre); err != nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"senaltipo_id": senaltipoID, "senal_id": senalID,
+			"tipo_id": tipoIDv, "num_canales": numCanales,
+			"senal_nombre": senalNombre, "codigo_senal": codigoSenal,
+			"tipo_nombre": tipoNombre,
+		})
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	jsonResp(w, http.StatusOK, out)
+}
+
+func (h *SSFVHandler) createSenalXTipo(w http.ResponseWriter, r *http.Request) {
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	var body struct {
+		SenalID    int `json:"senal_id"`
+		TipoID     int `json:"tipo_id"`
+		NumCanales int `json:"num_canales"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.NumCanales < 1 {
+		body.NumCanales = 1
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var id int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO public.tbl_senales_x_tipo_equipo (senal_id, tipo_id, num_canales)
+		 VALUES ($1,$2,$3) ON CONFLICT (senal_id, tipo_id) DO UPDATE SET num_canales=$3
+		 RETURNING senaltipo_id`,
+		body.SenalID, body.TipoID, body.NumCanales).Scan(&id); err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusCreated, map[string]any{"senaltipo_id": id})
+}
+
+func (h *SSFVHandler) deleteSenalXTipo(w http.ResponseWriter, r *http.Request) {
+	h.deleteRow(w, r, `DELETE FROM public.tbl_senales_x_tipo_equipo WHERE senaltipo_id=$1`)
+}
+
 // ─── Generic helpers ──────────────────────────────────────────────────────────
+
+// ─── Auto-Discovery ───────────────────────────────────────────────────────────
+
+func (h *SSFVHandler) listAutodiscovered(w http.ResponseWriter, r *http.Request) {
+	if h.db == nil {
+		errResp(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+	rows, err := h.db.QueryContext(r.Context(), `
+		SELECT id, group_id, node_id, device_id, metric_names, metric_meta, node_properties, status, first_seen, last_seen
+		FROM autodiscovered_entities
+		ORDER BY last_seen DESC`)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var id int64
+		var groupID, nodeID, deviceID, rawNames, rawMeta, rawProps, status string
+		var firstSeen, lastSeen time.Time
+		if err := rows.Scan(&id, &groupID, &nodeID, &deviceID, &rawNames, &rawMeta, &rawProps, &status, &firstSeen, &lastSeen); err != nil {
+			continue
+		}
+		var names []string
+		_ = json.Unmarshal([]byte(rawNames), &names)
+		if names == nil {
+			names = []string{}
+		}
+		var metaRaw json.RawMessage
+		if rawMeta != "" && rawMeta != "[]" {
+			metaRaw = json.RawMessage(rawMeta)
+		} else {
+			metaRaw = json.RawMessage("[]")
+		}
+		var propsRaw json.RawMessage
+		if rawProps != "" && rawProps != "{}" {
+			propsRaw = json.RawMessage(rawProps)
+		} else {
+			propsRaw = json.RawMessage("{}")
+		}
+		out = append(out, map[string]any{
+			"id": id, "group_id": groupID, "node_id": nodeID, "device_id": deviceID,
+			"metric_names": names, "metric_meta": metaRaw, "node_properties": propsRaw,
+			"status": status, "first_seen": firstSeen, "last_seen": lastSeen,
+		})
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	jsonResp(w, http.StatusOK, out)
+}
+
+// Catalog identity column limits — kept in sync with the ssfv schema
+// (migration 0007). FIWARE/UNS channelization keeps real codes well under these
+// (codigo_senal "Network/RxRate_kbps"=19, token "…@docker0"=27); anything that
+// still overflows is quarantined and reported, never silently dropped.
+// (Widening these columns is blocked by dependent views — a separate task that
+// must drop/recreate them; not needed while channelized codes fit.)
+const (
+	codigoSenalMax     = 20 // ssfv.tbl_senales.codigo_senal       VARCHAR(20)
+	nombreInstanciaMax = 30 // ssfv.tbl_senales_x_equipo.nombre_instancia VARCHAR(30)
+)
+
+// rejectedSignal is one quarantined create_signals entry returned to the
+// operator so a partial approval never looks like a clean success.
+type rejectedSignal struct {
+	CodigoSenal     string `json:"codigo_senal"`
+	NombreInstancia string `json:"nombre_instancia,omitempty"`
+	Reason          string `json:"reason"`
+}
+
+// validateCreateSignal enforces required fields and length constraints and
+// computes the catalog match token (→ nombre_instancia). It returns the token
+// and a non-empty reason when the signal must be quarantined.
+func validateCreateSignal(codigo, instancia string, tipoVarID, unidadID int) (instance, reason string) {
+	codigo = strings.TrimSpace(codigo)
+	instance = strings.TrimSpace(instancia)
+	if instance == "" {
+		instance = "default"
+	}
+	switch {
+	case codigo == "":
+		return instance, "codigo_senal is required"
+	case tipoVarID == 0:
+		return instance, "tipavar_id is required"
+	case unidadID == 0:
+		return instance, "unidad_id is required"
+	case len(codigo) > codigoSenalMax:
+		return instance, fmt.Sprintf("codigo_senal is %d chars (max %d)", len(codigo), codigoSenalMax)
+	case len(instance) > nombreInstanciaMax:
+		return instance, fmt.Sprintf("nombre_instancia is %d chars (max %d)", len(instance), nombreInstanciaMax)
+	}
+	return instance, ""
+}
+
+// validateBrokerBase enforces that a planta's broker_base is the Sparkplug group
+// (sparkplug-contract.md §1.1): one non-empty topic segment — no '/', no spaces.
+// Returns a non-empty rejection reason on failure.
+func validateBrokerBase(b string) string {
+	b = strings.TrimSpace(b)
+	switch {
+	case b == "":
+		return "broker_base (group) es obligatorio"
+	case strings.ContainsAny(b, "/ \t"):
+		return "broker_base debe ser un único segmento (el group_id de Sparkplug), sin '/' ni espacios"
+	}
+	return ""
+}
+
+// topicUnderPlanta returns a rejection reason if nombreTopic does not start with
+// the planta's broker_base (the group) — the prefix invariant of §1.1. The DB
+// trigger (migration 0014) is the backstop; this gives the operator a clear 422.
+func (h *SSFVHandler) topicUnderPlanta(ctx context.Context, plantaID int, nombreTopic string) string {
+	pool := h.pool()
+	if pool == nil {
+		return ""
+	}
+	var base string
+	if err := pool.QueryRow(ctx,
+		`SELECT broker_base FROM ssfv.tbl_planta WHERE planta_id=$1`, plantaID).Scan(&base); err != nil {
+		return "" // planta missing → the FK / NOT NULL constraint surfaces it
+	}
+	if nombreTopic != base && !strings.HasPrefix(nombreTopic, base+"/") {
+		return fmt.Sprintf("nombre_topic %q debe empezar por el group (broker_base) de la planta: %q", nombreTopic, base)
+	}
+	return ""
+}
+
+func (h *SSFVHandler) approveAutodiscovered(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if h.db == nil {
+		errResp(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	var groupID, nodeID, deviceID string
+	err := h.db.QueryRowContext(r.Context(),
+		`SELECT group_id, node_id, device_id FROM autodiscovered_entities WHERE id=?`, id).
+		Scan(&groupID, &nodeID, &deviceID)
+	if err == sql.ErrNoRows {
+		errResp(w, http.StatusNotFound, "entity not found")
+		return
+	}
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	var body struct {
+		PlantaID     int    `json:"planta_id"`
+		TipoID       int    `json:"tipo_id"`
+		NombreEquipo string `json:"nombre_equipo"`
+		NombreTopic  string `json:"nombre_topic"`
+		// CreatePlanta: stage the parent Planta together with the entity when it
+		// does not exist yet (contract v3 §1.1 / §7). Used only when planta_id is
+		// 0. nombre = the UI alias (pre-filled from the NBIRTH uns/planta node
+		// property); broker_base = the Sparkplug group_id (pre-filled from the
+		// entity's group). Idempotent on broker_base so re-approval reuses the row.
+		CreatePlanta *struct {
+			Nombre     string `json:"nombre"`
+			BrokerBase string `json:"broker_base"`
+		} `json:"create_planta"`
+		// CreateSignals: metrics with no catalog entry. Each is inserted into
+		// ssfv.tbl_senales and linked to the tipo_equipo template so it is
+		// instantiated for this (and every future) equipo of the same type.
+		CreateSignals []struct {
+			CodigoSenal string  `json:"codigo_senal"`
+			Nombre      string  `json:"nombre"`
+			TipoVarID   int     `json:"tipavar_id"`
+			UnidadID    int     `json:"unidad_id"`
+			TipoValor   string  `json:"tipo_valor"`
+			Descripcion *string `json:"descripcion"`
+			// NombreInstancia is the FIWARE entity instance / channel (e.g.
+			// "docker0"). Empty/"default" ⇒ a flat signal. Non-default ⇒ the
+			// signal is bound to THIS equipo with match token "codigo@instance".
+			NombreInstancia string `json:"nombre_instancia"`
+		} `json:"create_signals"`
+		// LinkSignals: existing catalog señal_ids to add to the tipo template
+		// (signal already exists but the type's plantilla didn't include it).
+		LinkSignals []int `json:"link_signals"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResp(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.NombreTopic == "" {
+		if deviceID != "" {
+			body.NombreTopic = groupID + "/" + nodeID + "/" + deviceID
+		} else {
+			body.NombreTopic = groupID + "/" + nodeID
+		}
+	}
+	if body.NombreEquipo == "" {
+		if deviceID != "" {
+			body.NombreEquipo = deviceID
+		} else {
+			body.NombreEquipo = nodeID
+		}
+	}
+
+	pool := h.pool()
+	if pool == nil {
+		errResp(w, http.StatusServiceUnavailable, "ssfv adapter not connected")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// Stage the parent Planta when the operator asked for it (planta does not
+	// exist yet). broker_base defaults to the entity's own group_id, which by
+	// construction satisfies the prefix invariant below.
+	if body.PlantaID == 0 && body.CreatePlanta != nil {
+		cp := body.CreatePlanta
+		if cp.BrokerBase == "" {
+			cp.BrokerBase = groupID
+		}
+		if reason := validateBrokerBase(cp.BrokerBase); reason != "" {
+			errResp(w, http.StatusUnprocessableEntity, reason)
+			return
+		}
+		if strings.TrimSpace(cp.Nombre) == "" {
+			cp.Nombre = cp.BrokerBase
+		}
+		// Re-approval after a soft delete revives the planta (estado=1,
+		// fecha_baja cleared) instead of failing on the unique broker_base.
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO ssfv.tbl_planta (nombre, broker_base, estado)
+			VALUES ($1,$2,1)
+			ON CONFLICT (broker_base) DO UPDATE SET
+			    nombre      = excluded.nombre,
+			    estado      = 1,
+			    fecha_baja  = NULL,
+			    fecha_modif = NOW()
+			RETURNING planta_id`,
+			strings.TrimSpace(cp.Nombre), cp.BrokerBase).Scan(&body.PlantaID); err != nil {
+			errResp(w, http.StatusInternalServerError, "create planta: "+err.Error())
+			return
+		}
+	}
+
+	// Prefix invariant (contract §1.1): the entity topic must be under the
+	// planta's group. Reject loudly before creating the equipo.
+	if reason := h.topicUnderPlanta(ctx, body.PlantaID, body.NombreTopic); reason != "" {
+		errResp(w, http.StatusUnprocessableEntity, reason)
+		return
+	}
+
+	var equipoID int
+	err = pool.QueryRow(ctx, `
+		INSERT INTO ssfv.tbl_equipo (planta_id, tipo_id, nombre_equipo, nombre_topic, estado)
+		VALUES ($1,$2,$3,$4,1)
+		ON CONFLICT (nombre_topic) DO UPDATE SET
+		    planta_id     = excluded.planta_id,
+		    tipo_id       = excluded.tipo_id,
+		    nombre_equipo = excluded.nombre_equipo,
+		    estado        = excluded.estado,
+		    fecha_baja    = NULL,
+		    fecha_modif   = NOW()
+		RETURNING equipo_id`,
+		body.PlantaID, body.TipoID, body.NombreEquipo, body.NombreTopic).Scan(&equipoID)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Re-approval restores the whole entity: reactivate any bindings that were
+	// soft-deactivated (DELETE /asignaciones on a binding with history, or a
+	// deactivated señal) so ingestion resumes. The channelized bind below uses
+	// NOT EXISTS and would otherwise leave a deactivated binding dormant.
+	if _, err := pool.Exec(ctx,
+		`UPDATE ssfv.tbl_senales_x_equipo SET activo = TRUE
+		 WHERE equipo_id = $1 AND activo = FALSE`, equipoID); err != nil {
+		errResp(w, http.StatusInternalServerError, "reactivate bindings: "+err.Error())
+		return
+	}
+
+	// ── New catalog signals (from NBIRTH metrics with no existing señal) ──
+	// Insert into ssfv.tbl_senales (strict: tipovar_id + unidad_id FKs required,
+	// tipo_valor CHECK, codigo_senal ≤20 chars) then attach to the tipo template.
+	// Idempotent via ON CONFLICT so re-approval never duplicates rows.
+	created := 0
+	rejected := make([]rejectedSignal, 0)
+	for _, cs := range body.CreateSignals {
+		// Fail loud: quarantine invalid signals instead of silently skipping so
+		// a partial approval is never reported as a clean 200.
+		instance, reason := validateCreateSignal(cs.CodigoSenal, cs.NombreInstancia, cs.TipoVarID, cs.UnidadID)
+		if reason != "" {
+			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, reason})
+			continue
+		}
+		tipoValor := cs.TipoValor
+		if tipoValor != "Instantaneo" && tipoValor != "Acumulado" {
+			tipoValor = "Instantaneo"
+		}
+		nombre := cs.Nombre
+		if nombre == "" {
+			nombre = cs.CodigoSenal
+		}
+		// One catalog row per codigo_senal, regardless of tipo_variable: reuse an
+		// existing señal instead of keying creation on (codigo_senal, tipovar_id).
+		// The composite key spawned duplicates whenever a re-approval picked a
+		// different fallback variable, or when the code format changed (legacy
+		// full-path "CPU/Usage_pct" vs contract-v3 leaf "Usage_pct").
+		var senalID int
+		if err := pool.QueryRow(ctx,
+			`SELECT senal_id FROM ssfv.tbl_senales WHERE codigo_senal=$1`, cs.CodigoSenal).Scan(&senalID); err == nil {
+			pool.Exec(ctx, `UPDATE ssfv.tbl_senales SET activo=TRUE WHERE senal_id=$1`, senalID) //nolint:errcheck
+		} else if insErr := pool.QueryRow(ctx, `
+			INSERT INTO ssfv.tbl_senales
+			    (tipovar_id, unidad_id, nombre, descripcion, tipo_valor, codigo_senal, es_indexada, activo)
+			VALUES ($1,$2,$3,$4,$5,$6,FALSE,TRUE)
+			RETURNING senal_id`,
+			cs.TipoVarID, cs.UnidadID, nombre, cs.Descripcion, tipoValor, cs.CodigoSenal).Scan(&senalID); insErr != nil {
+			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db insert: " + insErr.Error()})
+			continue
+		}
+
+		// Bind the signal directly to THIS equipo (no tipo-template detour). Flat
+		// signals use nombre_instancia='default' (the attribute lives in
+		// codigo_senal); channelized signals use the pure instance (C1). NOT EXISTS
+		// keeps re-approval idempotent (NULL!=NULL defeats ON CONFLICT here).
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
+			SELECT $1,$2,$3,TRUE
+			WHERE NOT EXISTS (SELECT 1 FROM ssfv.tbl_senales_x_equipo
+			                  WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia=$4)`,
+			senalID, equipoID, instance, instance); err != nil {
+			rejected = append(rejected, rejectedSignal{cs.CodigoSenal, cs.NombreInstancia, "db bind: " + err.Error()})
+			continue
+		}
+		created++
+	}
+
+	// ── Bind existing catalog signals directly to this equipo ─────────────
+	// (Previously these were added to the tipo template and instantiated; with
+	// N/DBIRTH-driven discovery we bind them straight to the equipo.)
+	linked := 0
+	for _, senalID := range body.LinkSignals {
+		if senalID == 0 {
+			continue
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO ssfv.tbl_senales_x_equipo (senal_id, equipo_id, nombre_instancia, activo)
+			SELECT $1,$2,'default',TRUE
+			WHERE NOT EXISTS (SELECT 1 FROM ssfv.tbl_senales_x_equipo
+			                  WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia='default')`,
+			senalID, equipoID); err != nil {
+			log.Printf("autodiscovery: bind signal %d to equipo %d: %v", senalID, equipoID, err)
+			continue
+		}
+		linked++
+	}
+
+	if _, dbErr := h.db.ExecContext(r.Context(),
+		`UPDATE autodiscovered_entities SET status='approved', last_seen=CURRENT_TIMESTAMP WHERE id=?`, id); dbErr != nil {
+		log.Printf("autodiscovery: mark approved id=%d: %v", id, dbErr)
+	}
+
+	h.triggerReload()
+
+	// Ask the node to republish NBIRTH+NDATA now that the cache is hot.
+	if h.rebirthFn != nil {
+		go h.rebirthFn(groupID, nodeID)
+	}
+
+	resp := map[string]any{
+		"equipo_id": equipoID,
+		"created":   created,
+		"linked":    linked,
+		"rejected":  rejected,
+	}
+	switch {
+	case len(rejected) == 0:
+		jsonResp(w, http.StatusOK, resp) // clean
+	case created+linked > 0:
+		jsonResp(w, http.StatusMultiStatus, resp) // 207 — partial: operator sees what dropped
+	default:
+		jsonResp(w, http.StatusBadRequest, resp) // 400 — every requested signal was rejected
+	}
+}
+
+func (h *SSFVHandler) rejectAutodiscovered(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if h.db == nil {
+		errResp(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+	res, err := h.db.ExecContext(r.Context(),
+		`UPDATE autodiscovered_entities SET status='rejected', last_seen=CURRENT_TIMESTAMP WHERE id=?`, id)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		errResp(w, http.StatusNotFound, "entity not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resetAutodiscovered resets an entity's status back to 'pending', making it
+// available for re-approval.  Use this when the assigned planta was deleted or
+// when the operator wants to re-assign the device to a different plant/type.
+func (h *SSFVHandler) resetAutodiscovered(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if h.db == nil {
+		errResp(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+	res, err := h.db.ExecContext(r.Context(),
+		`UPDATE autodiscovered_entities SET status='pending', last_seen=CURRENT_TIMESTAMP WHERE id=?`, id)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		errResp(w, http.StatusNotFound, "entity not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteAutodiscovered permanently removes a rejected autodiscovered entity.
+// Returns 409 if the entity is not in 'rejected' status to prevent accidental
+// removal of pending or approved records.
+func (h *SSFVHandler) deleteAutodiscovered(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if h.db == nil {
+		errResp(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+	res, err := h.db.ExecContext(r.Context(),
+		`DELETE FROM autodiscovered_entities WHERE id=? AND status='rejected'`, id)
+	if err != nil {
+		errResp(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Either not found or not rejected — distinguish with a second lookup.
+		var status string
+		lookupErr := h.db.QueryRowContext(r.Context(),
+			`SELECT status FROM autodiscovered_entities WHERE id=?`, id).Scan(&status)
+		if lookupErr == sql.ErrNoRows {
+			errResp(w, http.StatusNotFound, "entity not found")
+		} else {
+			errResp(w, http.StatusConflict, "only rejected entities can be deleted (current status: "+status+")")
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 
 func (h *SSFVHandler) deleteRow(w http.ResponseWriter, r *http.Request, query string) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
@@ -1140,6 +2160,234 @@ func (h *SSFVHandler) queryJSON(w http.ResponseWriter, r *http.Request, query st
 		out = []map[string]any{}
 	}
 	jsonResp(w, http.StatusOK, out)
+}
+
+// AutoProvision is called by AutoDiscoveryService when a NBIRTH carries
+// both entity_type and planta_id node properties. It creates (or idempotently
+// updates) tbl_equipo rows and all required signal linkages, then triggers a
+// mapping cache reload.
+//
+// Two modes:
+//   - Single-entity (valve): no DeviceTopic in meta → one equipo per node
+//   - Multi-device (solar): meta carries DeviceTopic per metric → one equipo per
+//     unique DeviceTopic, each group provisioned with its own DeviceType signals
+//
+// Safe to call from any goroutine (runs under its own context).
+func (h *SSFVHandler) AutoProvision(groupID, nodeID, deviceID string, nodeProps map[string]string, meta []worker.MetricMeta) {
+	pool := h.pool()
+	if pool == nil {
+		log.Printf("autodiscovery: AutoProvision %s/%s — ssfv adapter not connected", groupID, nodeID)
+		return
+	}
+
+	plantaIDStr := nodeProps["planta_id"]
+	plantaID, err := strconv.Atoi(plantaIDStr)
+	if err != nil || plantaID == 0 {
+		// Try extracting from first metric (solar mode carries planta_id per-metric).
+		for _, mm := range meta {
+			if mm.DeviceTopic != "" {
+				break
+			}
+		}
+		log.Printf("autodiscovery: AutoProvision %s/%s — invalid planta_id %q", groupID, nodeID, plantaIDStr)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Detect mode: if any metric has DeviceTopic set we are in multi-device mode.
+	deviceGroups := make(map[string][]worker.MetricMeta) // deviceTopic → metrics
+	var deviceOrder []string
+	for _, mm := range meta {
+		if mm.DeviceTopic == "" {
+			continue
+		}
+		if _, seen := deviceGroups[mm.DeviceTopic]; !seen {
+			deviceOrder = append(deviceOrder, mm.DeviceTopic)
+		}
+		deviceGroups[mm.DeviceTopic] = append(deviceGroups[mm.DeviceTopic], mm)
+	}
+
+	multiDevice := len(deviceGroups) > 0
+
+	if multiDevice {
+		// Solar / multi-device mode: provision one equipo per device group.
+		totalSignals := 0
+		for _, devTopic := range deviceOrder {
+			devMeta := deviceGroups[devTopic]
+			devType := devMeta[0].DeviceType
+			if devType == "" {
+				devType = nodeProps["entity_type"]
+			}
+			// Last path segment of devTopic is the device ID (e.g. "INV_1").
+			parts := strings.Split(devTopic, "/")
+			equipoName := parts[len(parts)-1]
+
+			n := h.provisionOneEquipo(ctx, pool, plantaID, devType, equipoName, devTopic, devMeta)
+			totalSignals += n
+		}
+		log.Printf("autodiscovery: AutoProvision %s/%s — %d device(s), planta=%d",
+			groupID, nodeID, len(deviceOrder), plantaID)
+	} else {
+		// Single-entity mode (valve / generic node).
+		entityType := nodeProps["entity_type"]
+		nombreTopic := groupID + "/" + nodeID
+		if deviceID != "" {
+			nombreTopic += "/" + deviceID
+		}
+		equipoName := nodeID
+		if deviceID != "" {
+			equipoName = deviceID
+		}
+		n := h.provisionOneEquipo(ctx, pool, plantaID, entityType, equipoName, nombreTopic, meta)
+		log.Printf("autodiscovery: AutoProvision %s/%s — equipo %q tipo=%s planta=%d signals=%d",
+			groupID, nodeID, nombreTopic, entityType, plantaID, n)
+	}
+
+	// Mark the autodiscovered entity as approved.
+	if h.db != nil {
+		if _, err := h.db.Exec(
+			`UPDATE autodiscovered_entities SET status='approved', last_seen=CURRENT_TIMESTAMP
+			 WHERE group_id=? AND node_id=? AND device_id=?`,
+			groupID, nodeID, deviceID); err != nil {
+			log.Printf("autodiscovery: AutoProvision mark approved %s/%s: %v", groupID, nodeID, err)
+		}
+	}
+
+	h.triggerReload()
+}
+
+// provisionOneEquipo creates (or updates) one tbl_equipo row and all its
+// signal linkages. Returns the number of signals successfully linked.
+func (h *SSFVHandler) provisionOneEquipo(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	plantaID int,
+	entityType, equipoName, nombreTopic string,
+	meta []worker.MetricMeta,
+) int {
+	// Resolve (or create) tipo_equipo.
+	var tipoID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO ssfv.tbl_tipo_equipo (nombre, descripcion)
+		VALUES ($1, $1)
+		ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
+		RETURNING tipo_id`, entityType).Scan(&tipoID); err != nil {
+		log.Printf("autodiscovery: provisionOneEquipo %q — upsert tipo_equipo: %v", nombreTopic, err)
+		return 0
+	}
+
+	// Upsert tbl_equipo.
+	var equipoID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO ssfv.tbl_equipo (planta_id, tipo_id, nombre_equipo, nombre_topic, estado)
+		VALUES ($1,$2,$3,$4,1)
+		ON CONFLICT (nombre_topic) DO UPDATE SET
+		    planta_id     = excluded.planta_id,
+		    tipo_id       = excluded.tipo_id,
+		    nombre_equipo = excluded.nombre_equipo,
+		    estado        = excluded.estado,
+		    fecha_baja    = NULL,
+		    fecha_modif   = NOW()
+		RETURNING equipo_id`,
+		plantaID, tipoID, equipoName, nombreTopic).Scan(&equipoID); err != nil {
+		log.Printf("autodiscovery: provisionOneEquipo %q — upsert equipo: %v", nombreTopic, err)
+		return 0
+	}
+
+	// Signals are derived entirely from the device's NBIRTH/DBIRTH metric_meta
+	// below — no catalog-template pre-population.
+
+	// Create and link custom signals from metric_meta.
+	// For solar mode the nombre_instancia is the signal element code (last path segment of Name).
+	linked := 0
+	for _, mm := range meta {
+		if mm.TipoVariable == "" {
+			continue
+		}
+		var tipovarID int
+		if err := pool.QueryRow(ctx,
+			`SELECT tipovar_id FROM ssfv.tbl_tipo_variable WHERE nombre = $1`, mm.TipoVariable).Scan(&tipovarID); err != nil {
+			continue
+		}
+		unidadSimbolo := mm.EngUnit
+		if unidadSimbolo == "" {
+			unidadSimbolo = "Adimensional"
+		}
+		var unidadID int
+		if err := pool.QueryRow(ctx,
+			`SELECT unidad_id FROM ssfv.tbl_unidades WHERE simbolo = $1`, unidadSimbolo).Scan(&unidadID); err != nil {
+			// Fall back to Adimensional.
+			if err2 := pool.QueryRow(ctx,
+				`SELECT unidad_id FROM ssfv.tbl_unidades WHERE simbolo = 'Adimensional'`).Scan(&unidadID); err2 != nil {
+				continue
+			}
+		}
+		tipoValor := mm.TipoValor
+		if tipoValor == "" {
+			tipoValor = "Instantaneo"
+		}
+		nombre := mm.Description
+		if nombre == "" {
+			nombre = mm.Name
+		}
+		// For solar signals the metric Name is the full path; the signal code
+		// (the last segment) is the canonical codigo_senal for the catalog.
+		codigoSenal := mm.Name
+		instancia := mm.Name
+		if mm.DeviceTopic != "" {
+			// Extract element code: everything after "deviceTopic/"
+			prefix := mm.DeviceTopic + "/"
+			if strings.HasPrefix(mm.Name, prefix) {
+				codigoSenal = mm.Name[len(prefix):]
+				instancia = codigoSenal
+			}
+		}
+
+		// Idempotency: skip if this equipo already has a binding for this instance
+		// (e.g. a prior provisioning pass, or re-provision of the same NBIRTH).
+		// Inserting a second row with a different senal_id would create duplicate
+		// mappings that corrupt the SSFVMappingCache lookup.
+		var alreadyLinked int
+		if err := pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM ssfv.tbl_senales_x_equipo
+			 WHERE equipo_id=$1 AND nombre_instancia=$2`,
+			equipoID, instancia).Scan(&alreadyLinked); err == nil && alreadyLinked > 0 {
+			linked++ // already bound
+			continue
+		}
+
+		// One catalog row per codigo_senal (see approveAutodiscovered): reuse an
+		// existing señal rather than keying on (codigo_senal, tipovar_id).
+		var senalID int
+		if err := pool.QueryRow(ctx,
+			`SELECT senal_id FROM ssfv.tbl_senales WHERE codigo_senal=$1`, codigoSenal).Scan(&senalID); err == nil {
+			pool.Exec(ctx, `UPDATE ssfv.tbl_senales SET activo=TRUE WHERE senal_id=$1`, senalID) //nolint:errcheck
+		} else if insErr := pool.QueryRow(ctx, `
+			INSERT INTO ssfv.tbl_senales
+			    (tipovar_id, unidad_id, nombre, tipo_valor, codigo_senal, es_indexada, activo)
+			VALUES ($1,$2,$3,$4,$5,FALSE,TRUE)
+			RETURNING senal_id`,
+			tipovarID, unidadID, nombre, tipoValor, codigoSenal).Scan(&senalID); insErr != nil {
+			log.Printf("autodiscovery: provisionOneEquipo signal %q: %v", codigoSenal, insErr)
+			continue
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO ssfv.tbl_senales_x_equipo
+			    (senal_id, equipo_id, nombre_instancia, activo)
+			SELECT $1,$2,$3,TRUE
+			WHERE NOT EXISTS (
+			    SELECT 1 FROM ssfv.tbl_senales_x_equipo
+			    WHERE senal_id=$1 AND equipo_id=$2 AND indice_canal IS NULL AND nombre_instancia=$4
+			)`,
+			senalID, equipoID, instancia, instancia); err != nil {
+			log.Printf("autodiscovery: provisionOneEquipo link %q equipo %d: %v", instancia, equipoID, err)
+			continue
+		}
+		linked++
+	}
+	return linked
 }
 
 func jsonResp(w http.ResponseWriter, status int, v any) {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, reactive } from 'vue'
 import { toast } from 'vue-sonner'
-import { api, type IEC104Server, type IEC104Gateway } from '@/api'
+import { api, type IEC104Server, type IEC104Gateway, type SignalMapping, type GatewaySignal, type Topic, type Device } from '@/api'
 import { t } from '@/i18n'
 import { useStatus } from '@/composables/useStatus'
 import StatusPill from '@/components/StatusPill.vue'
@@ -14,12 +14,77 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger,
 } from '@/components/ui/dialog'
-import { Server, Save, RefreshCw, Plus, Pencil, Trash2, Globe, ShieldCheck, ShieldAlert, Link2, PlugZap } from 'lucide-vue-next'
+import {
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
+} from '@/components/ui/select'
+import { Server, Save, RefreshCw, Plus, Pencil, Trash2, Globe, ShieldCheck, ShieldAlert, Link2, PlugZap, Layers, Database, Search, X } from 'lucide-vue-next'
 import { useConfirm } from '@/composables/useConfirm'
 
 const { confirm } = useConfirm()
 
 const { status } = useStatus()
+
+// ── Multi-select: servers ────────────────────────────────────────────────────
+const selectedServers = reactive(new Set<number>())
+const allServersSelected = computed(() =>
+  servers.value.length > 0 && servers.value.every(s => selectedServers.has(s.id))
+)
+function toggleSelectAllServers() {
+  if (allServersSelected.value) servers.value.forEach(s => selectedServers.delete(s.id))
+  else servers.value.forEach(s => selectedServers.add(s.id))
+}
+function toggleSelectServer(id: number) {
+  if (selectedServers.has(id)) selectedServers.delete(id)
+  else selectedServers.add(id)
+}
+async function delSelectedServers() {
+  const ids = [...selectedServers]
+  const ok = await confirm({
+    title: 'Eliminar servidores',
+    message: `Elimina ${ids.length} servidor${ids.length === 1 ? '' : 'es'} y todos sus mapeos IOA en cascada.`,
+    variant: 'danger',
+    confirmText: `Eliminar ${ids.length}`,
+  })
+  if (!ok) return
+  try {
+    await Promise.all(ids.map(id => api.delete(`/iec104-servers/${id}`)))
+    ids.forEach(id => selectedServers.delete(id))
+    await reload()
+    toast.success(`${ids.length} servidor${ids.length === 1 ? '' : 'es'} eliminado${ids.length === 1 ? '' : 's'}`)
+  } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
+}
+
+// ── Multi-select: mappings ───────────────────────────────────────────────────
+const selectedMappings = reactive(new Set<number>())
+function mappingsAllSelectedForServer(serverId: number) {
+  const rows = mappingsForServer(serverId)
+  return rows.length > 0 && rows.every(m => selectedMappings.has(m.id))
+}
+function toggleSelectAllMappingsForServer(serverId: number) {
+  const rows = mappingsForServer(serverId)
+  if (mappingsAllSelectedForServer(serverId)) rows.forEach(m => selectedMappings.delete(m.id))
+  else rows.forEach(m => selectedMappings.add(m.id))
+}
+function toggleSelectMapping(id: number) {
+  if (selectedMappings.has(id)) selectedMappings.delete(id)
+  else selectedMappings.add(id)
+}
+async function delSelectedMappings() {
+  const ids = [...selectedMappings]
+  const ok = await confirm({
+    title: 'Eliminar mapeos',
+    message: `Elimina ${ids.length} mapeo${ids.length === 1 ? '' : 's'} IOA seleccionado${ids.length === 1 ? '' : 's'}.`,
+    variant: 'danger',
+    confirmText: `Eliminar ${ids.length}`,
+  })
+  if (!ok) return
+  try {
+    await Promise.all(ids.map(id => api.delete(`/mappings/${id}`)))
+    ids.forEach(id => selectedMappings.delete(id))
+    await reloadMappings()
+    toast.success(`${ids.length} mapeo${ids.length === 1 ? '' : 's'} eliminado${ids.length === 1 ? '' : 's'}`)
+  } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
+}
 
 const servers = ref<IEC104Server[]>([])
 const loading = ref(false)
@@ -166,7 +231,193 @@ async function del(s: IEC104Server) {
   } catch (e: any) { toast.error(e?.response?.data?.error ?? t.common.error) }
 }
 
-onMounted(() => { loadGateway(); reload() })
+// ── IOA Mapping section (Menu 3) ──────────────────────────────────────────────
+// Provides a compact view: pick a gateway_signal → assign IOA + IEC-104 type.
+// The full signal mapper (/mappings) is still available for power users.
+
+const mappings = ref<SignalMapping[]>([])
+const gatewaySignals = ref<GatewaySignal[]>([])
+const topics = ref<Topic[]>([])
+const devices = ref<Device[]>([])
+
+const IEC_TYPES = [
+  'M_ME_TF_1', 'M_ME_NC_1', 'M_ME_NA_1', 'M_ME_NB_1',
+  'M_SP_NA_1', 'M_SP_TB_1', 'M_DP_NA_1', 'M_IT_NA_1', 'M_IT_TB_1',
+]
+
+const mapDialogOpen = ref(false)
+
+interface MapDraft {
+  id: number
+  server_id: number
+  topic_id: number
+  signal_id: number | null
+  json_key: string
+  metric_name: string
+  iec104_type: string
+  ioa: number
+  scale: number
+  unit: string
+  enabled: boolean
+  device_name: string
+  variable_type: string
+  characteristic: string
+  quality_key: string
+  business: string
+  company: string
+  deadband_abs: number
+  deadband_pct: number
+}
+const editingMap = reactive<MapDraft>({
+  id: 0, server_id: 0, topic_id: 0, signal_id: null,
+  json_key: '', metric_name: '', iec104_type: 'M_ME_TF_1', ioa: 0,
+  scale: 1.0, unit: '', enabled: true, device_name: '',
+  variable_type: '', characteristic: '', quality_key: '',
+  business: '', company: '', deadband_abs: 0, deadband_pct: 0,
+})
+const isEditMap = computed(() => editingMap.id > 0)
+
+// unassigned gateway_signals: those not yet mapped on the selected server
+const unassignedSignals = computed(() => {
+  const mappedSigIDs = new Set(
+    mappings.value
+      .filter(m => m.server_id === editingMap.server_id && m.signal_id)
+      .map(m => m.signal_id)
+  )
+  return gatewaySignals.value.filter(s => !mappedSigIDs.has(s.id) || s.id === editingMap.signal_id)
+})
+
+function suggestIOA(serverId: number, currentID = 0) {
+  const used = mappings.value
+    .filter(m => m.server_id === serverId && m.id !== currentID)
+    .map(m => m.ioa)
+  return (used.reduce((m, x) => Math.max(m, x), 16384)) + 1
+}
+
+function openEditMap(m: SignalMapping) {
+  sigSearch.value = ''
+  Object.assign(editingMap, {
+    id: m.id,
+    server_id: m.server_id,
+    topic_id: m.topic_id,
+    signal_id: m.signal_id ?? null,
+    json_key: m.json_key,
+    metric_name: m.metric_name,
+    iec104_type: m.iec104_type,
+    ioa: m.ioa,
+    scale: m.scale,
+    unit: m.unit,
+    enabled: m.enabled,
+    device_name: m.device_name,
+    variable_type: m.variable_type,
+    characteristic: m.characteristic,
+    quality_key: m.quality_key,
+    business: m.business,
+    company: m.company,
+    deadband_abs: m.deadband_abs,
+    deadband_pct: m.deadband_pct,
+  })
+  mapDialogOpen.value = true
+}
+
+function openCreateMap(serverId: number) {
+  sigSearch.value = ''
+  Object.assign(editingMap, {
+    id: 0, server_id: serverId, topic_id: 0, signal_id: null,
+    json_key: '', metric_name: '', iec104_type: 'M_ME_TF_1',
+    ioa: suggestIOA(serverId), scale: 1.0, unit: '', enabled: true,
+    device_name: '', variable_type: '', characteristic: '',
+    quality_key: '', business: '', company: '', deadband_abs: 0, deadband_pct: 0,
+  })
+  mapDialogOpen.value = true
+}
+
+function selectSignalForMap(sig: GatewaySignal) {
+  editingMap.signal_id = sig.id
+  editingMap.topic_id = sig.topic_id
+  if (!editingMap.json_key) editingMap.json_key = sig.json_key
+  if (!editingMap.metric_name) editingMap.metric_name = sig.metric_name
+  if (!editingMap.unit) editingMap.unit = sig.unit
+  if (editingMap.scale === 1.0) editingMap.scale = sig.scale
+  if (!editingMap.variable_type) editingMap.variable_type = sig.variable_type
+}
+
+async function saveMap() {
+  if (!editingMap.server_id) { toast.error('Servidor IEC-104 requerido'); return }
+  if (!editingMap.topic_id && !editingMap.signal_id) { toast.error('Señal o tópico requerido'); return }
+  if (!editingMap.iec104_type) { toast.error('Tipo IEC-104 requerido'); return }
+  if (!editingMap.ioa || editingMap.ioa <= 0) { toast.error('IOA debe ser positivo'); return }
+  try {
+    if (isEditMap.value) {
+      await api.put(`/mappings/${editingMap.id}`, editingMap)
+      toast.success(`Mapeo IOA ${editingMap.ioa} actualizado`)
+    } else {
+      await api.post('/mappings', editingMap)
+      toast.success(`Mapeo IOA ${editingMap.ioa} creado`)
+    }
+    mapDialogOpen.value = false
+    await reloadMappings()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error ?? e?.message ?? 'Error')
+  }
+}
+
+async function delMap(m: SignalMapping) {
+  if (!await confirm({
+    title: 'Eliminar mapeo',
+    message: `Elimina el punto IOA ${m.ioa} del servidor. Los datos en caché persisten hasta reinicio.`,
+    detail: `IOA ${m.ioa} · ${m.iec104_type}`,
+    variant: 'danger',
+    confirmText: 'Eliminar',
+  })) return
+  try {
+    await api.delete(`/mappings/${m.id}`)
+    await reloadMappings()
+    toast.success('Eliminado')
+  } catch (e: any) { toast.error(e?.response?.data?.error ?? 'Error') }
+}
+
+function mappingsForServer(serverId: number) {
+  return mappings.value.filter(m => m.server_id === serverId).sort((a, b) => a.ioa - b.ioa)
+}
+
+async function reloadMappings() {
+  const [mg, gs, tp, dv] = await Promise.all([
+    api.get<SignalMapping[]>('/mappings'),
+    api.get<GatewaySignal[]>('/gateway-signals'),
+    api.get<Topic[]>('/topics'),
+    api.get<Device[]>('/devices'),
+  ])
+  mappings.value = mg.data ?? []
+  gatewaySignals.value = gs.data ?? []
+  topics.value = tp.data ?? []
+  devices.value = dv.data ?? []
+}
+
+const signalById = computed(() => Object.fromEntries(gatewaySignals.value.map(s => [s.id, s])))
+const topicById  = computed(() => Object.fromEntries(topics.value.map(t => [t.id, t])))
+
+// ── Signal combobox (replaces dropdown for scalability) ──────────────────────
+const sigSearch = ref('')
+
+const filteredSignals = computed(() => {
+  const q = sigSearch.value.trim().toLowerCase()
+  const list = unassignedSignals.value
+  if (!q) return list.slice(0, 60)
+  return list.filter(s => {
+    const topic = topicById.value[s.topic_id]
+    return [s.name, s.json_key, s.metric_name, s.unit, s.variable_type, topic?.topic ?? '']
+      .some(v => v.toLowerCase().includes(q))
+  }).slice(0, 60)
+})
+
+function clearSignalMap() {
+  editingMap.signal_id = null
+  editingMap.topic_id  = 0
+  sigSearch.value      = ''
+}
+
+onMounted(() => { loadGateway(); reload(); reloadMappings() })
 
 function runtimeOf(id: number) {
   return status.value?.iec104.servers.find(s => s.id === id)
@@ -334,6 +585,14 @@ function chips(csv: string): string[] { return parseIPs(csv) }
           </CardDescription>
         </div>
         <div class="flex items-center gap-2">
+          <Button
+            v-if="selectedServers.size > 0"
+            size="sm" variant="destructive"
+            class="rounded-sm h-8 text-xs"
+            @click="delSelectedServers"
+          >
+            <Trash2 class="h-3.5 w-3.5 mr-1" /> Eliminar ({{ selectedServers.size }})
+          </Button>
           <Button variant="outline" @click="reload" class="rounded-sm">
             <RefreshCw class="h-4 w-4 mr-2" /> {{ t.common.reload }}
           </Button>
@@ -463,6 +722,15 @@ function chips(csv: string): string[] { return parseIPs(csv) }
         <Table>
           <TableHeader>
             <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)]">
+              <TableHead class="w-10 pl-4">
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 rounded-sm border border-border cursor-pointer accent-[color:var(--epm-bosque)]"
+                  :checked="allServersSelected"
+                  :indeterminate="selectedServers.size > 0 && !allServersSelected"
+                  @change="toggleSelectAllServers"
+                />
+              </TableHead>
               <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.iec104.name }}</TableHead>
               <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.iec104.port }}</TableHead>
               <TableHead class="text-[10px] uppercase tracking-[0.2em] font-bold">{{ t.iec104.asduAddr }}</TableHead>
@@ -475,7 +743,19 @@ function chips(csv: string): string[] { return parseIPs(csv) }
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="s in servers" :key="s.id" class="data-row border-b border-border/60">
+            <TableRow
+              v-for="s in servers" :key="s.id"
+              class="data-row border-b border-border/60"
+              :class="selectedServers.has(s.id) ? 'bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]' : ''"
+            >
+              <TableCell class="pl-4">
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 rounded-sm border border-border cursor-pointer accent-[color:var(--epm-bosque)]"
+                  :checked="selectedServers.has(s.id)"
+                  @change="toggleSelectServer(s.id)"
+                />
+              </TableCell>
               <TableCell class="font-semibold">{{ s.name || '—' }}</TableCell>
               <TableCell class="font-mono text-xs">{{ s.port }}</TableCell>
               <TableCell class="font-mono text-xs font-bold text-[color:var(--epm-bosque)]">{{ s.asdu_addr }}</TableCell>
@@ -507,7 +787,7 @@ function chips(csv: string): string[] { return parseIPs(csv) }
               </TableCell>
             </TableRow>
             <TableRow v-if="!servers.length">
-              <TableCell colspan="7" class="text-center text-muted-foreground py-8">
+              <TableCell colspan="8" class="text-center text-muted-foreground py-8">
                 Sin servidores. Haga clic en "{{ t.iec104.addServer }}" para agregar uno.
               </TableCell>
             </TableRow>
@@ -516,5 +796,245 @@ function chips(csv: string): string[] { return parseIPs(csv) }
         </div>
       </CardContent>
     </Card>
+
+    <!-- ── IOA Mapping table (per server) ─────────────────────────────────── -->
+    <div v-if="servers.length" class="space-y-4">
+      <div class="flex items-center gap-3 pb-2 border-b border-border">
+        <Layers class="h-5 w-5 text-[color:var(--epm-bosque)]" />
+        <div>
+          <h2 class="font-bold text-lg">Mapeo IOA → Señal</h2>
+          <p class="text-xs text-muted-foreground">Asigna señales SSFV a Information Object Addresses en cada servidor.</p>
+        </div>
+      </div>
+
+      <div v-for="srv in servers" :key="`map:${srv.id}`" class="card-soft overflow-hidden">
+        <div class="flex items-center gap-3 px-4 py-3 border-b border-border bg-muted/20">
+          <Server class="h-4 w-4 text-[color:var(--epm-bosque)]" />
+          <span class="font-bold text-sm flex-1">{{ srv.name || `Server #${srv.id}` }}</span>
+          <span class="font-mono text-xs text-muted-foreground">:{{ srv.port }} · ASDU {{ srv.asdu_addr }}</span>
+          <Button
+            v-if="selectedMappings.size > 0 && mappingsForServer(srv.id).some(m => selectedMappings.has(m.id))"
+            size="sm" variant="destructive"
+            class="rounded-sm text-xs h-7"
+            @click="delSelectedMappings"
+          >
+            <Trash2 class="h-3.5 w-3.5 mr-1" />
+            Eliminar ({{ mappingsForServer(srv.id).filter(m => selectedMappings.has(m.id)).length }})
+          </Button>
+          <Button size="sm" variant="outline" class="rounded-sm text-xs h-7" @click="openCreateMap(srv.id)">
+            <Plus class="h-3.5 w-3.5 mr-1" /> Agregar mapeo
+          </Button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow class="bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]">
+                <TableHead class="w-10 pl-3">
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 rounded-sm border border-border cursor-pointer accent-[color:var(--epm-bosque)]"
+                    :checked="mappingsAllSelectedForServer(srv.id)"
+                    :indeterminate="mappingsForServer(srv.id).some(m => selectedMappings.has(m.id)) && !mappingsAllSelectedForServer(srv.id)"
+                    @change="toggleSelectAllMappingsForServer(srv.id)"
+                  />
+                </TableHead>
+                <TableHead class="w-16 text-[10px] uppercase tracking-[0.18em] font-bold">IOA</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">Señal</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">Clave / Métrica</TableHead>
+                <TableHead class="text-[10px] uppercase tracking-[0.18em] font-bold">IEC-104 tipo</TableHead>
+                <TableHead class="text-right text-[10px] uppercase tracking-[0.18em] font-bold">Escala</TableHead>
+                <TableHead class="w-14 text-[10px] uppercase tracking-[0.18em] font-bold">On</TableHead>
+                <TableHead class="w-16 text-right text-[10px] uppercase tracking-[0.18em] font-bold">Acc.</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow v-if="!mappingsForServer(srv.id).length">
+                <TableCell colspan="8" class="text-center text-muted-foreground py-4 text-xs italic">
+                  Sin mapeos en este servidor. Haz clic en "Agregar mapeo".
+                </TableCell>
+              </TableRow>
+              <TableRow
+                v-for="m in mappingsForServer(srv.id)"
+                :key="m.id"
+                class="data-row border-b border-border/40 last:border-b-0"
+                :class="selectedMappings.has(m.id) ? 'bg-[color:color-mix(in_srgb,var(--epm-citrico)_6%,transparent)]' : ''"
+              >
+                <TableCell class="pl-3">
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 rounded-sm border border-border cursor-pointer accent-[color:var(--epm-bosque)]"
+                    :checked="selectedMappings.has(m.id)"
+                    @change="toggleSelectMapping(m.id)"
+                  />
+                </TableCell>
+                <TableCell class="font-mono font-bold text-[color:var(--epm-bosque)]">{{ m.ioa }}</TableCell>
+                <TableCell>
+                  <div class="text-xs font-medium">
+                    {{ m.signal_id && signalById[m.signal_id] ? signalById[m.signal_id].name : m.device_name || '—' }}
+                  </div>
+                  <div v-if="m.signal_id" class="flex items-center gap-1 mt-0.5">
+                    <Database class="h-2.5 w-2.5 text-muted-foreground" />
+                    <span class="text-[10px] text-muted-foreground">
+                      {{ signalById[m.signal_id]?.persist_to_db ? 'persistida' : 'solo reenvío' }}
+                    </span>
+                  </div>
+                </TableCell>
+                <TableCell class="font-mono text-xs">
+                  <template v-if="m.metric_name">
+                    <span class="text-blue-600 dark:text-blue-400">{{ m.metric_name }}</span>
+                    <span class="text-[10px] text-muted-foreground ml-1">spB</span>
+                  </template>
+                  <template v-else>{{ m.json_key }}</template>
+                </TableCell>
+                <TableCell>
+                  <span class="inline-flex items-center rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[color:color-mix(in_srgb,var(--epm-citrico)_22%,transparent)] text-[color:var(--epm-bosque)]">
+                    {{ m.iec104_type }}
+                  </span>
+                </TableCell>
+                <TableCell class="text-right font-mono text-xs tabular-nums">{{ m.scale }}</TableCell>
+                <TableCell>
+                  <Switch :model-value="m.enabled" @update:model-value="() => api.put(`/mappings/${m.id}`, {...m, enabled: !m.enabled}).then(reloadMappings)" />
+                </TableCell>
+                <TableCell class="text-right whitespace-nowrap">
+                  <Button variant="ghost" size="icon" @click="openEditMap(m)">
+                    <Pencil class="h-4 w-4" />
+                  </Button>
+                  <Button variant="ghost" size="icon" @click="delMap(m)" class="text-[color:var(--destructive)]">
+                    <Trash2 class="h-4 w-4" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mapping dialog -->
+    <Dialog v-model:open="mapDialogOpen">
+      <DialogContent class="!max-w-lg sm:!max-w-xl p-0 overflow-hidden">
+        <div class="px-6 pt-6 pb-4 border-b border-border bg-[color:color-mix(in_srgb,var(--epm-citrico)_8%,transparent)]">
+          <DialogHeader class="text-left space-y-1">
+            <DialogTitle class="text-lg font-extrabold tracking-tight flex items-center gap-2">
+              <Layers class="h-4 w-4 text-[color:var(--epm-bosque)]" />
+              {{ isEditMap ? `Editar mapeo IOA ${editingMap.ioa}` : 'Nuevo mapeo IOA' }}
+            </DialogTitle>
+            <DialogDescription class="text-xs">
+              Selecciona una señal SSFV (Paso 2) y asígnale un Information Object Address en el servidor IEC-104.
+            </DialogDescription>
+          </DialogHeader>
+        </div>
+
+        <div class="px-6 py-5 grid grid-cols-6 gap-x-4 gap-y-3">
+          <!-- Signal combobox — search-driven, scales to any number of signals -->
+          <div class="col-span-6 space-y-1.5">
+            <Label>Señal SSFV <span class="text-muted-foreground font-normal text-[10px]">(del Paso 2)</span></Label>
+
+            <!-- Selected chip -->
+            <div
+              v-if="editingMap.signal_id && signalById[editingMap.signal_id]"
+              class="flex items-center gap-2 rounded-sm border border-[color:var(--epm-bosque)] bg-[color:color-mix(in_srgb,var(--epm-bosque)_6%,transparent)] px-3 py-2"
+            >
+              <Layers class="h-3.5 w-3.5 text-[color:var(--epm-bosque)] shrink-0" />
+              <div class="flex-1 min-w-0">
+                <span class="font-semibold text-sm">{{ signalById[editingMap.signal_id].name }}</span>
+                <span class="ml-2 font-mono text-[10px] text-muted-foreground">
+                  {{ signalById[editingMap.signal_id].json_key || signalById[editingMap.signal_id].metric_name }}
+                </span>
+              </div>
+              <span v-if="signalById[editingMap.signal_id].persist_to_db"
+                    class="text-[9px] font-bold uppercase tracking-wider text-[color:var(--epm-bosque)] shrink-0">
+                TSDB
+              </span>
+              <button type="button" class="text-muted-foreground hover:text-foreground shrink-0" @click="clearSignalMap">
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            <!-- Search + list (shown when no signal selected) -->
+            <div v-else class="space-y-1">
+              <div class="relative">
+                <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                <Input
+                  v-model="sigSearch"
+                  placeholder="Buscar señal por nombre, clave, tópico…"
+                  class="pl-8 font-mono text-xs rounded-sm"
+                />
+              </div>
+              <div class="border border-border rounded-sm max-h-44 overflow-y-auto divide-y divide-border/40 bg-card">
+                <div v-if="!filteredSignals.length" class="px-3 py-4 text-xs text-muted-foreground text-center italic">
+                  {{ unassignedSignals.length === 0
+                    ? 'Sin señales disponibles — crea señales en el Paso 2.'
+                    : 'Sin coincidencias para "' + sigSearch + '".' }}
+                </div>
+                <button
+                  v-for="sg in filteredSignals"
+                  :key="sg.id"
+                  type="button"
+                  class="w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-muted/60 transition-colors"
+                  @click="selectSignalForMap(sg)"
+                >
+                  <div class="flex-1 min-w-0">
+                    <div class="font-semibold text-xs truncate">{{ sg.name }}</div>
+                    <div class="font-mono text-[10px] text-muted-foreground truncate">
+                      {{ sg.json_key || sg.metric_name }}
+                      <span class="ml-1 text-[color:var(--epm-bosque)]/60">
+                        · {{ topicById[sg.topic_id]?.topic.split('/').slice(-2).join('/') ?? `#${sg.topic_id}` }}
+                      </span>
+                    </div>
+                  </div>
+                  <span v-if="sg.persist_to_db"
+                        class="shrink-0 text-[9px] font-bold uppercase tracking-wider text-[color:var(--epm-bosque)]">
+                    TSDB
+                  </span>
+                </button>
+              </div>
+              <p class="text-[10px] text-muted-foreground">
+                {{ filteredSignals.length }} de {{ unassignedSignals.length }} señal{{ unassignedSignals.length === 1 ? '' : 'es' }} disponible{{ unassignedSignals.length === 1 ? '' : 's' }}
+              </p>
+            </div>
+          </div>
+
+          <!-- IEC-104 type + IOA -->
+          <div class="col-span-4 space-y-1.5">
+            <Label>Tipo IEC-104</Label>
+            <Select v-model="editingMap.iec104_type">
+              <SelectTrigger class="w-full font-mono text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="tp in IEC_TYPES" :key="tp" :value="tp" class="font-mono text-xs">{{ tp }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div class="col-span-2 space-y-1.5">
+            <Label>IOA</Label>
+            <Input v-model.number="editingMap.ioa" type="number" class="font-mono" />
+          </div>
+
+          <!-- Scale + unit -->
+          <div class="col-span-3 space-y-1.5">
+            <Label>Escala</Label>
+            <Input v-model.number="editingMap.scale" type="number" step="0.001" />
+          </div>
+          <div class="col-span-3 space-y-1.5">
+            <Label>Unidad</Label>
+            <Input v-model="editingMap.unit" placeholder="kW, A…" />
+          </div>
+
+          <!-- Enabled -->
+          <div class="col-span-6 flex items-center gap-3">
+            <Switch id="mapenabled" v-model="editingMap.enabled" />
+            <Label for="mapenabled">Habilitado</Label>
+          </div>
+        </div>
+
+        <DialogFooter class="px-6 pb-6 pt-4 border-t border-border">
+          <Button variant="outline" @click="mapDialogOpen = false" class="rounded-sm">Cancelar</Button>
+          <Button @click="saveMap" class="bg-[color:var(--epm-bosque)] hover:bg-[color:var(--epm-bosque-deep)] text-white rounded-sm">
+            {{ isEditMap ? 'Guardar' : 'Crear mapeo' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

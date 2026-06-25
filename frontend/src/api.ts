@@ -5,6 +5,55 @@ export const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+// Inject Bearer token from localStorage on every request.
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('gw:access')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+// On 401: attempt a silent token refresh, then retry once.
+// If refresh fails, clear auth state and redirect to /login.
+let _refreshing: Promise<boolean> | null = null
+api.interceptors.response.use(
+  r => r,
+  async err => {
+    const status = err.response?.status
+    const isAuthRoute = err.config?.url?.includes('/auth/login') ||
+                        err.config?.url?.includes('/auth/refresh')
+    if (status === 401 && !isAuthRoute && !err.config?._retry) {
+      err.config._retry = true
+      if (!_refreshing) {
+        _refreshing = (async () => {
+          const sid = localStorage.getItem('gw:session')
+          const rt  = localStorage.getItem('gw:refresh')
+          if (!sid || !rt) return false
+          try {
+            const { data } = await api.post('/auth/refresh', {
+              session_id: sid, refresh_token: rt,
+            })
+            localStorage.setItem('gw:access', data.access_token)
+            return true
+          } catch {
+            return false
+          } finally {
+            _refreshing = null
+          }
+        })()
+      }
+      const ok = await _refreshing
+      if (ok) {
+        err.config.headers.Authorization = `Bearer ${localStorage.getItem('gw:access')}`
+        return api(err.config)
+      }
+      // Refresh failed — wipe tokens and send user to login.
+      ;['gw:access', 'gw:refresh', 'gw:session'].forEach(k => localStorage.removeItem(k))
+      window.location.href = '/login'
+    }
+    return Promise.reject(err)
+  }
+)
+
 export interface Device {
   id: number
   server_id: number
@@ -19,6 +68,26 @@ export interface Topic {
   topic: string
   qos: number
   enabled: boolean
+  payload_format: string  // 'json' | 'sparkplug'
+}
+
+// GatewaySignal = normalisation layer (Menu 2). One logical measurement per topic stream.
+// persist_to_db=true records values to local SQLite history; signal_mappings row
+// (signal_id FK) exposes it via IEC-104 (Menu 3).
+export interface GatewaySignal {
+  id: number
+  topic_id: number
+  name: string
+  json_key: string
+  metric_name: string
+  quality_key: string
+  variable_type: string
+  characteristic: string
+  unit: string
+  scale: number
+  persist_to_db: boolean
+  enabled: boolean
+  created_at?: string
 }
 
 export interface MQTTConfig {
@@ -64,6 +133,7 @@ export interface SignalMapping {
   id: number
   server_id: number
   topic_id: number
+  signal_id: number | null  // links to gateway_signals row (Menu 2 → Menu 3 workflow)
   device_name: string
   variable_type: string
   characteristic: string
@@ -77,6 +147,8 @@ export interface SignalMapping {
   enabled: boolean
   business: string
   company: string
+  deadband_abs: number
+  deadband_pct: number
 }
 
 export interface History {
@@ -150,14 +222,6 @@ export interface TSDBTestResult {
   message: string
 }
 
-export interface NATSConfig {
-  id: number
-  host: string
-  port: number
-  stream_name: string
-  enabled: boolean
-}
-
 // ─── SSFV (Sistemas Solares Fotovoltaicos) ────────────────────────────────────
 
 export interface SSFVStatus {
@@ -179,6 +243,11 @@ export interface SSFVPlanta {
   capacidad_kWp?: number
   fecha_comisionamiento?: string
   estado: number
+  // Fleet stats (read-only, computed by GET /ssfv/plantas)
+  n_equipos?: number
+  n_senales?: number
+  n_alarmas?: number
+  ultima_lectura?: string | null
 }
 
 export interface SSFVEquipo {
@@ -191,6 +260,14 @@ export interface SSFVEquipo {
   modelo?: string
   nro_serie?: string
   estado: number
+  // device-reported hardware identity (ICR edges, auto-populated from Device/* metrics)
+  hw_part_number?: string
+  hw_product_type?: string
+  hw_product_name?: string
+  hw_firmware?: string
+  hw_serial?: string
+  hw_uuid?: string
+  hw_reported_at?: string
   // joined
   tipo_nombre?: string
   planta_nombre?: string
@@ -236,6 +313,77 @@ export interface SSFVFrontera {
   planta_nombre?: string
 }
 
+export interface SSFVTipoEquipo {
+  tipo_id?: number
+  nombre: string
+  descripcion?: string
+  activo: boolean
+}
+
+export interface SSFVTipoVariable {
+  tipovar_id?: number
+  nombre: string
+  descripcion?: string
+  activo: boolean
+}
+
+export interface SSFVUnidad {
+  unidad_id?: number
+  simbolo: string
+  nombre: string
+  magnitud: string
+  activo: boolean
+}
+
+export interface SSFVSenalXTipo {
+  senaltipo_id?: number
+  senal_id: number
+  tipo_id: number
+  num_canales: number
+  // joined
+  senal_nombre?: string
+  codigo_senal?: string
+  tipo_nombre?: string
+}
+
+export interface SSFVMissedSignal {
+  signal_path: string
+  count: number
+  last_seen: string
+}
+
 export interface SSFVCatalogItem {
   [key: string]: unknown
+}
+
+// ─── Auth / User Management ───────────────────────────────────────────────────
+
+export interface User {
+  id: number
+  username: string
+  email: string
+  full_name: string
+  role: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+// ── SSFV → IEC-104 mirror link ────────────────────────────────────────────────
+// A plant's association to one IEC-104 server. When linked, the plant's SSFV
+// signals are mirrored as IEC-104 points on that server; deleting the plant (or
+// the link) removes the mirrors. SSFV is the principal, IEC-104 the dependent.
+export interface PlantaIEC104Link {
+  planta_id: number
+  linked: boolean
+  server_id: number
+  mirror_count: number
+}
+
+// Result of linking a plant (or otherwise mirroring signals): the mappings
+// created and any signals skipped (already mirrored / unmappable).
+export interface IEC104MirrorResult {
+  server_id: number
+  created: SignalMapping[]
+  skipped: string[] | null
 }

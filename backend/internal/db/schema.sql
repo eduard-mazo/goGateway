@@ -24,19 +24,48 @@ CREATE TABLE IF NOT EXISTS mqtt_config (
     sparkplug_enabled INTEGER NOT NULL DEFAULT 0,
     sp_group_id       TEXT    NOT NULL DEFAULT 'goGateway',
     sp_host_id        TEXT    NOT NULL DEFAULT 'goGateway-host',
-    sp_topics         TEXT    NOT NULL DEFAULT ''
+    sp_topics         TEXT    NOT NULL DEFAULT '',
+    qos               INTEGER NOT NULL DEFAULT 1,
+    tls_ca_file       TEXT    NOT NULL DEFAULT '',
+    tls_cert_file     TEXT    NOT NULL DEFAULT '',
+    tls_key_file      TEXT    NOT NULL DEFAULT '',
+    tls_insecure      INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO mqtt_config (id) VALUES (1);
 
 CREATE TABLE IF NOT EXISTS topics (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    topic     TEXT NOT NULL,
-    qos       INTEGER NOT NULL DEFAULT 0,
-    enabled   INTEGER NOT NULL DEFAULT 1,
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id      INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    topic          TEXT NOT NULL,
+    qos            INTEGER NOT NULL DEFAULT 0,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    payload_format TEXT NOT NULL DEFAULT 'json'
+                   CHECK (payload_format IN ('json','sparkplug')),
     UNIQUE (device_id, topic)
 );
 CREATE INDEX IF NOT EXISTS idx_topics_enabled ON topics(enabled);
+
+-- gateway_signals: the normalisation layer between inbound MQTT streams and
+-- outbound IEC-104 points.  One row per logical signal extracted from a topic.
+-- persist_to_db=1 tells the SSFV adapter to record values in the SQLite history
+-- table; persist_to_db=0 means values are forwarded to IEC-104 only (stateless).
+CREATE TABLE IF NOT EXISTS gateway_signals (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id       INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    json_key       TEXT NOT NULL DEFAULT '',
+    metric_name    TEXT NOT NULL DEFAULT '',
+    quality_key    TEXT NOT NULL DEFAULT '',
+    variable_type  TEXT NOT NULL DEFAULT '',
+    characteristic TEXT NOT NULL DEFAULT '',
+    unit           TEXT NOT NULL DEFAULT '',
+    scale          REAL NOT NULL DEFAULT 1.0,
+    persist_to_db  INTEGER NOT NULL DEFAULT 0,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (topic_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_gateway_signals_topic ON gateway_signals(topic_id);
 
 -- IEC 60870-5-104 gateway-wide settings. Singleton (id=1). The listen_ip is
 -- the IP this host binds on for ALL slave endpoints; SCADA masters connect to
@@ -78,14 +107,19 @@ DROP TABLE IF EXISTS iec104_config;
 -- ASDU address space. Worker dispatch routes every MQTT sample to the single
 -- server pinned by server_id; GI from a SCADA master returns only that
 -- server's slice of the point set.
+-- signal_mappings: each row is a point on ONE specific IEC-104 slave endpoint.
+-- signal_id (nullable) links to a gateway_signals row when the signal was
+-- defined via the 4-menu workflow (Menu 2 → Menu 3). Legacy rows created
+-- directly (json_key / metric_name without a gateway_signal) keep signal_id NULL.
 CREATE TABLE IF NOT EXISTS signal_mappings (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     server_id      INTEGER NOT NULL REFERENCES iec104_servers(id) ON DELETE CASCADE,
     topic_id       INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    signal_id      INTEGER REFERENCES gateway_signals(id) ON DELETE SET NULL,
     device_name    TEXT DEFAULT '',
     variable_type  TEXT DEFAULT '',
     characteristic TEXT DEFAULT '',
-    json_key       TEXT NOT NULL,
+    json_key       TEXT NOT NULL DEFAULT '',
     quality_key    TEXT NOT NULL DEFAULT '',
     metric_name    TEXT NOT NULL DEFAULT '',
     iec104_type    TEXT NOT NULL,
@@ -95,21 +129,36 @@ CREATE TABLE IF NOT EXISTS signal_mappings (
     enabled        INTEGER NOT NULL DEFAULT 1,
     business       TEXT NOT NULL DEFAULT '',
     company        TEXT NOT NULL DEFAULT '',
+    -- Deadbanding: suppress dispatches smaller than the configured threshold.
+    -- deadband_abs is an absolute engineering-unit delta; deadband_pct is a
+    -- fraction of the last dispatched value (0.01 = 1 %).  The stricter of
+    -- the two wins.  Zero means disabled for that mode.
+    deadband_abs   REAL NOT NULL DEFAULT 0.0,
+    deadband_pct   REAL NOT NULL DEFAULT 0.0,
+    -- SSFV linkage: when this mapping mirrors an SSFV catalog signal, these
+    -- reference the source planta/equipo/asignación so deleting the SSFV side
+    -- cascade-deletes the mirror. 0 = a standalone (non-SSFV) mapping.
+    ssfv_planta_id    INTEGER NOT NULL DEFAULT 0,
+    ssfv_equipo_id    INTEGER NOT NULL DEFAULT 0,
+    ssfv_equisenal_id INTEGER NOT NULL DEFAULT 0,
     UNIQUE (server_id, ioa)
 );
 CREATE INDEX IF NOT EXISTS idx_sigmap_topic ON signal_mappings(topic_id);
 CREATE INDEX IF NOT EXISTS idx_sigmap_server ON signal_mappings(server_id);
+CREATE INDEX IF NOT EXISTS idx_sigmap_ssfv_planta ON signal_mappings(ssfv_planta_id);
+CREATE INDEX IF NOT EXISTS idx_sigmap_ssfv_equipo ON signal_mappings(ssfv_equipo_id);
+CREATE INDEX IF NOT EXISTS idx_sigmap_ssfv_equisenal ON signal_mappings(ssfv_equisenal_id);
 
-CREATE TABLE IF NOT EXISTS history (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    mapping_id  INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
-    signal_path TEXT NOT NULL,
-    value       REAL NOT NULL,
-    quality     INTEGER NOT NULL DEFAULT 0,
-    timestamp   DATETIME NOT NULL
+-- ssfv_iec104_link: a plant's association to one IEC-104 server. When present,
+-- the plant's SSFV signals are auto-mirrored as IEC-104 points on that server
+-- (plants may share a server; IOAs stay unique per server). Removing a plant or
+-- its link removes the mirrors.
+CREATE TABLE IF NOT EXISTS ssfv_iec104_link (
+    planta_id  INTEGER PRIMARY KEY,
+    server_id  INTEGER NOT NULL REFERENCES iec104_servers(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_history_mapping_ts ON history(mapping_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_history_ts ON history(timestamp DESC);
+
 
 CREATE TABLE IF NOT EXISTS tsdb_config (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
@@ -127,11 +176,116 @@ CREATE TABLE IF NOT EXISTS tsdb_config (
 );
 INSERT OR IGNORE INTO tsdb_config(id) VALUES(1);
 
-CREATE TABLE IF NOT EXISTS nats_config (
-    id          INTEGER PRIMARY KEY CHECK (id = 1),
-    host        TEXT    NOT NULL DEFAULT 'localhost',
-    port        INTEGER NOT NULL DEFAULT 4222,
-    stream_name TEXT    NOT NULL DEFAULT 'GOGATEWAY',
-    enabled     INTEGER NOT NULL DEFAULT 0
+-- ─── RBAC ────────────────────────────────────────────────────────────────────
+
+-- users: gateway operator accounts.  Roles: superadmin, operator, viewer.
+-- password_hash stores a bcrypt digest (cost 12); the plaintext is never kept.
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL UNIQUE,
+    password_hash TEXT    NOT NULL,
+    email         TEXT    NOT NULL DEFAULT '',
+    full_name     TEXT    NOT NULL DEFAULT '',
+    role          TEXT    NOT NULL DEFAULT 'viewer'
+                          CHECK (role IN ('superadmin', 'operator', 'viewer')),
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-INSERT OR IGNORE INTO nats_config(id) VALUES(1);
+
+-- sessions: one row per authenticated login event.
+-- id = UUID embedded as the JWT jti claim; revoking the row invalidates all
+-- access tokens issued for that login without invalidating other sessions.
+-- refresh_token_hash stores a bcrypt hash of the raw 256-bit refresh token.
+CREATE TABLE IF NOT EXISTS sessions (
+    id                 TEXT     PRIMARY KEY,
+    user_id            INTEGER  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    refresh_token_hash TEXT     NOT NULL,
+    user_agent         TEXT     NOT NULL DEFAULT '',
+    remote_ip          TEXT     NOT NULL DEFAULT '',
+    expires_at         DATETIME NOT NULL,
+    revoked            INTEGER  NOT NULL DEFAULT 0,
+    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+-- ─── Signal edge compute ─────────────────────────────────────────────────────
+
+-- signal_thresholds: Hi/Lo alarm limits for one signal mapping.
+-- Limit columns are nullable (NULL = that level disabled).
+-- Alarm IOA columns point to existing IEC-104 points that are toggled
+-- (M_SP_TB_1, value=1 when active, value=0 when cleared).
+-- deadband provides hysteresis to prevent chattering near a boundary.
+CREATE TABLE IF NOT EXISTS signal_thresholds (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    mapping_id     INTEGER NOT NULL REFERENCES signal_mappings(id) ON DELETE CASCADE,
+    hh_value       REAL,
+    h_value        REAL,
+    l_value        REAL,
+    ll_value       REAL,
+    hh_alarm_ioa   INTEGER NOT NULL DEFAULT 0,
+    h_alarm_ioa    INTEGER NOT NULL DEFAULT 0,
+    l_alarm_ioa    INTEGER NOT NULL DEFAULT 0,
+    ll_alarm_ioa   INTEGER NOT NULL DEFAULT 0,
+    alarm_server_id INTEGER REFERENCES iec104_servers(id),
+    deadband       REAL    NOT NULL DEFAULT 0.0,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (mapping_id)
+);
+
+-- alarm_events: immutable log of level transitions.
+-- acknowledged / ack_at allow operators to confirm they have seen an alarm.
+CREATE TABLE IF NOT EXISTS alarm_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    mapping_id   INTEGER  NOT NULL REFERENCES signal_mappings(id),
+    level        TEXT     NOT NULL CHECK (level IN ('HH','H','NORMAL','L','LL')),
+    value        REAL     NOT NULL,
+    timestamp    DATETIME NOT NULL,
+    acknowledged INTEGER  NOT NULL DEFAULT 0,
+    ack_at       DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_alarm_events_mapping ON alarm_events(mapping_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_alarm_events_ts      ON alarm_events(timestamp DESC);
+
+-- calculated_signals: virtual IEC-104 points derived from two real IOAs.
+-- operator: '+', '-', '*', '/', 'abs' (unary — operand B columns are ignored).
+-- The result is scaled by `scale` before dispatch.
+-- out_server_id + out_ioa identify the synthesised output point.
+CREATE TABLE IF NOT EXISTS calculated_signals (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT    NOT NULL UNIQUE,
+    operator         TEXT    NOT NULL DEFAULT '*'
+                             CHECK (operator IN ('+','-','*','/','abs')),
+    operand_a_server INTEGER NOT NULL REFERENCES iec104_servers(id),
+    operand_a_ioa    INTEGER NOT NULL,
+    operand_b_server INTEGER REFERENCES iec104_servers(id),
+    operand_b_ioa    INTEGER,
+    scale            REAL    NOT NULL DEFAULT 1.0,
+    out_server_id    INTEGER NOT NULL REFERENCES iec104_servers(id),
+    out_ioa          INTEGER NOT NULL,
+    out_type         TEXT    NOT NULL DEFAULT 'M_ME_NC_1',
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (out_server_id, out_ioa)
+);
+
+-- autodiscovered_entities: Sparkplug B nodes/devices seen on the bus that have
+-- not yet been matched to an SSFV catalog entry. The operator reviews pending
+-- rows and either approves (creating tbl_equipo + tbl_senales_x_equipo) or
+-- rejects. Approved/rejected rows are preserved for auditing; only pending rows
+-- are updated when the same node re-announces itself via NBIRTH/DBIRTH.
+CREATE TABLE IF NOT EXISTS autodiscovered_entities (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id         TEXT    NOT NULL,
+    node_id          TEXT    NOT NULL,
+    device_id        TEXT    NOT NULL DEFAULT '', -- empty for NBIRTH, set for DBIRTH
+    metric_names     TEXT    NOT NULL DEFAULT '[]', -- JSON array of metric name strings
+    metric_meta      TEXT    NOT NULL DEFAULT '[]', -- JSON array of {name,engUnit,tipo_variable,tipo_valor,description}
+    node_properties  TEXT    NOT NULL DEFAULT '{}', -- JSON object from Payload.Properties (entity_type, fiware_entity_id, …)
+    status           TEXT    NOT NULL DEFAULT 'pending'
+                             CHECK (status IN ('pending', 'approved', 'rejected')),
+    first_seen       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (group_id, node_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_autodisc_status ON autodiscovered_entities(status);

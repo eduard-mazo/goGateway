@@ -12,12 +12,12 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"goGateway/internal/api"
+	"goGateway/internal/auth"
 	"goGateway/internal/config"
 	"goGateway/internal/db"
 	"goGateway/internal/iec104"
 	"goGateway/internal/models"
 	"goGateway/internal/mqtt"
-	"goGateway/internal/nats"
 	"goGateway/internal/tsdb"
 	"goGateway/internal/worker"
 )
@@ -31,6 +31,7 @@ func main() {
 		log.Fatalf("db open: %v", err)
 	}
 	log.Printf("sqlite ready: %s", cfg.DBPath)
+	seedDefaultAdmin(database)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -59,37 +60,23 @@ func main() {
 		tsdbMgr.Reload(tsdbCfg)
 	}
 
-	// NATS Fan-out integration.
-	var natsCfg models.NATSConfig
-	if err := database.Get(&natsCfg, `SELECT id,host,port,stream_name,enabled FROM nats_config WHERE id=1`); err != nil {
-		log.Printf("nats: load config: %v", err)
+	// Edge-compute engines (signal filtering, virtual signals, alarms).
+	deadband := worker.NewDeadbandFilter()
+	calcEng := worker.NewCalcEngine(database, iecMgr)
+	threshEng := worker.NewThresholdEngine(database, iecMgr)
+	if err := calcEng.Reload(); err != nil {
+		log.Printf("calc engine: load: %v", err)
 	}
-
-	var natsClient *nats.Client
-	var dispatcher worker.Dispatcher = worker.NewDirectDispatcher(iecMgr, hist)
-
-	if natsCfg.Enabled {
-		natsClient = nats.NewClient(natsCfg)
-		if err := natsClient.Connect(); err != nil {
-			log.Printf("nats: connect error (falling back to direct dispatch): %v", err)
-		} else {
-			dispatcher = worker.NewNatsDispatcher(natsClient, natsCfg.StreamName)
-			// Start NATS workers.
-			scadaWorker := worker.NewSCADAWorker(natsClient, natsCfg.StreamName, iecMgr)
-			go func() {
-				if err := scadaWorker.Run(ctx); err != nil {
-					log.Printf("scada worker: %v", err)
-				}
-			}()
-
-			tsdbWorker := worker.NewTSDBWorker(natsClient, natsCfg.StreamName, hist)
-			go func() {
-				if err := tsdbWorker.Run(ctx); err != nil {
-					log.Printf("tsdb worker: %v", err)
-				}
-			}()
-		}
+	if err := threshEng.Reload(); err != nil {
+		log.Printf("threshold engine: load: %v", err)
 	}
+	go calcEng.Run(ctx)
+	go threshEng.Run(ctx)
+
+	// Decoded samples go straight to IEC-104 + the history logger (which feeds
+	// TimescaleDB), wrapped with edge-compute filtering (deadband/virtual/alarms).
+	dispatcher := worker.NewFilteringDispatcher(
+		worker.NewDirectDispatcher(iecMgr, hist), deadband, calcEng, threshEng)
 
 	histDone := make(chan struct{})
 	go func() {
@@ -112,11 +99,16 @@ func main() {
 		alarmMgr := worker.NewAlarmManager(sa.Pool())
 		ssfvHandler.SetAlarmManager(alarmMgr)
 		ssfvHandler.SetMissFn(sa.RecordMiss)
+		ssfvHandler.SetPool(sa.Pool())
 		if err := ssfvCache.Reload(sa.Pool()); err != nil {
 			log.Printf("ssfv cache reload: %v", err)
 		}
 	}
 	mqttMgr.SetSSFVHandler(ssfvHandler)
+
+	// Auto-discovery: records unknown Sparkplug B nodes/devices in SQLite.
+	autoDisc := worker.NewAutoDiscoveryService(database)
+	mqttMgr.SetAutoDiscovery(autoDisc)
 
 	// Broker monitor — ring buffer + SSE fan-out for the UI monitor view.
 	brokerMon := api.NewBrokerMonitor()
@@ -128,6 +120,7 @@ func main() {
 
 	// REST API.
 	startedAt := time.Now()
+	authCfg := auth.DefaultConfig(cfg.JWTSecret)
 	handler := api.NewRouter(api.Deps{
 		DB:         database,
 		NotifyMQTT: mqttMgr.Notify,
@@ -149,16 +142,15 @@ func main() {
 			if sa := tsdbMgr.SSFVAdapter(); sa != nil {
 				ssfvHandler.SetAlarmManager(worker.NewAlarmManager(sa.Pool()))
 				ssfvHandler.SetMissFn(sa.RecordMiss)
+				ssfvHandler.SetPool(sa.Pool())
 				if err := ssfvCache.Reload(sa.Pool()); err != nil {
 					log.Printf("ssfv: mapping cache reload after tsdb reload: %v", err)
 				}
 			} else {
 				ssfvHandler.SetAlarmManager(nil)
 				ssfvHandler.SetMissFn(nil)
+				ssfvHandler.SetPool(nil)
 			}
-		},
-		NotifyNATS: func() {
-			log.Printf("nats: config changed (restart required to apply)")
 		},
 		NotifySSFV: func() {
 			sa := tsdbMgr.SSFVAdapter()
@@ -173,7 +165,9 @@ func main() {
 		IEC104:    iecMgr,
 		TSDBMgr:   tsdbMgr,
 		BrokerMon: brokerMon,
+		AutoDisc:  autoDisc,
 		StartedAt: startedAt,
+		AuthCfg:   authCfg,
 	})
 
 	srv := &http.Server{
@@ -212,9 +206,6 @@ func main() {
 	mqttMgr.Stop()
 	_ = iecMgr.Stop()
 	tsdbMgr.Stop()
-	if natsClient != nil {
-		natsClient.Close()
-	}
 
 	cancel()
 	select {
@@ -224,6 +215,33 @@ func main() {
 	}
 
 	closeDatabase(database)
+}
+
+// seedDefaultAdmin creates an admin/admin superadmin account if the users table
+// is empty. The operator should change this password immediately after first
+// login — the warning log makes that hard to miss.
+func seedDefaultAdmin(database *sqlx.DB) {
+	var count int
+	if err := database.Get(&count, `SELECT COUNT(*) FROM users`); err != nil {
+		log.Printf("seed: check users: %v", err)
+		return
+	}
+	if count > 0 {
+		return
+	}
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		log.Printf("seed: hash password: %v", err)
+		return
+	}
+	if _, err := database.Exec(
+		`INSERT INTO users (username, password_hash, full_name, role, enabled)
+		 VALUES ('admin', ?, 'Administrador', 'superadmin', 1)`, hash,
+	); err != nil {
+		log.Printf("seed: insert admin: %v", err)
+		return
+	}
+	log.Println("AUTH: default user created — username: admin, password: admin — CHANGE IMMEDIATELY")
 }
 
 // loadIEC104 reloads the manager from DB: gateway-wide listen IP + every

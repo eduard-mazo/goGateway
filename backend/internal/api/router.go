@@ -8,10 +8,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jmoiron/sqlx"
 
+	"goGateway/internal/auth"
 	"goGateway/internal/iec104"
 	"goGateway/internal/mqtt"
 	"goGateway/internal/tsdb"
 	"goGateway/internal/web"
+	"goGateway/internal/worker"
 )
 
 // Deps wire handlers to their notifiers.
@@ -21,21 +23,27 @@ type Deps struct {
 	NotifyIEC104   func() // reload IEC 104 server on cfg change
 	NotifyMappings func() // reload mapping cache on mapping change
 	NotifyTSDB     func() // reload TSDB pipeline on cfg change
-	NotifyNATS     func() // reload NATS/workers on cfg change
 	NotifySSFV     func() // reload worker SSFVMappingCache on catalog change
 
 	MQTT      *mqtt.Manager
 	IEC104    iec104.Server
 	TSDBMgr   *tsdb.Manager
 	BrokerMon *BrokerMonitor
+	AutoDisc  *worker.AutoDiscoveryService
 	StartedAt time.Time
+
+	// AuthCfg configures JWT signing and token lifetimes.
+	// When set, /api/auth/* routes are mounted.
+	// To protect ALL API routes add auth.AuthMiddleware(AuthCfg, sessions)
+	// to the r.Group below.
+	AuthCfg auth.Config
 }
 
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	r.Use(filteredLogger)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMW)
 
@@ -47,7 +55,15 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/broker/stream", d.BrokerMon.ServeStream)
 		}
 
+		// Auth routes (public — no token required for login/refresh).
+		if len(d.AuthCfg.Secret) > 0 {
+			authH := NewAuthHandler(d, d.AuthCfg)
+			r.Route("/auth", authH.Mount)
+		}
+
 		// All other API routes: 30s timeout + 1 MB body limit.
+		// To require authentication for ALL routes uncomment:
+		//   r.Use(auth.AuthMiddleware(d.AuthCfg, auth.NewSessionStore(d.DB)))
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Timeout(30 * time.Second))
 			r.Use(func(next http.Handler) http.Handler {
@@ -63,12 +79,13 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Route("/devices", (&DeviceHandler{DB: d.DB}).Mount)
 			r.Route("/topics", (&TopicHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
+			r.Route("/gateway-signals", (&GatewaySignalHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)
 			r.Route("/mqtt-config", (&MQTTConfigHandler{DB: d.DB, Notify: d.NotifyMQTT}).Mount)
-			r.Route("/nats-config", (&NATSConfigHandler{DB: d.DB, Notify: d.NotifyNATS}).Mount)
 			r.Route("/iec104-gateway", (&IEC104GatewayHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
 			r.Route("/iec104-servers", (&IEC104ServersHandler{DB: d.DB, Notify: d.NotifyIEC104}).Mount)
 			r.Route("/mappings", (&MappingHandler{DB: d.DB, Notify: d.NotifyMappings}).Mount)
 			r.Route("/history", (&HistoryHandler{DB: d.DB}).Mount)
+			r.Route("/sparkplug", (&SparkplugDecodeHandler{}).Mount)
 			r.Route("/status", (&StatusHandler{DB: d.DB, MQTT: d.MQTT, IEC104: d.IEC104, StartedAt: d.StartedAt}).Mount)
 			r.Route("/tsdb-config", (&TSDBConfigHandler{DB: d.DB, Notify: d.NotifyTSDB}).Mount)
 			tsdbH := tsdb.NewHandler(d.TSDBMgr)
@@ -79,6 +96,12 @@ func NewRouter(d Deps) http.Handler {
 
 			ssfvApiH := NewSSFVHandler(d.TSDBMgr)
 			ssfvApiH.SetReloader(d.NotifySSFV)
+			ssfvApiH.SetMappingNotifier(d.NotifyMappings)
+			ssfvApiH.SetDB(d.DB)
+			if d.AutoDisc != nil {
+				// Wire rebirth so operator approval triggers NCMD Rebirth immediately.
+				ssfvApiH.SetRebirthFn(d.AutoDisc.TriggerRebirth)
+			}
 			r.Route("/ssfv", ssfvApiH.Mount)
 		})
 	})
@@ -87,6 +110,19 @@ func NewRouter(d Deps) http.Handler {
 	// Must mount last so /api and /health take precedence.
 	r.Mount("/", web.Handler())
 	return r
+}
+
+// filteredLogger wraps middleware.Logger but suppresses high-frequency
+// polling routes (GET /api/status) that would otherwise flood the console.
+func filteredLogger(next http.Handler) http.Handler {
+	logged := middleware.Logger(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/status" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		logged.ServeHTTP(w, r)
+	})
 }
 
 func corsMW(next http.Handler) http.Handler {
